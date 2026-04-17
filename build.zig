@@ -169,6 +169,7 @@ pub fn build(b: *std.Build) void {
     const raft_linear_tests = b.addTest(.{ .root_module = raft_linear_test_module });
     const run_raft_linear_tests = b.addRunArtifact(raft_linear_tests);
 
+    // Unit tests: pure logic, no simulation harness
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
@@ -177,18 +178,15 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_log_durability_tests.step);
     test_step.dependOn(&run_raft_rpc_tests.step);
     test_step.dependOn(&run_raft_node_tests.step);
-    test_step.dependOn(&run_raft_cluster_tests.step);
-    test_step.dependOn(&run_raft_linear_tests.step);
 
-    // Individual test steps
-    const log_test_step = b.step("log-test", "Run log module tests");
+    // Individual unit test steps
+    const log_test_step = b.step("log-test", "Run log module unit tests");
     log_test_step.dependOn(&run_log_segment_tests.step);
     log_test_step.dependOn(&run_log_manager_tests.step);
     log_test_step.dependOn(&run_log_durability_tests.step);
 
-    const raft_test_step = b.step("raft-test", "Run raft module tests");
-    raft_test_step.dependOn(&run_raft_rpc_tests.step);
-    raft_test_step.dependOn(&run_raft_node_tests.step);
-    raft_test_step.dependOn(&run_raft_cluster_tests.step);
-    raft_test_step.dependOn(&run_raft_linear_tests.step);
+    // Deterministic simulation tests
+    const dst_step = b.step("dst-test", "Run deterministic simulation tests");
+    dst_step.dependOn(&run_raft_cluster_tests.step);
+    dst_step.dependOn(&run_raft_linear_tests.step);
 }
