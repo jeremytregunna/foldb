@@ -259,6 +259,108 @@ pub fn build(b: *std.Build) void {
     const executor_replay_tests = b.addTest(.{ .root_module = executor_replay_module });
     const run_executor_replay_tests = b.addRunArtifact(executor_replay_tests);
 
+    // SQL module
+    const sql_module = b.createModule(.{
+        .root_source_file = b.path("src/sql/sql.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sql_module.addImport("storage.zig", storage_module);
+    sql_module.addImport("executor.zig", executor_module);
+    sql_module.addImport("log.zig", log_module);
+
+    // SQL lexer tests
+    const sql_lexer_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sql/lexer_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sql_lexer_test_module.addImport("sql.zig", sql_module);
+    const sql_lexer_tests = b.addTest(.{ .root_module = sql_lexer_test_module });
+    const run_sql_lexer_tests = b.addRunArtifact(sql_lexer_tests);
+
+    // SQL parser tests
+    const sql_parser_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sql/parser_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sql_parser_test_module.addImport("sql.zig", sql_module);
+    const sql_parser_tests = b.addTest(.{ .root_module = sql_parser_test_module });
+    const run_sql_parser_tests = b.addRunArtifact(sql_parser_tests);
+
+    // SQL registry tests
+    const sql_registry_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sql/registry_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sql_registry_test_module.addImport("sql.zig", sql_module);
+    const sql_registry_tests = b.addTest(.{ .root_module = sql_registry_test_module });
+    const run_sql_registry_tests = b.addRunArtifact(sql_registry_tests);
+
+    // SQL integration tests
+    const sql_integration_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sql/integration_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sql_integration_test_module.addImport("sql.zig", sql_module);
+    const sql_integration_tests = b.addTest(.{ .root_module = sql_integration_test_module });
+    const run_sql_integration_tests = b.addRunArtifact(sql_integration_tests);
+
+    // SQL type checker tests
+    const sql_tc_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sql/type_checker_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sql_tc_test_module.addImport("sql.zig", sql_module);
+    const sql_tc_tests = b.addTest(.{ .root_module = sql_tc_test_module });
+    const run_sql_tc_tests = b.addRunArtifact(sql_tc_tests);
+
+    // SQL schema tests
+    const sql_schema_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sql/schema_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sql_schema_test_module.addImport("sql.zig", sql_module);
+    const sql_schema_tests = b.addTest(.{ .root_module = sql_schema_test_module });
+    const run_sql_schema_tests = b.addRunArtifact(sql_schema_tests);
+
+    // SQL executor expression tests
+    const sql_executor_expr_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sql/executor_expr_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sql_executor_expr_test_module.addImport("sql.zig", sql_module);
+    const sql_executor_expr_tests = b.addTest(.{ .root_module = sql_executor_expr_test_module });
+    const run_sql_executor_expr_tests = b.addRunArtifact(sql_executor_expr_tests);
+
+    // SQL replay (DST) tests
+    const sql_replay_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sql/replay_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sql_replay_test_module.addImport("sql.zig", sql_module);
+    sql_replay_test_module.addImport("executor.zig", executor_module);
+    sql_replay_test_module.addImport("storage.zig", storage_module);
+    const sql_replay_tests = b.addTest(.{ .root_module = sql_replay_test_module });
+    const run_sql_replay_tests = b.addRunArtifact(sql_replay_tests);
+
+    // SQL planner tests
+    const sql_planner_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sql/planner_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sql_planner_test_module.addImport("sql.zig", sql_module);
+    const sql_planner_tests = b.addTest(.{ .root_module = sql_planner_test_module });
+    const run_sql_planner_tests = b.addRunArtifact(sql_planner_tests);
+
     // Unit tests: pure logic, no simulation harness
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
@@ -273,6 +375,14 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_storage_sstable_tests.step);
     test_step.dependOn(&run_storage_lsm_tests.step);
     test_step.dependOn(&run_executor_tests.step);
+    test_step.dependOn(&run_sql_lexer_tests.step);
+    test_step.dependOn(&run_sql_parser_tests.step);
+    test_step.dependOn(&run_sql_registry_tests.step);
+    test_step.dependOn(&run_sql_integration_tests.step);
+    test_step.dependOn(&run_sql_tc_tests.step);
+    test_step.dependOn(&run_sql_schema_tests.step);
+    test_step.dependOn(&run_sql_planner_tests.step);
+    test_step.dependOn(&run_sql_executor_expr_tests.step);
 
     // Deterministic simulation tests
     const dst_step = b.step("dst-test", "Run deterministic simulation tests");
@@ -280,4 +390,5 @@ pub fn build(b: *std.Build) void {
     dst_step.dependOn(&run_raft_linear_tests.step);
     dst_step.dependOn(&run_storage_replay_tests.step);
     dst_step.dependOn(&run_executor_replay_tests.step);
+    dst_step.dependOn(&run_sql_replay_tests.step);
 }

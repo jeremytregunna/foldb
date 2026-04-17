@@ -39,6 +39,24 @@ pub const SSTableMeta = sstable_mod.SSTableMeta;
 // LSM
 pub const LSM = lsm_mod.LSM;
 
+pub const ScanIterator = struct {
+    rows:  []Row,
+    pos:   usize,
+    alloc: std.mem.Allocator,
+
+    pub fn deinit(self: *ScanIterator) void {
+        for (self.rows) |*r| r.deinit(self.alloc);
+        self.alloc.free(self.rows);
+    }
+
+    pub fn next(self: *ScanIterator) !?Row {
+        if (self.pos >= self.rows.len) return null;
+        const r = self.rows[self.pos];
+        self.pos += 1;
+        return r;
+    }
+};
+
 pub const Storage = struct {
     tables: std.AutoHashMap(TableId, lsm_mod.LSM),
     dir: []const u8,
@@ -88,6 +106,27 @@ pub const Storage = struct {
             const lsm = self.tables.getPtr(tid) orelse return error.TableNotFound;
             try lsm.apply(mutations, at_seq);
         }
+    }
+
+    pub fn scan(self: *Storage, table_id: TableId, range: KeyRange, at_seq: Seq, alloc: std.mem.Allocator) !ScanIterator {
+        const lsm = self.tables.getPtr(table_id) orelse return error.TableNotFound;
+        var it = lsm.memtable.rangeEntries(range, at_seq);
+        var rows: std.ArrayListUnmanaged(Row) = .empty;
+        errdefer {
+            for (rows.items) |*r| r.deinit(alloc);
+            rows.deinit(alloc);
+        }
+        while (it.next()) |entry| {
+            if (entry.is_tombstone) continue;
+            const vals = entry.values orelse continue;
+            const key_copy = try alloc.dupe(u8, entry.key);
+            errdefer alloc.free(key_copy);
+            const vals_copy = try alloc.alloc(ColumnValue, vals.len);
+            errdefer alloc.free(vals_copy);
+            for (vals, 0..) |v, i| vals_copy[i] = try v.dupe(alloc);
+            try rows.append(alloc, Row{ .key = key_copy, .seq = entry.seq, .values = vals_copy });
+        }
+        return ScanIterator{ .rows = try rows.toOwnedSlice(alloc), .pos = 0, .alloc = alloc };
     }
 
     pub fn snapshot(self: *Storage, at_seq: Seq) !SnapshotHandle {
