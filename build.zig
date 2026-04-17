@@ -64,7 +64,65 @@ pub fn build(b: *std.Build) void {
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 
+    // Create log module for tests
+    const log_module = b.createModule(.{
+        .root_source_file = b.path("src/log/log.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Log segment tests
+    const log_segment_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/log/segment_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    log_segment_test_module.addImport("log.zig", log_module);
+
+    const log_segment_tests = b.addTest(.{
+        .root_module = log_segment_test_module,
+    });
+
+    const run_log_segment_tests = b.addRunArtifact(log_segment_tests);
+
+    // Log manager tests
+    const log_manager_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/log/manager_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    log_manager_test_module.addImport("log.zig", log_module);
+
+    const log_manager_tests = b.addTest(.{
+        .root_module = log_manager_test_module,
+    });
+
+    const run_log_manager_tests = b.addRunArtifact(log_manager_tests);
+
+    // Log durability tests
+    const log_durability_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/log/durability_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    log_durability_test_module.addImport("log.zig", log_module);
+
+    const log_durability_tests = b.addTest(.{
+        .root_module = log_durability_test_module,
+    });
+
+    const run_log_durability_tests = b.addRunArtifact(log_durability_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
+    test_step.dependOn(&run_log_segment_tests.step);
+    test_step.dependOn(&run_log_manager_tests.step);
+    test_step.dependOn(&run_log_durability_tests.step);
+
+    // Individual test steps
+    const log_test_step = b.step("log-test", "Run log module tests");
+    log_test_step.dependOn(&run_log_segment_tests.step);
+    log_test_step.dependOn(&run_log_manager_tests.step);
+    log_test_step.dependOn(&run_log_durability_tests.step);
 }
