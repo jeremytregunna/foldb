@@ -179,12 +179,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_raft_rpc_tests.step);
     test_step.dependOn(&run_raft_node_tests.step);
 
-    // Individual unit test steps
-    const log_test_step = b.step("log-test", "Run log module unit tests");
-    log_test_step.dependOn(&run_log_segment_tests.step);
-    log_test_step.dependOn(&run_log_manager_tests.step);
-    log_test_step.dependOn(&run_log_durability_tests.step);
-
     // Deterministic simulation tests
     const dst_step = b.step("dst-test", "Run deterministic simulation tests");
     dst_step.dependOn(&run_raft_cluster_tests.step);
