@@ -226,6 +226,39 @@ pub fn build(b: *std.Build) void {
     const storage_replay_tests = b.addTest(.{ .root_module = storage_replay_test_module });
     const run_storage_replay_tests = b.addRunArtifact(storage_replay_tests);
 
+    // Executor module
+    const executor_module = b.createModule(.{
+        .root_source_file = b.path("src/executor/executor.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    executor_module.addImport("storage.zig", storage_module);
+    executor_module.addImport("log.zig", log_module);
+
+    // Executor unit tests
+    const executor_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/executor/executor_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    executor_test_module.addImport("executor.zig", executor_module);
+    executor_test_module.addImport("storage.zig", storage_module);
+    executor_test_module.addImport("log.zig", log_module);
+    const executor_tests = b.addTest(.{ .root_module = executor_test_module });
+    const run_executor_tests = b.addRunArtifact(executor_tests);
+
+    // Executor replay (DST)
+    const executor_replay_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/executor/replay_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    executor_replay_module.addImport("executor.zig", executor_module);
+    executor_replay_module.addImport("storage.zig", storage_module);
+    executor_replay_module.addImport("log.zig", log_module);
+    const executor_replay_tests = b.addTest(.{ .root_module = executor_replay_module });
+    const run_executor_replay_tests = b.addRunArtifact(executor_replay_tests);
+
     // Unit tests: pure logic, no simulation harness
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
@@ -239,10 +272,12 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_storage_block_tests.step);
     test_step.dependOn(&run_storage_sstable_tests.step);
     test_step.dependOn(&run_storage_lsm_tests.step);
+    test_step.dependOn(&run_executor_tests.step);
 
     // Deterministic simulation tests
     const dst_step = b.step("dst-test", "Run deterministic simulation tests");
     dst_step.dependOn(&run_raft_cluster_tests.step);
     dst_step.dependOn(&run_raft_linear_tests.step);
     dst_step.dependOn(&run_storage_replay_tests.step);
+    dst_step.dependOn(&run_executor_replay_tests.step);
 }

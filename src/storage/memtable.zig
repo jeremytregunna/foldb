@@ -134,10 +134,12 @@ pub const Memtable = struct {
             const mid = lo + (hi - lo) / 2;
             const e = &self.entries.items[mid];
             const cmp = std.mem.order(u8, e.key, key);
-            if (cmp == .lt or (cmp == .eq and e.seq < seq)) {
-                hi = mid;
-            } else {
+            // Sort order: key ASC, seq DESC. Entry at mid comes before new entry iff
+            // its key is smaller, or same key with strictly larger seq.
+            if (cmp == .lt or (cmp == .eq and e.seq > seq)) {
                 lo = mid + 1;
+            } else {
+                hi = mid;
             }
         }
         return lo;
