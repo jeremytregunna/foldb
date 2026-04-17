@@ -169,6 +169,63 @@ pub fn build(b: *std.Build) void {
     const raft_linear_tests = b.addTest(.{ .root_module = raft_linear_test_module });
     const run_raft_linear_tests = b.addRunArtifact(raft_linear_tests);
 
+    // Storage module (all storage files belong to this single module)
+    const storage_module = b.createModule(.{
+        .root_source_file = b.path("src/storage/storage.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Storage codec tests
+    const storage_codec_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/storage/codec_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    storage_codec_test_module.addImport("storage.zig", storage_module);
+    const storage_codec_tests = b.addTest(.{ .root_module = storage_codec_test_module });
+    const run_storage_codec_tests = b.addRunArtifact(storage_codec_tests);
+
+    // Storage block tests
+    const storage_block_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/storage/block_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    storage_block_test_module.addImport("storage.zig", storage_module);
+    const storage_block_tests = b.addTest(.{ .root_module = storage_block_test_module });
+    const run_storage_block_tests = b.addRunArtifact(storage_block_tests);
+
+    // Storage SSTable tests
+    const storage_sstable_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/storage/sstable_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    storage_sstable_test_module.addImport("storage.zig", storage_module);
+    const storage_sstable_tests = b.addTest(.{ .root_module = storage_sstable_test_module });
+    const run_storage_sstable_tests = b.addRunArtifact(storage_sstable_tests);
+
+    // Storage LSM tests
+    const storage_lsm_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/storage/lsm_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    storage_lsm_test_module.addImport("storage.zig", storage_module);
+    const storage_lsm_tests = b.addTest(.{ .root_module = storage_lsm_test_module });
+    const run_storage_lsm_tests = b.addRunArtifact(storage_lsm_tests);
+
+    // Storage replay (DST) tests
+    const storage_replay_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/storage/replay_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    storage_replay_test_module.addImport("storage.zig", storage_module);
+    const storage_replay_tests = b.addTest(.{ .root_module = storage_replay_test_module });
+    const run_storage_replay_tests = b.addRunArtifact(storage_replay_tests);
+
     // Unit tests: pure logic, no simulation harness
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
@@ -178,9 +235,14 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_log_durability_tests.step);
     test_step.dependOn(&run_raft_rpc_tests.step);
     test_step.dependOn(&run_raft_node_tests.step);
+    test_step.dependOn(&run_storage_codec_tests.step);
+    test_step.dependOn(&run_storage_block_tests.step);
+    test_step.dependOn(&run_storage_sstable_tests.step);
+    test_step.dependOn(&run_storage_lsm_tests.step);
 
     // Deterministic simulation tests
     const dst_step = b.step("dst-test", "Run deterministic simulation tests");
     dst_step.dependOn(&run_raft_cluster_tests.step);
     dst_step.dependOn(&run_raft_linear_tests.step);
+    dst_step.dependOn(&run_storage_replay_tests.step);
 }
