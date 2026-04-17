@@ -14,12 +14,16 @@ pub const NodeId = u64;
 /// Type of log entry.
 pub const EntryKind = enum(u8) {
     txn_intent = 1,
+    schema_change = 2,
+    config_change = 3,
     noop = 4,
     snapshot_marker = 5,
 
     pub fn fromByte(byte: u8) !EntryKind {
         return switch (byte) {
             1 => .txn_intent,
+            2 => .schema_change,
+            3 => .config_change,
             4 => .noop,
             5 => .snapshot_marker,
             else => error.InvalidEntryKind,

@@ -341,6 +341,56 @@ pub const Segment = struct {
         self.sealed = true;
     }
 
+    /// Remove all entries with seq >= from_seq.
+    /// For unsealed segments uses the in-memory index; for sealed segments scans from header.
+    /// Leaves the segment unsealed and writable afterwards.
+    pub fn truncateSuffix(self: *Segment, from_seq: Seq) !void {
+        if (from_seq > self.last_seq) return;
+
+        var cutoff: u64 = HEADER_SIZE;
+        var new_count: u32 = 0;
+        var new_last: Seq = if (self.header.base_seq > 0) self.header.base_seq - 1 else 0;
+
+        if (!self.sealed) {
+            for (self.index.items, 0..) |ie, idx| {
+                if (ie.seq < from_seq) {
+                    cutoff = if (idx + 1 < self.index.items.len)
+                        self.index.items[idx + 1].file_offset
+                    else
+                        self.next_offset;
+                    new_count += 1;
+                    new_last = ie.seq;
+                } else break;
+            }
+            self.index.items.len = new_count;
+        } else {
+            // Scan entries sequentially since index is empty for sealed segments.
+            _ = std.os.linux.lseek(@intCast(self.fd), @intCast(HEADER_SIZE), std.os.linux.SEEK.SET);
+            var scanned: u32 = 0;
+            while (scanned < self.entry_count) {
+                var hbuf: [LogEntryHeader.HEADER_SIZE]u8 = undefined;
+                const n = std.os.linux.read(@intCast(self.fd), &hbuf, LogEntryHeader.HEADER_SIZE);
+                if (n != LogEntryHeader.HEADER_SIZE) break;
+                const hdr = LogEntryHeader.deserializeFrom(&hbuf) catch break;
+                _ = std.os.linux.lseek(@intCast(self.fd), @intCast(hdr.payload_len), std.os.linux.SEEK.CUR);
+                scanned += 1;
+                if (hdr.seq < from_seq) {
+                    cutoff = @intCast(std.os.linux.lseek(@intCast(self.fd), 0, std.os.linux.SEEK.CUR));
+                    new_count += 1;
+                    new_last = hdr.seq;
+                } else break;
+            }
+            self.sealed = false;
+        }
+
+        _ = std.os.linux.ftruncate(@intCast(self.fd), @intCast(cutoff));
+        _ = std.os.linux.lseek(@intCast(self.fd), @intCast(cutoff), std.os.linux.SEEK.SET);
+        self.next_offset = cutoff;
+        self.entry_count = new_count;
+        self.last_seq = new_last;
+        self.sealed = false;
+    }
+
     pub fn deinit(self: *Segment) void {
         if (!self.sealed) {
             _ = std.os.linux.fsync(@intCast(self.fd));

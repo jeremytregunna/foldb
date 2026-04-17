@@ -210,6 +210,18 @@ pub const Log = struct {
         return entries.toOwnedSlice(allocator);
     }
 
+    /// Return the Raft term (epoch) of the entry at seq, or 0 if seq == 0.
+    pub fn termAt(self: *Log, seq: Seq, allocator: std.mem.Allocator) !entry_mod.Epoch {
+        if (seq == 0) return 0;
+        const entries = try self.read(seq, 1, allocator);
+        defer {
+            for (entries) |*e| e.deinit(allocator);
+            allocator.free(entries);
+        }
+        if (entries.len == 0 or entries[0].header.seq != seq) return error.EntryNotFound;
+        return entries[0].header.epoch;
+    }
+
     pub fn head(self: *const Log) !Seq {
         var max_seq = self.current_segment.last_seq;
         for (self.sealed_segments.items) |seg| {
@@ -240,6 +252,77 @@ pub const Log = struct {
                 self.sealed_segments.items[removed..],
             );
             self.sealed_segments.items.len = new_len;
+        }
+    }
+
+    /// Append a pre-sequenced entry (used by Raft followers).
+    /// The entry's seq must equal current_seq + 1.
+    pub fn appendEntry(self: *Log, entry: LogEntry) !void {
+        if (self.sealed) return LogError.LogSealed;
+        if (entry.header.seq != self.current_seq + 1) return LogError.SeqOutOfOrder;
+
+        try self.current_segment.append(entry);
+        self.current_seq = entry.header.seq;
+
+        if (self.current_segment.entry_count >= self.segment_max_entries) {
+            try self.rotate();
+        }
+    }
+
+    /// Remove all entries with seq >= from_seq.
+    /// Used by Raft followers to resolve log conflicts with a new leader.
+    pub fn truncateSuffix(self: *Log, from_seq: Seq) !void {
+        if (from_seq > self.current_seq) return;
+
+        // Case 1: conflict is within the current (unsealed) segment.
+        if (from_seq >= self.current_segment.header.base_seq) {
+            try self.current_segment.truncateSuffix(from_seq);
+            self.current_seq = self.current_segment.last_seq;
+            return;
+        }
+
+        // Case 2: conflict reaches into sealed segments.
+        // Walk backwards to find the segment containing from_seq.
+        var pivot: ?usize = null;
+        var i: usize = self.sealed_segments.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.sealed_segments.items[i].header.base_seq <= from_seq) {
+                pivot = i;
+                break;
+            }
+        }
+
+        // Discard the current segment entirely.
+        self.current_segment.deinit();
+
+        // Delete sealed segments after the pivot (or all if no pivot).
+        const del_start: usize = if (pivot) |p| p + 1 else 0;
+        var j: usize = del_start;
+        while (j < self.sealed_segments.items.len) : (j += 1) {
+            var seg = &self.sealed_segments.items[j];
+            const null_path = try toNullPath(seg.path);
+            defer std.heap.page_allocator.free(null_path);
+            _ = std.os.linux.unlink(null_path.ptr);
+            seg.deinit();
+        }
+        self.sealed_segments.items.len = del_start;
+
+        if (pivot) |p| {
+            // Truncate inside the pivot sealed segment and promote it to current.
+            try self.sealed_segments.items[p].truncateSuffix(from_seq);
+            self.current_segment = self.sealed_segments.items[p];
+            self.sealed_segments.items.len = p;
+            self.current_seq = self.current_segment.last_seq;
+        } else {
+            // Everything was past from_seq; start a fresh current segment.
+            const base: Seq = if (from_seq > 0) from_seq else 1;
+            var name_buf: [32]u8 = undefined;
+            const seg_name = std.fmt.bufPrint(&name_buf, "{d:0>16}.seg", .{base}) catch unreachable;
+            const new_path = try buildPath(self.path, seg_name);
+            errdefer std.heap.page_allocator.free(new_path);
+            self.current_segment = try Segment.init(new_path, base, self.node_id);
+            self.current_seq = if (from_seq > 0) from_seq - 1 else 0;
         }
     }
 

@@ -113,16 +113,82 @@ pub fn build(b: *std.Build) void {
 
     const run_log_durability_tests = b.addRunArtifact(log_durability_tests);
 
+    // Raft module
+    const raft_module = b.createModule(.{
+        .root_source_file = b.path("src/raft/raft.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    raft_module.addImport("log.zig", log_module);
+
+    // Raft sub-modules need log.zig too
+    // (raft.zig imports types/rpc/node/transport/cluster/persistent which import log.zig)
+    // We satisfy this by adding the import at the raft module level — Zig propagates it.
+
+    // Raft RPC tests
+    const raft_rpc_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/raft/rpc_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    raft_rpc_test_module.addImport("raft.zig", raft_module);
+    raft_rpc_test_module.addImport("log.zig", log_module);
+    const raft_rpc_tests = b.addTest(.{ .root_module = raft_rpc_test_module });
+    const run_raft_rpc_tests = b.addRunArtifact(raft_rpc_tests);
+
+    // Raft node (pure state machine) tests
+    const raft_node_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/raft/node_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    raft_node_test_module.addImport("raft.zig", raft_module);
+    raft_node_test_module.addImport("log.zig", log_module);
+    const raft_node_tests = b.addTest(.{ .root_module = raft_node_test_module });
+    const run_raft_node_tests = b.addRunArtifact(raft_node_tests);
+
+    // Raft cluster (simulation) tests
+    const raft_cluster_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/raft/cluster_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    raft_cluster_test_module.addImport("raft.zig", raft_module);
+    raft_cluster_test_module.addImport("log.zig", log_module);
+    const raft_cluster_tests = b.addTest(.{ .root_module = raft_cluster_test_module });
+    const run_raft_cluster_tests = b.addRunArtifact(raft_cluster_tests);
+
+    // Linearizability tests
+    const raft_linear_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/raft/linearizability_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    raft_linear_test_module.addImport("raft.zig", raft_module);
+    raft_linear_test_module.addImport("log.zig", log_module);
+    const raft_linear_tests = b.addTest(.{ .root_module = raft_linear_test_module });
+    const run_raft_linear_tests = b.addRunArtifact(raft_linear_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
     test_step.dependOn(&run_log_segment_tests.step);
     test_step.dependOn(&run_log_manager_tests.step);
     test_step.dependOn(&run_log_durability_tests.step);
+    test_step.dependOn(&run_raft_rpc_tests.step);
+    test_step.dependOn(&run_raft_node_tests.step);
+    test_step.dependOn(&run_raft_cluster_tests.step);
+    test_step.dependOn(&run_raft_linear_tests.step);
 
     // Individual test steps
     const log_test_step = b.step("log-test", "Run log module tests");
     log_test_step.dependOn(&run_log_segment_tests.step);
     log_test_step.dependOn(&run_log_manager_tests.step);
     log_test_step.dependOn(&run_log_durability_tests.step);
+
+    const raft_test_step = b.step("raft-test", "Run raft module tests");
+    raft_test_step.dependOn(&run_raft_rpc_tests.step);
+    raft_test_step.dependOn(&run_raft_node_tests.step);
+    raft_test_step.dependOn(&run_raft_cluster_tests.step);
+    raft_test_step.dependOn(&run_raft_linear_tests.step);
 }

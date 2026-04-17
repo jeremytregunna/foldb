@@ -43,3 +43,5 @@ pub const MAGIC = segment.MAGIC;
 pub const Log = manager.Log;
 pub const LogError = manager.LogError;
 pub const DEFAULT_SEGMENT_MAX_ENTRIES = manager.DEFAULT_SEGMENT_MAX_ENTRIES;
+
+pub const ENTRY_HEADER_SIZE = entry.LogEntryHeader.HEADER_SIZE;
