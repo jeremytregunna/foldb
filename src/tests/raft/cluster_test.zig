@@ -42,7 +42,7 @@ fn removeDirRecursive(path: []const u8) void {
         if (n <= 0) break;
         var i: usize = 0;
         while (i < @as(usize, @intCast(n))) {
-            const dent: *const std.os.linux.dirent64 = @alignCast(@ptrCast(buf[i..].ptr));
+            const dent: *const std.os.linux.dirent64 = @ptrCast(@alignCast(buf[i..].ptr));
             const name = std.mem.span(@as([*:0]const u8, @ptrCast(&dent.name)));
             if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) {
                 const child = std.mem.concat(std.heap.page_allocator, u8, &.{ path, "/", name }) catch {
@@ -223,7 +223,10 @@ test "Cluster: appends continue after re-election" {
     for (0..100) |_| {
         try cluster.step();
         if (cluster.leader()) |idx| {
-            if (idx != old_leader) { new_leader = idx; break; }
+            if (idx != old_leader) {
+                new_leader = idx;
+                break;
+            }
         }
     }
     try testing.expect(new_leader != null);
@@ -254,7 +257,10 @@ test "Cluster: partition heal — old leader rejoins and converges" {
     for (0..100) |_| {
         try cluster.step();
         if (cluster.leader()) |idx| {
-            if (idx != old_leader) { new_leader = idx; break; }
+            if (idx != old_leader) {
+                new_leader = idx;
+                break;
+            }
         }
     }
     try testing.expect(new_leader != null);

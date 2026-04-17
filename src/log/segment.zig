@@ -206,7 +206,7 @@ pub const Segment = struct {
             return error.InvalidSegment;
         }
 
-        const header_ptr = @as(*const SegmentHeader, @alignCast(@ptrCast(&header_buf)));
+        const header_ptr = @as(*const SegmentHeader, @ptrCast(@alignCast(&header_buf)));
         const header = header_ptr.*;
         if (!header.isValid()) {
             _ = std.os.linux.close(@intCast(fd));

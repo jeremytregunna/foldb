@@ -13,7 +13,7 @@ fn makeSchema(table_id: storage.TableId) TableSchema {
         .table_id = table_id,
         .columns = &.{
             .{ .col_type = .string, .nullable = false },
-            .{ .col_type = .int64,  .nullable = false },
+            .{ .col_type = .int64, .nullable = false },
         },
     };
 }
@@ -47,7 +47,7 @@ fn removeDir(path: []const u8) void {
         if (n <= 0) break;
         var i: usize = 0;
         while (i < @as(usize, @intCast(n))) {
-            const dent: *const std.os.linux.dirent64 = @alignCast(@ptrCast(buf[i..].ptr));
+            const dent: *const std.os.linux.dirent64 = @ptrCast(@alignCast(buf[i..].ptr));
             const name = std.mem.span(@as([*:0]const u8, @ptrCast(&dent.name)));
             if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) {
                 const child_path = std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ path, name }) catch {

@@ -59,7 +59,7 @@ pub const Lexer = struct {
             return self.tok(.param, start, self.pos);
         }
 
-        if (c == '\'' ) return self.lexString(start);
+        if (c == '\'') return self.lexString(start);
         if ((c == 'x' or c == 'X') and self.pos + 1 < self.src.len and self.src[self.pos + 1] == '\'') {
             return self.lexBytes(start);
         }
@@ -223,19 +223,40 @@ pub const Lexer = struct {
             '&' => return self.tok(.op_amp, start, self.pos),
             '=' => return self.tok(.op_eq, start, self.pos),
             '!' => {
-                if (has_next and next_c == '=') { self.pos += 1; return self.tok(.op_neq, start, self.pos); }
+                if (has_next and next_c == '=') {
+                    self.pos += 1;
+                    return self.tok(.op_neq, start, self.pos);
+                }
                 return self.tok(.sym_bang, start, self.pos);
             },
             '<' => {
-                if (has_next and next_c == '=') { self.pos += 1; return self.tok(.op_lte, start, self.pos); }
-                if (has_next and next_c == '>') { self.pos += 1; return self.tok(.op_neq, start, self.pos); }
-                if (has_next and next_c == '<') { self.pos += 1; return self.tok(.op_lshift, start, self.pos); }
-                if (has_next and next_c == '@') { self.pos += 1; return self.tok(.op_contained, start, self.pos); }
+                if (has_next and next_c == '=') {
+                    self.pos += 1;
+                    return self.tok(.op_lte, start, self.pos);
+                }
+                if (has_next and next_c == '>') {
+                    self.pos += 1;
+                    return self.tok(.op_neq, start, self.pos);
+                }
+                if (has_next and next_c == '<') {
+                    self.pos += 1;
+                    return self.tok(.op_lshift, start, self.pos);
+                }
+                if (has_next and next_c == '@') {
+                    self.pos += 1;
+                    return self.tok(.op_contained, start, self.pos);
+                }
                 return self.tok(.op_lt, start, self.pos);
             },
             '>' => {
-                if (has_next and next_c == '=') { self.pos += 1; return self.tok(.op_gte, start, self.pos); }
-                if (has_next and next_c == '>') { self.pos += 1; return self.tok(.op_rshift, start, self.pos); }
+                if (has_next and next_c == '=') {
+                    self.pos += 1;
+                    return self.tok(.op_gte, start, self.pos);
+                }
+                if (has_next and next_c == '>') {
+                    self.pos += 1;
+                    return self.tok(.op_rshift, start, self.pos);
+                }
                 return self.tok(.op_gt, start, self.pos);
             },
             '-' => {
@@ -250,15 +271,24 @@ pub const Lexer = struct {
                 return self.tok(.op_minus, start, self.pos);
             },
             '|' => {
-                if (has_next and next_c == '|') { self.pos += 1; return self.tok(.op_concat, start, self.pos); }
+                if (has_next and next_c == '|') {
+                    self.pos += 1;
+                    return self.tok(.op_concat, start, self.pos);
+                }
                 return self.tok(.op_pipe, start, self.pos);
             },
             ':' => {
-                if (has_next and next_c == ':') { self.pos += 1; return self.tok(.op_cast_op, start, self.pos); }
+                if (has_next and next_c == ':') {
+                    self.pos += 1;
+                    return self.tok(.op_cast_op, start, self.pos);
+                }
                 return self.tok(.sym_colon, start, self.pos);
             },
             '@' => {
-                if (has_next and next_c == '>') { self.pos += 1; return self.tok(.op_contains, start, self.pos); }
+                if (has_next and next_c == '>') {
+                    self.pos += 1;
+                    return self.tok(.op_contains, start, self.pos);
+                }
                 return self.tok(.op_at, start, self.pos);
             },
             else => return self.tok(.invalid, start, self.pos),

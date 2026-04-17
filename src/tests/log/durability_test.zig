@@ -32,7 +32,7 @@ fn removeDirRecursive(path: []const u8) void {
         if (n <= 0) break;
         var i: usize = 0;
         while (i < @as(usize, @intCast(n))) {
-            const dent = @as(*const std.os.linux.dirent64, @alignCast(@ptrCast(buf[i..].ptr))).*;
+            const dent = @as(*const std.os.linux.dirent64, @ptrCast(@alignCast(buf[i..].ptr))).*;
             const name = std.mem.sliceTo(&dent.name, 0);
             if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) {
                 const child = std.mem.concat(std.heap.page_allocator, u8, &.{ path, "/", name }) catch {

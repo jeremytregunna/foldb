@@ -45,12 +45,18 @@ fn removeDir(path: []const u8) void {
         if (n <= 0) break;
         var i: usize = 0;
         while (i < @as(usize, @intCast(n))) {
-            const dent: *const std.os.linux.dirent64 = @alignCast(@ptrCast(buf[i..].ptr));
+            const dent: *const std.os.linux.dirent64 = @ptrCast(@alignCast(buf[i..].ptr));
             const name = std.mem.span(@as([*:0]const u8, @ptrCast(&dent.name)));
             if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) {
-                const child = std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ path, name }) catch { i += dent.reclen; continue; };
+                const child = std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ path, name }) catch {
+                    i += dent.reclen;
+                    continue;
+                };
                 defer std.heap.page_allocator.free(child);
-                const null_child = std.heap.page_allocator.allocSentinel(u8, child.len, 0) catch { i += dent.reclen; continue; };
+                const null_child = std.heap.page_allocator.allocSentinel(u8, child.len, 0) catch {
+                    i += dent.reclen;
+                    continue;
+                };
                 defer std.heap.page_allocator.free(null_child);
                 @memcpy(null_child[0..child.len], child);
                 if (dent.type == std.os.linux.DT.DIR) {
@@ -110,7 +116,7 @@ fn listSstFiles(dir: []const u8, alloc: std.mem.Allocator) ![][]const u8 {
         if (n <= 0) break;
         var i: usize = 0;
         while (i < @as(usize, @intCast(n))) {
-            const dent: *const std.os.linux.dirent64 = @alignCast(@ptrCast(buf[i..].ptr));
+            const dent: *const std.os.linux.dirent64 = @ptrCast(@alignCast(buf[i..].ptr));
             const name = std.mem.span(@as([*:0]const u8, @ptrCast(&dent.name)));
             if (std.mem.endsWith(u8, name, ".sst")) {
                 const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name });
@@ -121,7 +127,9 @@ fn listSstFiles(dir: []const u8, alloc: std.mem.Allocator) ![][]const u8 {
     }
     const result = try files.toOwnedSlice(alloc);
     std.sort.pdq([]const u8, result, {}, struct {
-        fn lt(_: void, a: []const u8, b: []const u8) bool { return std.mem.lessThan(u8, a, b); }
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
     }.lt);
     return result;
 }
@@ -179,9 +187,15 @@ test "Replay: two identical instances produce byte-equal SSTables" {
     defer alloc.free(table_dir_b);
 
     const files_a = try listSstFiles(table_dir_a, alloc);
-    defer { for (files_a) |f| alloc.free(f); alloc.free(files_a); }
+    defer {
+        for (files_a) |f| alloc.free(f);
+        alloc.free(files_a);
+    }
     const files_b = try listSstFiles(table_dir_b, alloc);
-    defer { for (files_b) |f| alloc.free(f); alloc.free(files_b); }
+    defer {
+        for (files_b) |f| alloc.free(f);
+        alloc.free(files_b);
+    }
 
     try testing.expectEqual(files_a.len, files_b.len);
     try testing.expect(files_a.len > 0);
@@ -253,9 +267,15 @@ test "Replay: inserts and deletes produce byte-equal SSTables" {
     defer alloc.free(table_dir_b);
 
     const files_a = try listSstFiles(table_dir_a, alloc);
-    defer { for (files_a) |f| alloc.free(f); alloc.free(files_a); }
+    defer {
+        for (files_a) |f| alloc.free(f);
+        alloc.free(files_a);
+    }
     const files_b = try listSstFiles(table_dir_b, alloc);
-    defer { for (files_b) |f| alloc.free(f); alloc.free(files_b); }
+    defer {
+        for (files_b) |f| alloc.free(f);
+        alloc.free(files_b);
+    }
 
     try testing.expectEqual(files_a.len, files_b.len);
     try testing.expect(files_a.len > 0);

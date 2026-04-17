@@ -14,19 +14,19 @@ const storage_mod = @import("storage.zig");
 const executor_mod = @import("executor.zig");
 const log_mod = @import("log.zig");
 
-pub const Storage       = storage_mod.Storage;
-pub const Row           = storage_mod.Row;
-pub const ColumnValue   = storage_mod.ColumnValue;
-pub const ColumnType    = storage_mod.ColumnType;
-pub const Mutation      = storage_mod.Mutation;
-pub const MutationKind  = storage_mod.MutationKind;
-pub const KeyRange      = storage_mod.KeyRange;
-pub const TableId       = storage_mod.TableId;
-pub const Seq           = executor_mod.Seq;
-pub const LogEntry      = log_mod.LogEntry;
+pub const Storage = storage_mod.Storage;
+pub const Row = storage_mod.Row;
+pub const ColumnValue = storage_mod.ColumnValue;
+pub const ColumnType = storage_mod.ColumnType;
+pub const Mutation = storage_mod.Mutation;
+pub const MutationKind = storage_mod.MutationKind;
+pub const KeyRange = storage_mod.KeyRange;
+pub const TableId = storage_mod.TableId;
+pub const Seq = executor_mod.Seq;
+pub const LogEntry = log_mod.LogEntry;
 pub const ResolvedValue = executor_mod.ResolvedValue;
-pub const ExecResult    = executor_mod.ExecResult;
-pub const AbortCode     = executor_mod.AbortCode;
+pub const ExecResult = executor_mod.ExecResult;
+pub const AbortCode = executor_mod.AbortCode;
 
 pub const SqlExecError = error{
     ConstraintViolation,
@@ -43,8 +43,8 @@ pub const SqlExecError = error{
 /// Result of executing a SELECT plan.
 pub const ResultSet = struct {
     columns: []const []const u8,
-    rows:    []const []const ?ColumnValue,
-    alloc:   std.mem.Allocator,
+    rows: []const []const ?ColumnValue,
+    alloc: std.mem.Allocator,
 
     pub fn deinit(self: *ResultSet) void {
         for (self.rows) |row| {
@@ -60,34 +60,34 @@ pub const ResultSet = struct {
 
 /// Context passed to expression evaluator during plan execution.
 const EvalCtx = struct {
-    params:  []const ColumnValue,
-    nondet:  []const ResolvedValue,
-    seq:     Seq,
-    row:     ?[]const ?ColumnValue, // current row being evaluated
-    schema:  *const schema_mod.SchemaRegistry,
-    alloc:   std.mem.Allocator,
+    params: []const ColumnValue,
+    nondet: []const ResolvedValue,
+    seq: Seq,
+    row: ?[]const ?ColumnValue, // current row being evaluated
+    schema: *const schema_mod.SchemaRegistry,
+    alloc: std.mem.Allocator,
 };
 
 /// High-level SQL executor wrapping the storage and SQL registry.
 pub const SqlExecutor = struct {
-    storage:   *Storage,
-    registry:  *registry_mod.SqlRegistry,
-    schema:    *schema_mod.SchemaRegistry,
+    storage: *Storage,
+    registry: *registry_mod.SqlRegistry,
+    schema: *schema_mod.SchemaRegistry,
     committed_seq: Seq,
-    alloc:     std.mem.Allocator,
+    alloc: std.mem.Allocator,
 
     pub fn init(
-        storage:  *Storage,
+        storage: *Storage,
         registry: *registry_mod.SqlRegistry,
-        schema:   *schema_mod.SchemaRegistry,
-        alloc:    std.mem.Allocator,
+        schema: *schema_mod.SchemaRegistry,
+        alloc: std.mem.Allocator,
     ) SqlExecutor {
         return .{
-            .storage       = storage,
-            .registry      = registry,
-            .schema        = schema,
+            .storage = storage,
+            .registry = registry,
+            .schema = schema,
             .committed_seq = 0,
-            .alloc         = alloc,
+            .alloc = alloc,
         };
     }
 
@@ -144,26 +144,26 @@ pub const SqlExecutor = struct {
     /// Execute a SELECT plan and return collected rows.
     /// Used for testing and by the gateway (M6).
     pub fn querySelect(
-        self:   *SqlExecutor,
-        plan:   plan_mod.ExecutionPlan,
+        self: *SqlExecutor,
+        plan: plan_mod.ExecutionPlan,
         params: []const ColumnValue,
         nondet: []const ResolvedValue,
-        seq:    Seq,
-        alloc:  std.mem.Allocator,
+        seq: Seq,
+        alloc: std.mem.Allocator,
     ) SqlExecError!std.ArrayList([]const ?ColumnValue) {
         const ctx = EvalCtx{
             .params = params,
             .nondet = nondet,
-            .seq    = seq,
-            .row    = null,
+            .seq = seq,
+            .row = null,
             .schema = self.schema,
-            .alloc  = alloc,
+            .alloc = alloc,
         };
         var rows: std.ArrayList([]const ?ColumnValue) = .empty;
         for (plan.stmts) |stmt| {
             switch (stmt) {
                 .select => |node| try self.executeScan(node, ctx, &rows),
-                else    => {},
+                else => {},
             }
         }
         return rows;
@@ -172,21 +172,21 @@ pub const SqlExecutor = struct {
     /// Execute a plan directly (without going through the log).
     /// Used by the gateway (M6) to run queries and return result sets.
     pub fn executePlanDirect(
-        self:   *SqlExecutor,
-        plan:   plan_mod.ExecutionPlan,
+        self: *SqlExecutor,
+        plan: plan_mod.ExecutionPlan,
         params: []const ColumnValue,
         nondet: []const ResolvedValue,
-        seq:    Seq,
+        seq: Seq,
     ) SqlExecError!u64 {
         return self.executePlan(plan, params, nondet, seq);
     }
 
     fn executePlan(
-        self:   *SqlExecutor,
-        plan:   plan_mod.ExecutionPlan,
+        self: *SqlExecutor,
+        plan: plan_mod.ExecutionPlan,
         params: []const ColumnValue,
         nondet: []const ResolvedValue,
-        seq:    Seq,
+        seq: Seq,
     ) SqlExecError!u64 {
         var mutations: std.ArrayList(Mutation) = .empty;
         defer {
@@ -203,10 +203,10 @@ pub const SqlExecutor = struct {
         const ctx = EvalCtx{
             .params = params,
             .nondet = nondet,
-            .seq    = seq,
-            .row    = null,
+            .seq = seq,
+            .row = null,
             .schema = self.schema,
-            .alloc  = self.alloc,
+            .alloc = self.alloc,
         };
 
         for (plan.stmts) |stmt| {
@@ -219,9 +219,9 @@ pub const SqlExecutor = struct {
     }
 
     fn executeStmt(
-        self:      *SqlExecutor,
-        stmt:      plan_mod.StmtPlan,
-        ctx:       EvalCtx,
+        self: *SqlExecutor,
+        stmt: plan_mod.StmtPlan,
+        ctx: EvalCtx,
         mutations: *std.ArrayList(Mutation),
     ) SqlExecError!void {
         switch (stmt) {
@@ -237,15 +237,15 @@ pub const SqlExecutor = struct {
             .insert => |ins| try self.executeInsert(ins, ctx, mutations),
             .update => |upd| try self.executeUpdate(upd, ctx, mutations),
             .delete => |del| try self.executeDelete(del, ctx, mutations),
-            .assert => |a|   try self.executeAssert(a, ctx),
+            .assert => |a| try self.executeAssert(a, ctx),
         }
     }
 
     fn executeScan(
         self: *SqlExecutor,
         node: *plan_mod.PlanNode,
-        ctx:  EvalCtx,
-        out:  *std.ArrayList([]const ?ColumnValue),
+        ctx: EvalCtx,
+        out: *std.ArrayList([]const ?ColumnValue),
     ) SqlExecError!void {
         switch (node.*) {
             .scan => |s| {
@@ -300,11 +300,17 @@ pub const SqlExecutor = struct {
                 try self.executeScan(l.input, ctx, &inner);
                 const offset_val: u64 = if (l.offset) |o| blk: {
                     const v = try evalExpr(o, ctx);
-                    break :blk switch (v) { .int_val => |n| @intCast(n), else => 0 };
+                    break :blk switch (v) {
+                        .int_val => |n| @intCast(n),
+                        else => 0,
+                    };
                 } else 0;
                 const limit_val: u64 = if (l.limit) |lim| blk: {
                     const v = try evalExpr(lim, ctx);
-                    break :blk switch (v) { .int_val => |n| @intCast(n), else => std.math.maxInt(u64) };
+                    break :blk switch (v) {
+                        .int_val => |n| @intCast(n),
+                        else => std.math.maxInt(u64),
+                    };
                 } else std.math.maxInt(u64);
                 var taken: u64 = 0;
                 for (inner.items, 0..) |row, i| {
@@ -329,8 +335,8 @@ pub const SqlExecutor = struct {
                     eval_ctx: EvalCtx,
                 };
                 _ = SortCtx{
-                    .rows     = inner.items,
-                    .keys     = s.keys,
+                    .rows = inner.items,
+                    .keys = s.keys,
                     .eval_ctx = ctx,
                 };
                 // Simple insertion sort for determinism (stable)
@@ -364,7 +370,7 @@ pub const SqlExecutor = struct {
                     try out.append(ctx.alloc, try ctx.alloc.dupe(?ColumnValue, r));
                 }
             },
-            .empty      => {}, // no rows
+            .empty => {}, // no rows
             .single_row => { // one empty row (for FROM-less SELECT)
                 const r = try ctx.alloc.alloc(?ColumnValue, 0);
                 try out.append(ctx.alloc, r);
@@ -381,7 +387,7 @@ pub const SqlExecutor = struct {
                     for (right_rows.items) |r| ctx.alloc.free(r);
                     right_rows.deinit(ctx.alloc);
                 }
-                try self.executeScan(j.left,  ctx, &left_rows);
+                try self.executeScan(j.left, ctx, &left_rows);
                 try self.executeScan(j.right, ctx, &right_rows);
 
                 const right_width = if (right_rows.items.len > 0) right_rows.items[0].len else 0;
@@ -421,7 +427,10 @@ pub const SqlExecutor = struct {
                             join_ctx.row = combined;
                             const passes = (try evalExpr(j.condition, join_ctx)).toBool() orelse false;
                             ctx.alloc.free(combined);
-                            if (passes) { any_match = true; break; }
+                            if (passes) {
+                                any_match = true;
+                                break;
+                            }
                         }
                         if (!any_match) {
                             const padded = try ctx.alloc.alloc(?ColumnValue, left_rows.items[0].len + rr.len);
@@ -442,7 +451,7 @@ pub const SqlExecutor = struct {
                 try self.executeScan(ha.input, ctx, &inner);
 
                 const GroupRow = struct {
-                    key:    []const ?ColumnValue,
+                    key: []const ?ColumnValue,
                     accums: []AggAccum,
                 };
 
@@ -467,7 +476,10 @@ pub const SqlExecutor = struct {
 
                     var found_group: ?*GroupRow = null;
                     for (groups.items) |*g| {
-                        if (aggKeyEquals(g.key, key)) { found_group = g; break; }
+                        if (aggKeyEquals(g.key, key)) {
+                            found_group = g;
+                            break;
+                        }
                     }
 
                     if (found_group) |g| {
@@ -510,9 +522,9 @@ pub const SqlExecutor = struct {
     }
 
     fn executeInsert(
-        self:      *SqlExecutor,
-        ins:       plan_mod.InsertPlan,
-        ctx:       EvalCtx,
+        self: *SqlExecutor,
+        ins: plan_mod.InsertPlan,
+        ctx: EvalCtx,
         mutations: *std.ArrayList(Mutation),
     ) SqlExecError!void {
         const tbl = self.schema.getTableById(ins.table_id) orelse return error.TableNotFound;
@@ -533,10 +545,10 @@ pub const SqlExecutor = struct {
                     const key = try buildPrimaryKey(tbl, ins.column_ids, values, ctx.alloc);
 
                     try mutations.append(ctx.alloc, .{
-                        .kind     = .insert,
+                        .kind = .insert,
                         .table_id = ins.table_id,
-                        .key      = key,
-                        .values   = values,
+                        .key = key,
+                        .values = values,
                     });
                 }
             },
@@ -562,10 +574,10 @@ pub const SqlExecutor = struct {
                     }
                     const key = try buildPrimaryKey(tbl, ins.column_ids, values, ctx.alloc);
                     try mutations.append(ctx.alloc, .{
-                        .kind     = .insert,
+                        .kind = .insert,
                         .table_id = ins.table_id,
-                        .key      = key,
-                        .values   = values,
+                        .key = key,
+                        .values = values,
                     });
                 }
             },
@@ -573,9 +585,9 @@ pub const SqlExecutor = struct {
     }
 
     fn executeUpdate(
-        self:      *SqlExecutor,
-        upd:       plan_mod.UpdatePlan,
-        ctx:       EvalCtx,
+        self: *SqlExecutor,
+        upd: plan_mod.UpdatePlan,
+        ctx: EvalCtx,
         mutations: *std.ArrayList(Mutation),
     ) SqlExecError!void {
         const tbl = self.schema.getTableById(upd.table_id) orelse return error.TableNotFound;
@@ -618,18 +630,18 @@ pub const SqlExecutor = struct {
 
             const key = try ctx.alloc.dupe(u8, row.key);
             try mutations.append(ctx.alloc, .{
-                .kind     = .update,
+                .kind = .update,
                 .table_id = upd.table_id,
-                .key      = key,
-                .values   = new_values,
+                .key = key,
+                .values = new_values,
             });
         }
     }
 
     fn executeDelete(
-        self:      *SqlExecutor,
-        del:       plan_mod.DeletePlan,
-        ctx:       EvalCtx,
+        self: *SqlExecutor,
+        del: plan_mod.DeletePlan,
+        ctx: EvalCtx,
         mutations: *std.ArrayList(Mutation),
     ) SqlExecError!void {
         const tbl = self.schema.getTableById(del.table_id) orelse return error.TableNotFound;
@@ -648,18 +660,18 @@ pub const SqlExecutor = struct {
             }
             const key = try ctx.alloc.dupe(u8, row.key);
             try mutations.append(ctx.alloc, .{
-                .kind     = .delete,
+                .kind = .delete,
                 .table_id = del.table_id,
-                .key      = key,
-                .values   = null,
+                .key = key,
+                .values = null,
             });
         }
     }
 
     fn executeAssert(
         self: *SqlExecutor,
-        a:    plan_mod.AssertPlan,
-        ctx:  EvalCtx,
+        a: plan_mod.AssertPlan,
+        ctx: EvalCtx,
     ) SqlExecError!void {
         _ = self;
         const v = try evalExpr(a.predicate, ctx);
@@ -667,9 +679,9 @@ pub const SqlExecutor = struct {
     }
 
     fn rowToValues(
-        self:  *SqlExecutor,
-        row:   Row,
-        cols:  []const schema_mod.ColumnId,
+        self: *SqlExecutor,
+        row: Row,
+        cols: []const schema_mod.ColumnId,
         alloc: std.mem.Allocator,
     ) SqlExecError![]const ?ColumnValue {
         _ = self;
@@ -690,12 +702,12 @@ pub const SqlExecutor = struct {
 // ─── Aggregate accumulator ────────────────────────────────────────────────────
 
 const AggAccum = struct {
-    count:     i64 = 0,
-    sum_int:   i64 = 0,
+    count: i64 = 0,
+    sum_int: i64 = 0,
     sum_float: f64 = 0.0,
-    is_float:  bool = false,
-    min:       ?plan_mod.Value = null,
-    max:       ?plan_mod.Value = null,
+    is_float: bool = false,
+    min: ?plan_mod.Value = null,
+    max: ?plan_mod.Value = null,
 
     fn update(self: *AggAccum, ae: plan_mod.AggExpr, row_ctx: EvalCtx) SqlExecError!void {
         const val = if (ae.arg) |arg| try evalExpr(arg, row_ctx) else .null_val;
@@ -704,12 +716,16 @@ const AggAccum = struct {
         if (std.ascii.eqlIgnoreCase(fn_name, "count")) {
             if (ae.arg == null or val != .null_val) self.count += 1;
         } else if (std.ascii.eqlIgnoreCase(fn_name, "sum") or
-                   std.ascii.eqlIgnoreCase(fn_name, "avg")) {
+            std.ascii.eqlIgnoreCase(fn_name, "avg"))
+        {
             if (val != .null_val) {
                 self.count += 1;
                 switch (val) {
-                    .int_val   => |n| self.sum_int += n,
-                    .float_val => |f| { self.sum_float += f; self.is_float = true; },
+                    .int_val => |n| self.sum_int += n,
+                    .float_val => |f| {
+                        self.sum_float += f;
+                        self.is_float = true;
+                    },
                     else => {},
                 }
             }
@@ -757,13 +773,13 @@ fn aggKeyEquals(a: []const ?ColumnValue, b: []const ?ColumnValue) bool {
 
 fn evalExpr(e: *plan_mod.PlanExpr, ctx: EvalCtx) SqlExecError!plan_mod.Value {
     return switch (e.*) {
-        .null_literal  => .null_val,
-        .bool_literal  => |v| .{ .bool_val  = v },
-        .int_literal   => |v| .{ .int_val   = v },
-        .uint_literal  => |v| .{ .uint_val  = v },
+        .null_literal => .null_val,
+        .bool_literal => |v| .{ .bool_val = v },
+        .int_literal => |v| .{ .int_val = v },
+        .uint_literal => |v| .{ .uint_val = v },
         .float_literal => |v| .{ .float_val = v },
         .string_literal => |v| .{ .string_val = v },
-        .bytes_literal  => |v| .{ .bytes_val  = v },
+        .bytes_literal => |v| .{ .bytes_val = v },
 
         .param => |i| {
             if (i >= ctx.params.len) return error.TypeMismatch;
@@ -773,9 +789,9 @@ fn evalExpr(e: *plan_mod.PlanExpr, ctx: EvalCtx) SqlExecError!plan_mod.Value {
         .nondet => |i| {
             if (i >= ctx.nondet.len) return .null_val;
             return switch (ctx.nondet[i]) {
-                .now     => |ts| .{ .int_val = ts },
-                .random  => |b|  .{ .bytes_val = &b },
-                .uuid_v7 => |b|  .{ .bytes_val = &b },
+                .now => |ts| .{ .int_val = ts },
+                .random => |b| .{ .bytes_val = &b },
+                .uuid_v7 => |b| .{ .bytes_val = &b },
             };
         },
 
@@ -794,9 +810,9 @@ fn evalExpr(e: *plan_mod.PlanExpr, ctx: EvalCtx) SqlExecError!plan_mod.Value {
             .neg => {
                 const v = try evalExpr(u.expr, ctx);
                 return switch (v) {
-                    .int_val   => |n| .{ .int_val   = -n },
+                    .int_val => |n| .{ .int_val = -n },
                     .float_val => |n| .{ .float_val = -n },
-                    else       => error.TypeMismatch,
+                    else => error.TypeMismatch,
                 };
             },
             .not => {
@@ -805,7 +821,7 @@ fn evalExpr(e: *plan_mod.PlanExpr, ctx: EvalCtx) SqlExecError!plan_mod.Value {
             },
         },
 
-        .is_null     => |inner| blk: {
+        .is_null => |inner| blk: {
             const v = try evalExpr(inner, ctx);
             break :blk .{ .bool_val = v == .null_val };
         },
@@ -843,47 +859,66 @@ fn evalExpr(e: *plan_mod.PlanExpr, ctx: EvalCtx) SqlExecError!plan_mod.Value {
 }
 
 fn evalBinary(
-    op:    ast.BinOp,
-    left:  *plan_mod.PlanExpr,
+    op: ast.BinOp,
+    left: *plan_mod.PlanExpr,
     right: *plan_mod.PlanExpr,
-    ctx:   EvalCtx,
+    ctx: EvalCtx,
 ) SqlExecError!plan_mod.Value {
-    const lv = try evalExpr(left,  ctx);
+    const lv = try evalExpr(left, ctx);
     const rv = try evalExpr(right, ctx);
 
     if (lv == .null_val or rv == .null_val) {
         return switch (op) {
             .eq, .neq, .lt, .gt, .lte, .gte => .null_val,
-            .and_op => if (lv == .null_val and rv.toBool() == false) .{ .bool_val = false }
-                       else .null_val,
-            .or_op  => if (lv == .null_val and rv.toBool() == true)  .{ .bool_val = true }
-                       else .null_val,
-            else    => .null_val,
+            .and_op => if (lv == .null_val and rv.toBool() == false) .{ .bool_val = false } else .null_val,
+            .or_op => if (lv == .null_val and rv.toBool() == true) .{ .bool_val = true } else .null_val,
+            else => .null_val,
         };
     }
 
     return switch (op) {
         .add => switch (lv) {
-            .int_val   => |a| switch (rv) { .int_val   => |b| .{ .int_val   = a + b }, else => error.TypeMismatch },
-            .float_val => |a| switch (rv) { .float_val => |b| .{ .float_val = a + b }, else => error.TypeMismatch },
+            .int_val => |a| switch (rv) {
+                .int_val => |b| .{ .int_val = a + b },
+                else => error.TypeMismatch,
+            },
+            .float_val => |a| switch (rv) {
+                .float_val => |b| .{ .float_val = a + b },
+                else => error.TypeMismatch,
+            },
             else => error.TypeMismatch,
         },
         .sub => switch (lv) {
-            .int_val   => |a| switch (rv) { .int_val   => |b| .{ .int_val   = a - b }, else => error.TypeMismatch },
-            .float_val => |a| switch (rv) { .float_val => |b| .{ .float_val = a - b }, else => error.TypeMismatch },
+            .int_val => |a| switch (rv) {
+                .int_val => |b| .{ .int_val = a - b },
+                else => error.TypeMismatch,
+            },
+            .float_val => |a| switch (rv) {
+                .float_val => |b| .{ .float_val = a - b },
+                else => error.TypeMismatch,
+            },
             else => error.TypeMismatch,
         },
         .mul => switch (lv) {
-            .int_val   => |a| switch (rv) { .int_val   => |b| .{ .int_val   = a * b }, else => error.TypeMismatch },
-            .float_val => |a| switch (rv) { .float_val => |b| .{ .float_val = a * b }, else => error.TypeMismatch },
+            .int_val => |a| switch (rv) {
+                .int_val => |b| .{ .int_val = a * b },
+                else => error.TypeMismatch,
+            },
+            .float_val => |a| switch (rv) {
+                .float_val => |b| .{ .float_val = a * b },
+                else => error.TypeMismatch,
+            },
             else => error.TypeMismatch,
         },
         .div => switch (lv) {
-            .int_val   => |a| switch (rv) {
+            .int_val => |a| switch (rv) {
                 .int_val => |b| if (b == 0) error.DivisionByZero else .{ .int_val = @divTrunc(a, b) },
                 else => error.TypeMismatch,
             },
-            .float_val => |a| switch (rv) { .float_val => |b| .{ .float_val = a / b }, else => error.TypeMismatch },
+            .float_val => |a| switch (rv) {
+                .float_val => |b| .{ .float_val = a / b },
+                else => error.TypeMismatch,
+            },
             else => error.TypeMismatch,
         },
         .mod => switch (lv) {
@@ -893,14 +928,14 @@ fn evalBinary(
             },
             else => error.TypeMismatch,
         },
-        .eq  => .{ .bool_val = lv.eql(rv) },
+        .eq => .{ .bool_val = lv.eql(rv) },
         .neq => .{ .bool_val = !lv.eql(rv) },
-        .lt  => .{ .bool_val = lv.lessThan(rv) },
-        .gt  => .{ .bool_val = rv.lessThan(lv) },
+        .lt => .{ .bool_val = lv.lessThan(rv) },
+        .gt => .{ .bool_val = rv.lessThan(lv) },
         .lte => .{ .bool_val = lv.lessThan(rv) or lv.eql(rv) },
         .gte => .{ .bool_val = rv.lessThan(lv) or lv.eql(rv) },
         .and_op => .{ .bool_val = (lv.toBool() orelse false) and (rv.toBool() orelse false) },
-        .or_op  => .{ .bool_val = (lv.toBool() orelse false) or  (rv.toBool() orelse false) },
+        .or_op => .{ .bool_val = (lv.toBool() orelse false) or (rv.toBool() orelse false) },
         .concat => switch (lv) {
             .string_val => |a| switch (rv) {
                 .string_val => |b| blk: {
@@ -914,7 +949,7 @@ fn evalBinary(
             else => error.TypeMismatch,
         },
         .contains, .contained => .null_val, // JSON ops - simplified
-        .arrow, .darrow       => .null_val, // JSON ops - simplified
+        .arrow, .darrow => .null_val, // JSON ops - simplified
     };
 }
 
@@ -939,7 +974,7 @@ fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) SqlEx
     }
     if (std.ascii.eqlIgnoreCase(name, "like")) {
         if (args.len != 2) return error.TypeMismatch;
-        const s   = (try evalExpr(args[0], ctx)).string_val;
+        const s = (try evalExpr(args[0], ctx)).string_val;
         const pat = (try evalExpr(args[1], ctx)).string_val;
         return .{ .bool_val = likeMatch(s, pat) };
     }
@@ -955,8 +990,8 @@ fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) SqlEx
         const v = try evalExpr(args[0], ctx);
         return switch (v) {
             .string_val => |s| .{ .int_val = @intCast(s.len) },
-            .bytes_val  => |b| .{ .int_val = @intCast(b.len) },
-            else        => error.TypeMismatch,
+            .bytes_val => |b| .{ .int_val = @intCast(b.len) },
+            else => error.TypeMismatch,
         };
     }
     if (std.ascii.eqlIgnoreCase(name, "lower")) {
@@ -989,7 +1024,7 @@ fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) SqlEx
         if (args.len != 1) return error.TypeMismatch;
         const s = (try evalExpr(args[0], ctx)).string_val;
         var i: usize = s.len;
-        while (i > 0 and (s[i-1] == ' ' or s[i-1] == '\t' or s[i-1] == '\n' or s[i-1] == '\r')) i -= 1;
+        while (i > 0 and (s[i - 1] == ' ' or s[i - 1] == '\t' or s[i - 1] == '\n' or s[i - 1] == '\r')) i -= 1;
         return .{ .string_val = s[0..i] };
     }
     if (std.ascii.eqlIgnoreCase(name, "substr") or std.ascii.eqlIgnoreCase(name, "substring")) {
@@ -1009,14 +1044,14 @@ fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) SqlEx
     }
     if (std.ascii.eqlIgnoreCase(name, "replace")) {
         if (args.len != 3) return error.TypeMismatch;
-        const s   = (try evalExpr(args[0], ctx)).string_val;
+        const s = (try evalExpr(args[0], ctx)).string_val;
         const from = (try evalExpr(args[1], ctx)).string_val;
-        const to   = (try evalExpr(args[2], ctx)).string_val;
+        const to = (try evalExpr(args[2], ctx)).string_val;
         if (from.len == 0) return .{ .string_val = s };
         var buf: std.ArrayList(u8) = .empty;
         var i: usize = 0;
         while (i < s.len) {
-            if (i + from.len <= s.len and std.mem.eql(u8, s[i..i + from.len], from)) {
+            if (i + from.len <= s.len and std.mem.eql(u8, s[i .. i + from.len], from)) {
                 try buf.appendSlice(ctx.alloc, to);
                 i += from.len;
             } else {
@@ -1032,17 +1067,17 @@ fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) SqlEx
             const v = try evalExpr(a, ctx);
             switch (v) {
                 .string_val => |s| try result.appendSlice(ctx.alloc, s),
-                .int_val    => |n| {
+                .int_val => |n| {
                     const s = try std.fmt.allocPrint(ctx.alloc, "{d}", .{n});
                     defer ctx.alloc.free(s);
                     try result.appendSlice(ctx.alloc, s);
                 },
-                .float_val  => |f| {
+                .float_val => |f| {
                     const s = try std.fmt.allocPrint(ctx.alloc, "{d}", .{f});
                     defer ctx.alloc.free(s);
                     try result.appendSlice(ctx.alloc, s);
                 },
-                else        => {},
+                else => {},
             }
         }
         return .{ .string_val = try result.toOwnedSlice(ctx.alloc) };
@@ -1075,9 +1110,9 @@ fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) SqlEx
         if (args.len != 1) return error.TypeMismatch;
         const v = try evalExpr(args[0], ctx);
         return switch (v) {
-            .int_val   => |n| .{ .int_val   = if (n < 0) -n else n },
+            .int_val => |n| .{ .int_val = if (n < 0) -n else n },
             .float_val => |f| .{ .float_val = @abs(f) },
-            else       => error.TypeMismatch,
+            else => error.TypeMismatch,
         };
     }
     if (std.ascii.eqlIgnoreCase(name, "floor")) {
@@ -1085,8 +1120,8 @@ fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) SqlEx
         const v = try evalExpr(args[0], ctx);
         return switch (v) {
             .float_val => |f| .{ .float_val = @floor(f) },
-            .int_val   => v,
-            else       => error.TypeMismatch,
+            .int_val => v,
+            else => error.TypeMismatch,
         };
     }
     if (std.ascii.eqlIgnoreCase(name, "ceil") or std.ascii.eqlIgnoreCase(name, "ceiling")) {
@@ -1094,8 +1129,8 @@ fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) SqlEx
         const v = try evalExpr(args[0], ctx);
         return switch (v) {
             .float_val => |f| .{ .float_val = @ceil(f) },
-            .int_val   => v,
-            else       => error.TypeMismatch,
+            .int_val => v,
+            else => error.TypeMismatch,
         };
     }
     if (std.ascii.eqlIgnoreCase(name, "round")) {
@@ -1103,8 +1138,8 @@ fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) SqlEx
         const v = try evalExpr(args[0], ctx);
         return switch (v) {
             .float_val => |f| .{ .float_val = @round(f) },
-            .int_val   => v,
-            else       => error.TypeMismatch,
+            .int_val => v,
+            else => error.TypeMismatch,
         };
     }
     // Unknown functions return null (user WASM functions handled separately)
@@ -1142,71 +1177,107 @@ fn likeMatch(s: []const u8, pattern: []const u8) bool {
 
 fn columnValueToPlanValue(cv: ColumnValue) plan_mod.Value {
     return switch (cv) {
-        .bool_t  => |v| .{ .bool_val  = v },
-        .int8    => |v| .{ .int_val   = v },
-        .int16   => |v| .{ .int_val   = v },
-        .int32   => |v| .{ .int_val   = v },
-        .int64   => |v| .{ .int_val   = v },
-        .uint8   => |v| .{ .uint_val  = v },
-        .uint16  => |v| .{ .uint_val  = v },
-        .uint32  => |v| .{ .uint_val  = v },
-        .uint64  => |v| .{ .uint_val  = v },
+        .bool_t => |v| .{ .bool_val = v },
+        .int8 => |v| .{ .int_val = v },
+        .int16 => |v| .{ .int_val = v },
+        .int32 => |v| .{ .int_val = v },
+        .int64 => |v| .{ .int_val = v },
+        .uint8 => |v| .{ .uint_val = v },
+        .uint16 => |v| .{ .uint_val = v },
+        .uint32 => |v| .{ .uint_val = v },
+        .uint64 => |v| .{ .uint_val = v },
         .float32 => |v| .{ .float_val = v },
         .float64 => |v| .{ .float_val = v },
-        .string  => |v| .{ .string_val = v },
-        .bytes   => |v| .{ .bytes_val  = v },
+        .string => |v| .{ .string_val = v },
+        .bytes => |v| .{ .bytes_val = v },
     };
 }
 
 fn planValueToColumnValue(v: plan_mod.Value, alloc: std.mem.Allocator) !ColumnValue {
     return switch (v) {
-        .null_val   => error.TypeMismatch,
-        .bool_val   => |b| .{ .bool_t  = b },
-        .int_val    => |n| .{ .int64   = n },
-        .uint_val   => |n| .{ .uint64  = n },
-        .float_val  => |f| .{ .float64 = f },
-        .string_val => |s| .{ .string  = try alloc.dupe(u8, s) },
-        .bytes_val  => |b| .{ .bytes   = try alloc.dupe(u8, b) },
-        .opaque_val => |b| .{ .bytes   = try alloc.dupe(u8, b) },
+        .null_val => error.TypeMismatch,
+        .bool_val => |b| .{ .bool_t = b },
+        .int_val => |n| .{ .int64 = n },
+        .uint_val => |n| .{ .uint64 = n },
+        .float_val => |f| .{ .float64 = f },
+        .string_val => |s| .{ .string = try alloc.dupe(u8, s) },
+        .bytes_val => |b| .{ .bytes = try alloc.dupe(u8, b) },
+        .opaque_val => |b| .{ .bytes = try alloc.dupe(u8, b) },
     };
 }
 
 fn planValueToTypedColumnValue(v: plan_mod.Value, typ: ast.SqlType, alloc: std.mem.Allocator) SqlExecError!ColumnValue {
     return switch (typ) {
-        .bool    => .{ .bool_t  = v.toBool() orelse return error.TypeMismatch },
-        .int8    => switch (v) { .int_val => |n| .{ .int8   = @intCast(n) }, else => error.TypeMismatch },
-        .int16   => switch (v) { .int_val => |n| .{ .int16  = @intCast(n) }, else => error.TypeMismatch },
-        .int32   => switch (v) { .int_val => |n| .{ .int32  = @intCast(n) }, else => error.TypeMismatch },
-        .int64   => switch (v) { .int_val => |n| .{ .int64  = n            }, else => error.TypeMismatch },
-        .uint8   => switch (v) { .uint_val => |n| .{ .uint8  = @intCast(n) }, else => error.TypeMismatch },
-        .uint16  => switch (v) { .uint_val => |n| .{ .uint16 = @intCast(n) }, else => error.TypeMismatch },
-        .uint32  => switch (v) { .uint_val => |n| .{ .uint32 = @intCast(n) }, else => error.TypeMismatch },
-        .uint64  => switch (v) { .uint_val => |n| .{ .uint64 = n            }, else => error.TypeMismatch },
-        .float32 => switch (v) { .float_val => |f| .{ .float32 = @floatCast(f) }, else => error.TypeMismatch },
-        .float64 => switch (v) { .float_val => |f| .{ .float64 = f            }, else => error.TypeMismatch },
-        .string  => switch (v) { .string_val => |s| .{ .string = try alloc.dupe(u8, s) }, else => error.TypeMismatch },
-        .bytes   => switch (v) { .bytes_val  => |b| .{ .bytes  = try alloc.dupe(u8, b) }, else => error.TypeMismatch },
-        else     => planValueToColumnValue(v, alloc) catch error.TypeMismatch,
+        .bool => .{ .bool_t = v.toBool() orelse return error.TypeMismatch },
+        .int8 => switch (v) {
+            .int_val => |n| .{ .int8 = @intCast(n) },
+            else => error.TypeMismatch,
+        },
+        .int16 => switch (v) {
+            .int_val => |n| .{ .int16 = @intCast(n) },
+            else => error.TypeMismatch,
+        },
+        .int32 => switch (v) {
+            .int_val => |n| .{ .int32 = @intCast(n) },
+            else => error.TypeMismatch,
+        },
+        .int64 => switch (v) {
+            .int_val => |n| .{ .int64 = n },
+            else => error.TypeMismatch,
+        },
+        .uint8 => switch (v) {
+            .uint_val => |n| .{ .uint8 = @intCast(n) },
+            else => error.TypeMismatch,
+        },
+        .uint16 => switch (v) {
+            .uint_val => |n| .{ .uint16 = @intCast(n) },
+            else => error.TypeMismatch,
+        },
+        .uint32 => switch (v) {
+            .uint_val => |n| .{ .uint32 = @intCast(n) },
+            else => error.TypeMismatch,
+        },
+        .uint64 => switch (v) {
+            .uint_val => |n| .{ .uint64 = n },
+            else => error.TypeMismatch,
+        },
+        .float32 => switch (v) {
+            .float_val => |f| .{ .float32 = @floatCast(f) },
+            else => error.TypeMismatch,
+        },
+        .float64 => switch (v) {
+            .float_val => |f| .{ .float64 = f },
+            else => error.TypeMismatch,
+        },
+        .string => switch (v) {
+            .string_val => |s| .{ .string = try alloc.dupe(u8, s) },
+            else => error.TypeMismatch,
+        },
+        .bytes => switch (v) {
+            .bytes_val => |b| .{ .bytes = try alloc.dupe(u8, b) },
+            else => error.TypeMismatch,
+        },
+        else => planValueToColumnValue(v, alloc) catch error.TypeMismatch,
     };
 }
 
 fn castValue(v: plan_mod.Value, to: ast.SqlType) !plan_mod.Value {
     return switch (to) {
         .int64 => switch (v) {
-            .int_val   => v,
-            .uint_val  => |n| .{ .int_val = @intCast(n) },
+            .int_val => v,
+            .uint_val => |n| .{ .int_val = @intCast(n) },
             .float_val => |f| .{ .int_val = @as(i64, @intFromFloat(f)) },
-            else       => error.TypeMismatch,
+            else => error.TypeMismatch,
         },
         .float64 => switch (v) {
             .float_val => v,
-            .int_val   => |n| .{ .float_val = @floatFromInt(n) },
-            .uint_val  => |n| .{ .float_val = @floatFromInt(n) },
-            else       => error.TypeMismatch,
+            .int_val => |n| .{ .float_val = @floatFromInt(n) },
+            .uint_val => |n| .{ .float_val = @floatFromInt(n) },
+            else => error.TypeMismatch,
         },
         .string => switch (v) {
             .string_val => v,
-            else        => error.TypeMismatch,
+            else => error.TypeMismatch,
         },
         else => v,
     };
@@ -1214,28 +1285,28 @@ fn castValue(v: plan_mod.Value, to: ast.SqlType) !plan_mod.Value {
 
 fn defaultValue(typ: ast.SqlType) ColumnValue {
     return switch (typ) {
-        .bool         => .{ .bool_t  = false },
-        .int8         => .{ .int8    = 0 },
-        .int16        => .{ .int16   = 0 },
-        .int32        => .{ .int32   = 0 },
-        .int64        => .{ .int64   = 0 },
-        .uint8        => .{ .uint8   = 0 },
-        .uint16       => .{ .uint16  = 0 },
-        .uint32       => .{ .uint32  = 0 },
-        .uint64       => .{ .uint64  = 0 },
-        .float32      => .{ .float32 = 0.0 },
-        .float64      => .{ .float64 = 0.0 },
-        .string       => .{ .string  = "" },
-        .bytes        => .{ .bytes   = "" },
-        else          => .{ .bytes   = "" },
+        .bool => .{ .bool_t = false },
+        .int8 => .{ .int8 = 0 },
+        .int16 => .{ .int16 = 0 },
+        .int32 => .{ .int32 = 0 },
+        .int64 => .{ .int64 = 0 },
+        .uint8 => .{ .uint8 = 0 },
+        .uint16 => .{ .uint16 = 0 },
+        .uint32 => .{ .uint32 = 0 },
+        .uint64 => .{ .uint64 = 0 },
+        .float32 => .{ .float32 = 0.0 },
+        .float64 => .{ .float64 = 0.0 },
+        .string => .{ .string = "" },
+        .bytes => .{ .bytes = "" },
+        else => .{ .bytes = "" },
     };
 }
 
 fn buildPrimaryKey(
-    tbl:     *const schema_mod.TableSchema,
+    tbl: *const schema_mod.TableSchema,
     col_ids: []const schema_mod.ColumnId,
-    values:  []const ColumnValue,
-    alloc:   std.mem.Allocator,
+    values: []const ColumnValue,
+    alloc: std.mem.Allocator,
 ) SqlExecError![]const u8 {
     var key_buf: std.ArrayList(u8) = .empty;
     for (tbl.primary_key) |pk_col_id| {
@@ -1252,35 +1323,35 @@ fn buildPrimaryKey(
 
 fn encodeKeyComponent(buf: *std.ArrayList(u8), v: ColumnValue, alloc: std.mem.Allocator) !void {
     switch (v) {
-        .bool_t  => |b| try buf.append(alloc, if (b) 1 else 0),
-        .int8    => |n| try buf.append(alloc, @bitCast(n)),
-        .int16   => |n| {
+        .bool_t => |b| try buf.append(alloc, if (b) 1 else 0),
+        .int8 => |n| try buf.append(alloc, @bitCast(n)),
+        .int16 => |n| {
             var b: [2]u8 = undefined;
             std.mem.writeInt(i16, &b, n, .big);
             try buf.appendSlice(alloc, &b);
         },
-        .int32   => |n| {
+        .int32 => |n| {
             var b: [4]u8 = undefined;
             std.mem.writeInt(i32, &b, n, .big);
             try buf.appendSlice(alloc, &b);
         },
-        .int64   => |n| {
+        .int64 => |n| {
             var b: [8]u8 = undefined;
             std.mem.writeInt(i64, &b, n, .big);
             try buf.appendSlice(alloc, &b);
         },
-        .uint8   => |n| try buf.append(alloc, n),
-        .uint16  => |n| {
+        .uint8 => |n| try buf.append(alloc, n),
+        .uint16 => |n| {
             var b: [2]u8 = undefined;
             std.mem.writeInt(u16, &b, n, .big);
             try buf.appendSlice(alloc, &b);
         },
-        .uint32  => |n| {
+        .uint32 => |n| {
             var b: [4]u8 = undefined;
             std.mem.writeInt(u32, &b, n, .big);
             try buf.appendSlice(alloc, &b);
         },
-        .uint64  => |n| {
+        .uint64 => |n| {
             var b: [8]u8 = undefined;
             std.mem.writeInt(u64, &b, n, .big);
             try buf.appendSlice(alloc, &b);
@@ -1297,13 +1368,13 @@ fn encodeKeyComponent(buf: *std.ArrayList(u8), v: ColumnValue, alloc: std.mem.Al
             std.mem.writeInt(u64, &b, bits, .big);
             try buf.appendSlice(alloc, &b);
         },
-        .string  => |s| {
+        .string => |s| {
             var len_buf: [4]u8 = undefined;
             std.mem.writeInt(u32, &len_buf, @intCast(s.len), .big);
             try buf.appendSlice(alloc, &len_buf);
             try buf.appendSlice(alloc, s);
         },
-        .bytes   => |b| {
+        .bytes => |b| {
             var len_buf: [4]u8 = undefined;
             std.mem.writeInt(u32, &len_buf, @intCast(b.len), .big);
             try buf.appendSlice(alloc, &len_buf);
@@ -1335,24 +1406,58 @@ fn encodeParamValue(buf: *std.ArrayList(u8), v: ColumnValue, alloc: std.mem.Allo
     const tag: u8 = @intFromEnum(@as(ColumnType, v));
     try buf.append(alloc, tag);
     switch (v) {
-        .bool_t  => |b|   try buf.append(alloc, if (b) 1 else 0),
-        .int8    => |n|   try buf.append(alloc, @bitCast(n)),
-        .int16   => |n| { var b: [2]u8 = undefined; std.mem.writeInt(i16, &b, n, .little); try buf.appendSlice(alloc, &b); },
-        .int32   => |n| { var b: [4]u8 = undefined; std.mem.writeInt(i32, &b, n, .little); try buf.appendSlice(alloc, &b); },
-        .int64   => |n| { var b: [8]u8 = undefined; std.mem.writeInt(i64, &b, n, .little); try buf.appendSlice(alloc, &b); },
-        .uint8   => |n|   try buf.append(alloc, n),
-        .uint16  => |n| { var b: [2]u8 = undefined; std.mem.writeInt(u16, &b, n, .little); try buf.appendSlice(alloc, &b); },
-        .uint32  => |n| { var b: [4]u8 = undefined; std.mem.writeInt(u32, &b, n, .little); try buf.appendSlice(alloc, &b); },
-        .uint64  => |n| { var b: [8]u8 = undefined; std.mem.writeInt(u64, &b, n, .little); try buf.appendSlice(alloc, &b); },
-        .float32 => |n| { var b: [4]u8 = undefined; std.mem.writeInt(u32, &b, @bitCast(n), .little); try buf.appendSlice(alloc, &b); },
-        .float64 => |n| { var b: [8]u8 = undefined; std.mem.writeInt(u64, &b, @bitCast(n), .little); try buf.appendSlice(alloc, &b); },
-        .string  => |s| {
-            var lb: [4]u8 = undefined; std.mem.writeInt(u32, &lb, @intCast(s.len), .little);
+        .bool_t => |b| try buf.append(alloc, if (b) 1 else 0),
+        .int8 => |n| try buf.append(alloc, @bitCast(n)),
+        .int16 => |n| {
+            var b: [2]u8 = undefined;
+            std.mem.writeInt(i16, &b, n, .little);
+            try buf.appendSlice(alloc, &b);
+        },
+        .int32 => |n| {
+            var b: [4]u8 = undefined;
+            std.mem.writeInt(i32, &b, n, .little);
+            try buf.appendSlice(alloc, &b);
+        },
+        .int64 => |n| {
+            var b: [8]u8 = undefined;
+            std.mem.writeInt(i64, &b, n, .little);
+            try buf.appendSlice(alloc, &b);
+        },
+        .uint8 => |n| try buf.append(alloc, n),
+        .uint16 => |n| {
+            var b: [2]u8 = undefined;
+            std.mem.writeInt(u16, &b, n, .little);
+            try buf.appendSlice(alloc, &b);
+        },
+        .uint32 => |n| {
+            var b: [4]u8 = undefined;
+            std.mem.writeInt(u32, &b, n, .little);
+            try buf.appendSlice(alloc, &b);
+        },
+        .uint64 => |n| {
+            var b: [8]u8 = undefined;
+            std.mem.writeInt(u64, &b, n, .little);
+            try buf.appendSlice(alloc, &b);
+        },
+        .float32 => |n| {
+            var b: [4]u8 = undefined;
+            std.mem.writeInt(u32, &b, @bitCast(n), .little);
+            try buf.appendSlice(alloc, &b);
+        },
+        .float64 => |n| {
+            var b: [8]u8 = undefined;
+            std.mem.writeInt(u64, &b, @bitCast(n), .little);
+            try buf.appendSlice(alloc, &b);
+        },
+        .string => |s| {
+            var lb: [4]u8 = undefined;
+            std.mem.writeInt(u32, &lb, @intCast(s.len), .little);
             try buf.appendSlice(alloc, &lb);
             try buf.appendSlice(alloc, s);
         },
-        .bytes   => |s| {
-            var lb: [4]u8 = undefined; std.mem.writeInt(u32, &lb, @intCast(s.len), .little);
+        .bytes => |s| {
+            var lb: [4]u8 = undefined;
+            std.mem.writeInt(u32, &lb, @intCast(s.len), .little);
             try buf.appendSlice(alloc, &lb);
             try buf.appendSlice(alloc, s);
         },
@@ -1373,7 +1478,8 @@ pub fn decodeParams(data: []const u8, types: []const ast.SqlType, alloc: std.mem
     var pos: usize = 2;
     for (0..count) |i| {
         if (pos >= data.len) return error.TypeMismatch;
-        const tag_byte = data[pos]; pos += 1;
+        const tag_byte = data[pos];
+        pos += 1;
         if (types.len > 0) {
             values[i] = try decodeParamValue(data, &pos, types[i], alloc);
         } else {
@@ -1387,58 +1493,72 @@ pub fn decodeParams(data: []const u8, types: []const ast.SqlType, alloc: std.mem
 fn decodeParamValue(data: []const u8, pos: *usize, typ: ast.SqlType, alloc: std.mem.Allocator) !ColumnValue {
     return switch (typ) {
         .bool => blk: {
-            const b = data[pos.*]; pos.* += 1;
+            const b = data[pos.*];
+            pos.* += 1;
             break :blk .{ .bool_t = b != 0 };
         },
         .int8 => blk: {
-            const n: i8 = @bitCast(data[pos.*]); pos.* += 1;
+            const n: i8 = @bitCast(data[pos.*]);
+            pos.* += 1;
             break :blk .{ .int8 = n };
         },
         .int16 => blk: {
-            const n = std.mem.readInt(i16, data[pos.*..][0..2], .little); pos.* += 2;
+            const n = std.mem.readInt(i16, data[pos.*..][0..2], .little);
+            pos.* += 2;
             break :blk .{ .int16 = n };
         },
         .int32 => blk: {
-            const n = std.mem.readInt(i32, data[pos.*..][0..4], .little); pos.* += 4;
+            const n = std.mem.readInt(i32, data[pos.*..][0..4], .little);
+            pos.* += 4;
             break :blk .{ .int32 = n };
         },
         .int64 => blk: {
-            const n = std.mem.readInt(i64, data[pos.*..][0..8], .little); pos.* += 8;
+            const n = std.mem.readInt(i64, data[pos.*..][0..8], .little);
+            pos.* += 8;
             break :blk .{ .int64 = n };
         },
         .uint8 => blk: {
-            const n = data[pos.*]; pos.* += 1;
+            const n = data[pos.*];
+            pos.* += 1;
             break :blk .{ .uint8 = n };
         },
         .uint16 => blk: {
-            const n = std.mem.readInt(u16, data[pos.*..][0..2], .little); pos.* += 2;
+            const n = std.mem.readInt(u16, data[pos.*..][0..2], .little);
+            pos.* += 2;
             break :blk .{ .uint16 = n };
         },
         .uint32 => blk: {
-            const n = std.mem.readInt(u32, data[pos.*..][0..4], .little); pos.* += 4;
+            const n = std.mem.readInt(u32, data[pos.*..][0..4], .little);
+            pos.* += 4;
             break :blk .{ .uint32 = n };
         },
         .uint64 => blk: {
-            const n = std.mem.readInt(u64, data[pos.*..][0..8], .little); pos.* += 8;
+            const n = std.mem.readInt(u64, data[pos.*..][0..8], .little);
+            pos.* += 8;
             break :blk .{ .uint64 = n };
         },
         .float32 => blk: {
-            const bits = std.mem.readInt(u32, data[pos.*..][0..4], .little); pos.* += 4;
+            const bits = std.mem.readInt(u32, data[pos.*..][0..4], .little);
+            pos.* += 4;
             break :blk .{ .float32 = @bitCast(bits) };
         },
         .float64 => blk: {
-            const bits = std.mem.readInt(u64, data[pos.*..][0..8], .little); pos.* += 8;
+            const bits = std.mem.readInt(u64, data[pos.*..][0..8], .little);
+            pos.* += 8;
             break :blk .{ .float64 = @bitCast(bits) };
         },
         .string => blk: {
-            const len = std.mem.readInt(u32, data[pos.*..][0..4], .little); pos.* += 4;
-            const s = try alloc.dupe(u8, data[pos.*..pos.* + len]); pos.* += len;
+            const len = std.mem.readInt(u32, data[pos.*..][0..4], .little);
+            pos.* += 4;
+            const s = try alloc.dupe(u8, data[pos.* .. pos.* + len]);
+            pos.* += len;
             break :blk .{ .string = s };
         },
-        .bytes, .uuid, .timestamp, .interval_months, .interval_micros,
-        .json, .vector, .decimal => blk: {
-            const len = std.mem.readInt(u32, data[pos.*..][0..4], .little); pos.* += 4;
-            const b = try alloc.dupe(u8, data[pos.*..pos.* + len]); pos.* += len;
+        .bytes, .uuid, .timestamp, .interval_months, .interval_micros, .json, .vector, .decimal => blk: {
+            const len = std.mem.readInt(u32, data[pos.*..][0..4], .little);
+            pos.* += 4;
+            const b = try alloc.dupe(u8, data[pos.* .. pos.* + len]);
+            pos.* += len;
             break :blk .{ .bytes = b };
         },
         else => error.TypeMismatch,
@@ -1447,24 +1567,90 @@ fn decodeParamValue(data: []const u8, pos: *usize, typ: ast.SqlType, alloc: std.
 
 fn decodeParamValueByTag(data: []const u8, pos: *usize, tag: u8, alloc: std.mem.Allocator) !ColumnValue {
     const col_type: ColumnType = switch (tag) {
-        0 => .bool_t, 1 => .int8, 2 => .int16, 3 => .int32, 4 => .int64,
-        5 => .uint8, 6 => .uint16, 7 => .uint32, 8 => .uint64,
-        9 => .float32, 10 => .float64, 11 => .bytes, 12 => .string,
+        0 => .bool_t,
+        1 => .int8,
+        2 => .int16,
+        3 => .int32,
+        4 => .int64,
+        5 => .uint8,
+        6 => .uint16,
+        7 => .uint32,
+        8 => .uint64,
+        9 => .float32,
+        10 => .float64,
+        11 => .bytes,
+        12 => .string,
         else => return error.TypeMismatch,
     };
     return switch (col_type) {
-        .bool_t  => blk: { const b = data[pos.*]; pos.* += 1; break :blk .{ .bool_t = b != 0 }; },
-        .int8    => blk: { const n: i8 = @bitCast(data[pos.*]); pos.* += 1; break :blk .{ .int8 = n }; },
-        .int16   => blk: { const n = std.mem.readInt(i16, data[pos.*..][0..2], .little); pos.* += 2; break :blk .{ .int16 = n }; },
-        .int32   => blk: { const n = std.mem.readInt(i32, data[pos.*..][0..4], .little); pos.* += 4; break :blk .{ .int32 = n }; },
-        .int64   => blk: { const n = std.mem.readInt(i64, data[pos.*..][0..8], .little); pos.* += 8; break :blk .{ .int64 = n }; },
-        .uint8   => blk: { const n = data[pos.*]; pos.* += 1; break :blk .{ .uint8 = n }; },
-        .uint16  => blk: { const n = std.mem.readInt(u16, data[pos.*..][0..2], .little); pos.* += 2; break :blk .{ .uint16 = n }; },
-        .uint32  => blk: { const n = std.mem.readInt(u32, data[pos.*..][0..4], .little); pos.* += 4; break :blk .{ .uint32 = n }; },
-        .uint64  => blk: { const n = std.mem.readInt(u64, data[pos.*..][0..8], .little); pos.* += 8; break :blk .{ .uint64 = n }; },
-        .float32 => blk: { const b = std.mem.readInt(u32, data[pos.*..][0..4], .little); pos.* += 4; break :blk .{ .float32 = @bitCast(b) }; },
-        .float64 => blk: { const b = std.mem.readInt(u64, data[pos.*..][0..8], .little); pos.* += 8; break :blk .{ .float64 = @bitCast(b) }; },
-        .string  => blk: { const len = std.mem.readInt(u32, data[pos.*..][0..4], .little); pos.* += 4; const s = try alloc.dupe(u8, data[pos.*..pos.* + len]); pos.* += len; break :blk .{ .string = s }; },
-        .bytes   => blk: { const len = std.mem.readInt(u32, data[pos.*..][0..4], .little); pos.* += 4; const b = try alloc.dupe(u8, data[pos.*..pos.* + len]); pos.* += len; break :blk .{ .bytes = b }; },
+        .bool_t => blk: {
+            const b = data[pos.*];
+            pos.* += 1;
+            break :blk .{ .bool_t = b != 0 };
+        },
+        .int8 => blk: {
+            const n: i8 = @bitCast(data[pos.*]);
+            pos.* += 1;
+            break :blk .{ .int8 = n };
+        },
+        .int16 => blk: {
+            const n = std.mem.readInt(i16, data[pos.*..][0..2], .little);
+            pos.* += 2;
+            break :blk .{ .int16 = n };
+        },
+        .int32 => blk: {
+            const n = std.mem.readInt(i32, data[pos.*..][0..4], .little);
+            pos.* += 4;
+            break :blk .{ .int32 = n };
+        },
+        .int64 => blk: {
+            const n = std.mem.readInt(i64, data[pos.*..][0..8], .little);
+            pos.* += 8;
+            break :blk .{ .int64 = n };
+        },
+        .uint8 => blk: {
+            const n = data[pos.*];
+            pos.* += 1;
+            break :blk .{ .uint8 = n };
+        },
+        .uint16 => blk: {
+            const n = std.mem.readInt(u16, data[pos.*..][0..2], .little);
+            pos.* += 2;
+            break :blk .{ .uint16 = n };
+        },
+        .uint32 => blk: {
+            const n = std.mem.readInt(u32, data[pos.*..][0..4], .little);
+            pos.* += 4;
+            break :blk .{ .uint32 = n };
+        },
+        .uint64 => blk: {
+            const n = std.mem.readInt(u64, data[pos.*..][0..8], .little);
+            pos.* += 8;
+            break :blk .{ .uint64 = n };
+        },
+        .float32 => blk: {
+            const b = std.mem.readInt(u32, data[pos.*..][0..4], .little);
+            pos.* += 4;
+            break :blk .{ .float32 = @bitCast(b) };
+        },
+        .float64 => blk: {
+            const b = std.mem.readInt(u64, data[pos.*..][0..8], .little);
+            pos.* += 8;
+            break :blk .{ .float64 = @bitCast(b) };
+        },
+        .string => blk: {
+            const len = std.mem.readInt(u32, data[pos.*..][0..4], .little);
+            pos.* += 4;
+            const s = try alloc.dupe(u8, data[pos.* .. pos.* + len]);
+            pos.* += len;
+            break :blk .{ .string = s };
+        },
+        .bytes => blk: {
+            const len = std.mem.readInt(u32, data[pos.*..][0..4], .little);
+            pos.* += 4;
+            const b = try alloc.dupe(u8, data[pos.* .. pos.* + len]);
+            pos.* += len;
+            break :blk .{ .bytes = b };
+        },
     };
 }

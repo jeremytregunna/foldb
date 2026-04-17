@@ -3,19 +3,19 @@
 const std = @import("std");
 const testing = std.testing;
 const executor_mod = @import("executor.zig");
-const storage_mod  = @import("storage.zig");
-const log_mod      = @import("log.zig");
+const storage_mod = @import("storage.zig");
+const log_mod = @import("log.zig");
 
-const Executor      = executor_mod.Executor;
-const QueryContext  = executor_mod.QueryContext;
+const Executor = executor_mod.Executor;
+const QueryContext = executor_mod.QueryContext;
 const ResolvedValue = executor_mod.ResolvedValue;
-const Mutation      = executor_mod.Mutation;
-const Storage       = executor_mod.Storage;
-const LogEntry      = executor_mod.LogEntry;
+const Mutation = executor_mod.Mutation;
+const Storage = executor_mod.Storage;
+const LogEntry = executor_mod.LogEntry;
 const serializeTxnIntent = executor_mod.serializeTxnIntent;
 
-const TableSchema  = storage_mod.TableSchema;
-const ColumnValue  = storage_mod.ColumnValue;
+const TableSchema = storage_mod.TableSchema;
+const ColumnValue = storage_mod.ColumnValue;
 
 // --- Schema (two columns: string key label + int64 value) ---
 
@@ -24,7 +24,7 @@ fn makeSchema() TableSchema {
         .table_id = 1,
         .columns = &.{
             .{ .col_type = .string, .nullable = false },
-            .{ .col_type = .int64,  .nullable = false },
+            .{ .col_type = .int64, .nullable = false },
         },
     };
 }
@@ -55,16 +55,21 @@ fn removeDir(path: []const u8) void {
         if (n <= 0) break;
         var i: usize = 0;
         while (i < @as(usize, @intCast(n))) {
-            const dent: *const std.os.linux.dirent64 = @alignCast(@ptrCast(buf[i..].ptr));
+            const dent: *const std.os.linux.dirent64 = @ptrCast(@alignCast(buf[i..].ptr));
             const name = std.mem.span(@as([*:0]const u8, @ptrCast(&dent.name)));
             if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) {
-                const child = std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ path, name }) catch { i += dent.reclen; continue; };
+                const child = std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ path, name }) catch {
+                    i += dent.reclen;
+                    continue;
+                };
                 defer std.heap.page_allocator.free(child);
-                const null_child = std.heap.page_allocator.allocSentinel(u8, child.len, 0) catch { i += dent.reclen; continue; };
+                const null_child = std.heap.page_allocator.allocSentinel(u8, child.len, 0) catch {
+                    i += dent.reclen;
+                    continue;
+                };
                 defer std.heap.page_allocator.free(null_child);
                 @memcpy(null_child[0..child.len], child);
-                if (dent.type == std.os.linux.DT.DIR) removeDir(child)
-                else _ = std.os.linux.unlink(null_child.ptr);
+                if (dent.type == std.os.linux.DT.DIR) removeDir(child) else _ = std.os.linux.unlink(null_child.ptr);
             }
             i += dent.reclen;
         }
@@ -88,7 +93,7 @@ fn listSstFiles(dir: []const u8, alloc: std.mem.Allocator) ![][]const u8 {
         if (n <= 0) break;
         var i: usize = 0;
         while (i < @as(usize, @intCast(n))) {
-            const dent: *const std.os.linux.dirent64 = @alignCast(@ptrCast(buf[i..].ptr));
+            const dent: *const std.os.linux.dirent64 = @ptrCast(@alignCast(buf[i..].ptr));
             const name = std.mem.span(@as([*:0]const u8, @ptrCast(&dent.name)));
             if (std.mem.endsWith(u8, name, ".sst")) {
                 const full = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name });
@@ -99,7 +104,9 @@ fn listSstFiles(dir: []const u8, alloc: std.mem.Allocator) ![][]const u8 {
     }
     const result = try files.toOwnedSlice(alloc);
     std.mem.sort([]const u8, result, {}, struct {
-        fn lt(_: void, a: []const u8, b: []const u8) bool { return std.mem.order(u8, a, b) == .lt; }
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
     }.lt);
     return result;
 }
@@ -141,7 +148,7 @@ fn readKey(params: []const u8) !struct { key: []const u8, rest: []const u8 } {
     if (params.len < 2) return error.BadParams;
     const key_len = std.mem.readInt(u16, params[0..2], .little);
     if (params.len < 2 + key_len) return error.BadParams;
-    return .{ .key = params[2..2 + key_len], .rest = params[2 + key_len..] };
+    return .{ .key = params[2 .. 2 + key_len], .rest = params[2 + key_len ..] };
 }
 
 fn handlerInsert(ctx: QueryContext, _: *Storage, mutations: *std.ArrayList(Mutation)) !void {
@@ -204,8 +211,8 @@ fn handlerInsertIfNew(ctx: QueryContext, storage: *Storage, mutations: *std.Arra
 fn encodeKV(alloc: std.mem.Allocator, key: []const u8, value: i64) ![]u8 {
     const buf = try alloc.alloc(u8, 2 + key.len + 8);
     std.mem.writeInt(u16, buf[0..2], @intCast(key.len), .little);
-    @memcpy(buf[2..2 + key.len], key);
-    std.mem.writeInt(i64, buf[2 + key.len..][0..8], value, .little);
+    @memcpy(buf[2 .. 2 + key.len], key);
+    std.mem.writeInt(i64, buf[2 + key.len ..][0..8], value, .little);
     return buf;
 }
 
@@ -233,9 +240,9 @@ fn setupExecutor(alloc: std.mem.Allocator, dir: []const u8) !Executor {
     storage.* = try Storage.init(dir, alloc);
     try storage.registerTable(makeSchema());
     var exec = Executor.init(storage, alloc);
-    try exec.register(HASH_INSERT,       handlerInsert);
-    try exec.register(HASH_DELETE,       handlerDelete);
-    try exec.register(HASH_UPDATE,       handlerUpdate);
+    try exec.register(HASH_INSERT, handlerInsert);
+    try exec.register(HASH_DELETE, handlerDelete);
+    try exec.register(HASH_UPDATE, handlerUpdate);
     try exec.register(HASH_INSERT_IF_NEW, handlerInsertIfNew);
     return exec;
 }
@@ -352,9 +359,15 @@ test "Replay: executor produces byte-equal SSTables" {
     defer alloc.free(table_dir_b);
 
     const files_a = try listSstFiles(table_dir_a, alloc);
-    defer { for (files_a) |f| alloc.free(f); alloc.free(files_a); }
+    defer {
+        for (files_a) |f| alloc.free(f);
+        alloc.free(files_a);
+    }
     const files_b = try listSstFiles(table_dir_b, alloc);
-    defer { for (files_b) |f| alloc.free(f); alloc.free(files_b); }
+    defer {
+        for (files_b) |f| alloc.free(f);
+        alloc.free(files_b);
+    }
 
     try testing.expectEqual(files_a.len, files_b.len);
     try testing.expect(files_a.len > 0);
@@ -478,9 +491,15 @@ test "Replay: abort-heavy workload produces byte-equal SSTables" {
     defer alloc.free(table_dir_b);
 
     const files_a = try listSstFiles(table_dir_a, alloc);
-    defer { for (files_a) |f| alloc.free(f); alloc.free(files_a); }
+    defer {
+        for (files_a) |f| alloc.free(f);
+        alloc.free(files_a);
+    }
     const files_b = try listSstFiles(table_dir_b, alloc);
-    defer { for (files_b) |f| alloc.free(f); alloc.free(files_b); }
+    defer {
+        for (files_b) |f| alloc.free(f);
+        alloc.free(files_b);
+    }
 
     try testing.expectEqual(files_a.len, files_b.len);
     try testing.expect(files_a.len > 0);
@@ -573,9 +592,15 @@ test "Replay: compaction-triggering load produces byte-equal SSTables" {
     defer alloc.free(table_dir_b);
 
     const files_a = try listSstFiles(table_dir_a, alloc);
-    defer { for (files_a) |f| alloc.free(f); alloc.free(files_a); }
+    defer {
+        for (files_a) |f| alloc.free(f);
+        alloc.free(files_a);
+    }
     const files_b = try listSstFiles(table_dir_b, alloc);
-    defer { for (files_b) |f| alloc.free(f); alloc.free(files_b); }
+    defer {
+        for (files_b) |f| alloc.free(f);
+        alloc.free(files_b);
+    }
 
     try testing.expectEqual(files_a.len, files_b.len);
     try testing.expect(files_a.len > 0);

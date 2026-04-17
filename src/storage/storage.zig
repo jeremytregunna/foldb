@@ -40,8 +40,8 @@ pub const SSTableMeta = sstable_mod.SSTableMeta;
 pub const LSM = lsm_mod.LSM;
 
 pub const ScanIterator = struct {
-    rows:  []Row,
-    pos:   usize,
+    rows: []Row,
+    pos: usize,
     alloc: std.mem.Allocator,
 
     pub fn deinit(self: *ScanIterator) void {
@@ -97,7 +97,10 @@ pub const Storage = struct {
         for (mutations) |m| {
             var found = false;
             for (table_ids.items) |t| {
-                if (t == m.table_id) { found = true; break; }
+                if (t == m.table_id) {
+                    found = true;
+                    break;
+                }
             }
             if (!found) try table_ids.append(self.alloc, m.table_id);
         }

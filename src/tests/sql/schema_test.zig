@@ -8,10 +8,10 @@ const zero_span = ast_mod.Span{ .start = 0, .end = 0 };
 
 fn singleIntCol(name: []const u8) ast_mod.ColumnDef {
     return .{
-        .name     = name,
-        .typ      = .{ .int64 = .error_on_overflow },
+        .name = name,
+        .typ = .{ .int64 = .error_on_overflow },
         .nullable = .not_null,
-        .span     = zero_span,
+        .span = zero_span,
     };
 }
 
@@ -23,8 +23,8 @@ test "createTable basic" {
     defer sr.deinit();
 
     const tbl = try sr.createTable(.{
-        .name        = "t",
-        .columns     = &[_]ast_mod.ColumnDef{ singleIntCol("id") },
+        .name = "t",
+        .columns = &[_]ast_mod.ColumnDef{singleIntCol("id")},
         .primary_key = .{ .columns = &.{"id"} },
     });
     try std.testing.expectEqualStrings("t", tbl.name);
@@ -37,7 +37,7 @@ test "createTable multiple columns" {
     defer sr.deinit();
 
     _ = try sr.createTable(.{
-        .name    = "users",
+        .name = "users",
         .columns = &[_]ast_mod.ColumnDef{
             singleIntCol("id"),
             .{ .name = "name", .typ = .string, .nullable = .not_null, .span = zero_span },
@@ -56,13 +56,13 @@ test "createTable rejects duplicate table" {
     defer sr.deinit();
 
     _ = try sr.createTable(.{
-        .name        = "t",
-        .columns     = &[_]ast_mod.ColumnDef{ singleIntCol("id") },
+        .name = "t",
+        .columns = &[_]ast_mod.ColumnDef{singleIntCol("id")},
         .primary_key = .{ .columns = &.{"id"} },
     });
     const result = sr.createTable(.{
-        .name        = "t",
-        .columns     = &[_]ast_mod.ColumnDef{ singleIntCol("id") },
+        .name = "t",
+        .columns = &[_]ast_mod.ColumnDef{singleIntCol("id")},
         .primary_key = .{ .columns = &.{"id"} },
     });
     try std.testing.expectError(error.TableAlreadyExists, result);
@@ -74,8 +74,8 @@ test "createTable rejects missing primary key" {
     defer sr.deinit();
 
     const result = sr.createTable(.{
-        .name        = "t",
-        .columns     = &[_]ast_mod.ColumnDef{ singleIntCol("id") },
+        .name = "t",
+        .columns = &[_]ast_mod.ColumnDef{singleIntCol("id")},
         .primary_key = .{ .columns = &.{} },
     });
     try std.testing.expectError(error.NoPrimaryKey, result);
@@ -87,8 +87,8 @@ test "createTable rejects unknown PK column" {
     defer sr.deinit();
 
     const result = sr.createTable(.{
-        .name        = "t",
-        .columns     = &[_]ast_mod.ColumnDef{ singleIntCol("id") },
+        .name = "t",
+        .columns = &[_]ast_mod.ColumnDef{singleIntCol("id")},
         .primary_key = .{ .columns = &.{"nonexistent"} },
     });
     try std.testing.expectError(error.PrimaryKeyColumnNotFound, result);
@@ -100,7 +100,7 @@ test "createTable rejects composite PK with duplicate column" {
     defer sr.deinit();
 
     const result = sr.createTable(.{
-        .name    = "t",
+        .name = "t",
         .columns = &[_]ast_mod.ColumnDef{
             singleIntCol("a"),
             singleIntCol("b"),
@@ -126,8 +126,8 @@ test "getTable is case-insensitive" {
     defer sr.deinit();
 
     _ = try sr.createTable(.{
-        .name        = "users",
-        .columns     = &[_]ast_mod.ColumnDef{ singleIntCol("id") },
+        .name = "users",
+        .columns = &[_]ast_mod.ColumnDef{singleIntCol("id")},
         .primary_key = .{ .columns = &.{"id"} },
     });
     // Schema stores by exact name but lookup should be case-insensitive
@@ -140,8 +140,8 @@ test "getTableById returns correct table" {
     defer sr.deinit();
 
     const tbl = try sr.createTable(.{
-        .name        = "t",
-        .columns     = &[_]ast_mod.ColumnDef{ singleIntCol("id") },
+        .name = "t",
+        .columns = &[_]ast_mod.ColumnDef{singleIntCol("id")},
         .primary_key = .{ .columns = &.{"id"} },
     });
     const by_id = sr.getTableById(tbl.id).?;
@@ -156,7 +156,7 @@ test "columnByName finds column" {
     defer sr.deinit();
 
     _ = try sr.createTable(.{
-        .name    = "t",
+        .name = "t",
         .columns = &[_]ast_mod.ColumnDef{
             singleIntCol("id"),
             .{ .name = "name", .typ = .string, .nullable = .not_null, .span = zero_span },
@@ -174,8 +174,8 @@ test "columnByName is case-insensitive" {
     defer sr.deinit();
 
     _ = try sr.createTable(.{
-        .name        = "t",
-        .columns     = &[_]ast_mod.ColumnDef{ singleIntCol("MyCol") },
+        .name = "t",
+        .columns = &[_]ast_mod.ColumnDef{singleIntCol("MyCol")},
         .primary_key = .{ .columns = &.{"MyCol"} },
     });
     const tbl = sr.getTable("t").?;
@@ -189,8 +189,8 @@ test "columnByName returns null for unknown column" {
     defer sr.deinit();
 
     _ = try sr.createTable(.{
-        .name        = "t",
-        .columns     = &[_]ast_mod.ColumnDef{ singleIntCol("id") },
+        .name = "t",
+        .columns = &[_]ast_mod.ColumnDef{singleIntCol("id")},
         .primary_key = .{ .columns = &.{"id"} },
     });
     const tbl = sr.getTable("t").?;
@@ -205,12 +205,15 @@ test "addColumn adds a new column" {
     defer sr.deinit();
 
     _ = try sr.createTable(.{
-        .name        = "t",
-        .columns     = &[_]ast_mod.ColumnDef{ singleIntCol("id") },
+        .name = "t",
+        .columns = &[_]ast_mod.ColumnDef{singleIntCol("id")},
         .primary_key = .{ .columns = &.{"id"} },
     });
     try sr.addColumn("t", .{
-        .name = "email", .typ = .string, .nullable = .nullable, .span = zero_span,
+        .name = "email",
+        .typ = .string,
+        .nullable = .nullable,
+        .span = zero_span,
     });
     const tbl = sr.getTable("t").?;
     try std.testing.expectEqual(@as(usize, 2), tbl.columns.len);
@@ -223,8 +226,8 @@ test "addColumn rejects duplicate column name" {
     defer sr.deinit();
 
     _ = try sr.createTable(.{
-        .name        = "t",
-        .columns     = &[_]ast_mod.ColumnDef{ singleIntCol("id") },
+        .name = "t",
+        .columns = &[_]ast_mod.ColumnDef{singleIntCol("id")},
         .primary_key = .{ .columns = &.{"id"} },
     });
     const result = sr.addColumn("t", singleIntCol("id"));
@@ -246,7 +249,7 @@ test "dropColumn removes column" {
     defer sr.deinit();
 
     _ = try sr.createTable(.{
-        .name    = "t",
+        .name = "t",
         .columns = &[_]ast_mod.ColumnDef{
             singleIntCol("id"),
             .{ .name = "extra", .typ = .string, .nullable = .nullable, .span = zero_span },
@@ -265,8 +268,8 @@ test "dropColumn rejects unknown column" {
     defer sr.deinit();
 
     _ = try sr.createTable(.{
-        .name        = "t",
-        .columns     = &[_]ast_mod.ColumnDef{ singleIntCol("id") },
+        .name = "t",
+        .columns = &[_]ast_mod.ColumnDef{singleIntCol("id")},
         .primary_key = .{ .columns = &.{"id"} },
     });
     const result = sr.dropColumn("t", "ghost");
@@ -281,7 +284,7 @@ test "createIndex adds index to table" {
     defer sr.deinit();
 
     _ = try sr.createTable(.{
-        .name    = "t",
+        .name = "t",
         .columns = &[_]ast_mod.ColumnDef{
             singleIntCol("id"),
             .{ .name = "name", .typ = .string, .nullable = .not_null, .span = zero_span },
@@ -289,10 +292,10 @@ test "createIndex adds index to table" {
         .primary_key = .{ .columns = &.{"id"} },
     });
     try sr.createIndex(.{
-        .name    = "idx_name",
-        .unique  = false,
-        .kind    = .ordered,
-        .table   = "t",
+        .name = "idx_name",
+        .unique = false,
+        .kind = .ordered,
+        .table = "t",
         .columns = &.{"name"},
     });
     const tbl = sr.getTable("t").?;
@@ -305,10 +308,10 @@ test "createIndex rejects unknown table" {
     defer sr.deinit();
 
     const result = sr.createIndex(.{
-        .name    = "idx",
-        .unique  = false,
-        .kind    = .ordered,
-        .table   = "ghost",
+        .name = "idx",
+        .unique = false,
+        .kind = .ordered,
+        .table = "ghost",
         .columns = &.{"id"},
     });
     try std.testing.expectError(error.TableNotFound, result);
@@ -320,15 +323,15 @@ test "createIndex rejects unknown column" {
     defer sr.deinit();
 
     _ = try sr.createTable(.{
-        .name        = "t",
-        .columns     = &[_]ast_mod.ColumnDef{ singleIntCol("id") },
+        .name = "t",
+        .columns = &[_]ast_mod.ColumnDef{singleIntCol("id")},
         .primary_key = .{ .columns = &.{"id"} },
     });
     const result = sr.createIndex(.{
-        .name    = "idx",
-        .unique  = false,
-        .kind    = .ordered,
-        .table   = "t",
+        .name = "idx",
+        .unique = false,
+        .kind = .ordered,
+        .table = "t",
         .columns = &.{"ghost"},
     });
     try std.testing.expectError(error.ColumnNotFound, result);

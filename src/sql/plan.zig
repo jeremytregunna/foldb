@@ -15,41 +15,79 @@ pub const PlanError = error{
 /// A resolved value during plan evaluation.
 pub const Value = union(enum) {
     null_val,
-    bool_val:   bool,
-    int_val:    i64,
-    uint_val:   u64,
-    float_val:  f64,
+    bool_val: bool,
+    int_val: i64,
+    uint_val: u64,
+    float_val: f64,
     string_val: []const u8,
-    bytes_val:  []const u8,
+    bytes_val: []const u8,
     // Complex types stored as opaque bytes
     opaque_val: []const u8,
 
-    pub fn isNull(self: Value) bool { return self == .null_val; }
+    pub fn isNull(self: Value) bool {
+        return self == .null_val;
+    }
 
     pub fn toBool(self: Value) ?bool {
-        return switch (self) { .bool_val => |b| b, else => null };
+        return switch (self) {
+            .bool_val => |b| b,
+            else => null,
+        };
     }
 
     pub fn eql(self: Value, other: Value) bool {
         return switch (self) {
-            .null_val   => other == .null_val,
-            .bool_val   => |b| switch (other) { .bool_val   => |ob| b == ob, else => false },
-            .int_val    => |v| switch (other) { .int_val    => |ov| v == ov, else => false },
-            .uint_val   => |v| switch (other) { .uint_val   => |ov| v == ov, else => false },
-            .float_val  => |v| switch (other) { .float_val  => |ov| v == ov, else => false },
-            .string_val => |v| switch (other) { .string_val => |ov| std.mem.eql(u8, v, ov), else => false },
-            .bytes_val  => |v| switch (other) { .bytes_val  => |ov| std.mem.eql(u8, v, ov), else => false },
-            .opaque_val => |v| switch (other) { .opaque_val => |ov| std.mem.eql(u8, v, ov), else => false },
+            .null_val => other == .null_val,
+            .bool_val => |b| switch (other) {
+                .bool_val => |ob| b == ob,
+                else => false,
+            },
+            .int_val => |v| switch (other) {
+                .int_val => |ov| v == ov,
+                else => false,
+            },
+            .uint_val => |v| switch (other) {
+                .uint_val => |ov| v == ov,
+                else => false,
+            },
+            .float_val => |v| switch (other) {
+                .float_val => |ov| v == ov,
+                else => false,
+            },
+            .string_val => |v| switch (other) {
+                .string_val => |ov| std.mem.eql(u8, v, ov),
+                else => false,
+            },
+            .bytes_val => |v| switch (other) {
+                .bytes_val => |ov| std.mem.eql(u8, v, ov),
+                else => false,
+            },
+            .opaque_val => |v| switch (other) {
+                .opaque_val => |ov| std.mem.eql(u8, v, ov),
+                else => false,
+            },
         };
     }
 
     pub fn lessThan(self: Value, other: Value) bool {
         return switch (self) {
-            .int_val    => |v| switch (other) { .int_val    => |ov| v < ov, else => false },
-            .uint_val   => |v| switch (other) { .uint_val   => |ov| v < ov, else => false },
-            .float_val  => |v| switch (other) { .float_val  => |ov| v < ov, else => false },
-            .string_val => |v| switch (other) { .string_val => |ov| std.mem.lessThan(u8, v, ov), else => false },
-            else        => false,
+            .int_val => |v| switch (other) {
+                .int_val => |ov| v < ov,
+                else => false,
+            },
+            .uint_val => |v| switch (other) {
+                .uint_val => |ov| v < ov,
+                else => false,
+            },
+            .float_val => |v| switch (other) {
+                .float_val => |ov| v < ov,
+                else => false,
+            },
+            .string_val => |v| switch (other) {
+                .string_val => |ov| std.mem.lessThan(u8, v, ov),
+                else => false,
+            },
+            else => false,
         };
     }
 };
@@ -58,90 +96,90 @@ pub const Value = union(enum) {
 
 const PlanScopeEntry = struct {
     table_alias: []const u8, // "" if no qualifier
-    col_name:    []const u8,
-    position:    u32,
+    col_name: []const u8,
+    position: u32,
 };
 
 const PostAggCol = struct {
-    fn_name:  []const u8,
+    fn_name: []const u8,
     position: u32,
 };
 
 // ─── Plan nodes ──────────────────────────────────────────────────────────────
 
 pub const ScanNode = struct {
-    table_id:  schema_mod.TableId,
-    columns:   []const schema_mod.ColumnId, // which columns to project
+    table_id: schema_mod.TableId,
+    columns: []const schema_mod.ColumnId, // which columns to project
 };
 
 pub const PkLookupNode = struct {
-    table_id:  schema_mod.TableId,
-    key_expr:  *PlanExpr,
-    columns:   []const schema_mod.ColumnId,
+    table_id: schema_mod.TableId,
+    key_expr: *PlanExpr,
+    columns: []const schema_mod.ColumnId,
 };
 
 pub const FilterNode = struct {
-    input:     *PlanNode,
+    input: *PlanNode,
     predicate: *PlanExpr,
 };
 
 pub const ProjectNode = struct {
-    input:    *PlanNode,
-    exprs:    []const ProjectItem,
+    input: *PlanNode,
+    exprs: []const ProjectItem,
 };
 
 pub const ProjectItem = struct {
-    expr:  *PlanExpr,
+    expr: *PlanExpr,
     alias: []const u8,
 };
 
 pub const SortNode = struct {
-    input:   *PlanNode,
-    keys:    []const SortKey,
+    input: *PlanNode,
+    keys: []const SortKey,
 };
 
 pub const SortKey = struct {
-    expr:        *PlanExpr,
-    asc:         bool,
+    expr: *PlanExpr,
+    asc: bool,
     nulls_first: bool,
 };
 
 pub const LimitNode = struct {
-    input:  *PlanNode,
-    limit:  ?*PlanExpr,
+    input: *PlanNode,
+    limit: ?*PlanExpr,
     offset: ?*PlanExpr,
 };
 
 pub const HashAggNode = struct {
-    input:      *PlanNode,
+    input: *PlanNode,
     group_keys: []const *PlanExpr,
-    agg_exprs:  []const AggExpr,
+    agg_exprs: []const AggExpr,
 };
 
 pub const AggExpr = struct {
-    fn_name:  []const u8,
-    arg:      ?*PlanExpr,
+    fn_name: []const u8,
+    arg: ?*PlanExpr,
     distinct: bool,
-    alias:    []const u8,
+    alias: []const u8,
 };
 
 pub const HashJoinNode = struct {
-    left:       *PlanNode,
-    right:      *PlanNode,
-    kind:       ast.JoinKind,
-    condition:  *PlanExpr,
+    left: *PlanNode,
+    right: *PlanNode,
+    kind: ast.JoinKind,
+    condition: *PlanExpr,
 };
 
 pub const InsertPlan = struct {
-    table_id:    schema_mod.TableId,
-    column_ids:  []const schema_mod.ColumnId,
-    source:      InsertSource,
+    table_id: schema_mod.TableId,
+    column_ids: []const schema_mod.ColumnId,
+    source: InsertSource,
     on_conflict: ?OnConflictPlan,
 };
 
 pub const InsertSource = union(enum) {
     values: []const []const *PlanExpr,
-    query:  *PlanNode,
+    query: *PlanNode,
 };
 
 pub const OnConflictPlan = union(enum) {
@@ -150,40 +188,40 @@ pub const OnConflictPlan = union(enum) {
 };
 
 pub const UpdatePlan = struct {
-    table_id:   schema_mod.TableId,
+    table_id: schema_mod.TableId,
     assignments: []const UpdateAssignment,
-    filter:      ?*PlanExpr,
+    filter: ?*PlanExpr,
 };
 
 pub const UpdateAssignment = struct {
     column_id: schema_mod.ColumnId,
-    value:     *PlanExpr,
+    value: *PlanExpr,
 };
 
 pub const DeletePlan = struct {
     table_id: schema_mod.TableId,
-    filter:   ?*PlanExpr,
+    filter: ?*PlanExpr,
 };
 
 pub const AssertPlan = struct {
     predicate: *PlanExpr,
-    message:   []const u8,
+    message: []const u8,
 };
 
 pub const PlanNode = union(enum) {
-    scan:       ScanNode,
-    pk_lookup:  PkLookupNode,
-    filter:     FilterNode,
-    project:    ProjectNode,
-    sort:       SortNode,
-    limit:      LimitNode,
-    hash_agg:   HashAggNode,
-    hash_join:  HashJoinNode,
+    scan: ScanNode,
+    pk_lookup: PkLookupNode,
+    filter: FilterNode,
+    project: ProjectNode,
+    sort: SortNode,
+    limit: LimitNode,
+    hash_agg: HashAggNode,
+    hash_join: HashJoinNode,
     // DML nodes
-    insert:     InsertPlan,
-    update:     UpdatePlan,
-    delete:     DeletePlan,
-    assert:     AssertPlan,
+    insert: InsertPlan,
+    update: UpdatePlan,
+    delete: DeletePlan,
+    assert: AssertPlan,
     // Empty result (zero rows)
     empty,
     // Single-row source for FROM-less SELECT (produces exactly one empty row)
@@ -194,12 +232,12 @@ pub const PlanNode = union(enum) {
 
 pub const PlanExpr = union(enum) {
     null_literal,
-    bool_literal:   bool,
-    int_literal:    i64,
-    uint_literal:   u64,
-    float_literal:  f64,
+    bool_literal: bool,
+    int_literal: i64,
+    uint_literal: u64,
+    float_literal: f64,
     string_literal: []const u8,
-    bytes_literal:  []const u8,
+    bytes_literal: []const u8,
 
     // Parameter reference (0-based)
     param: u32,
@@ -214,11 +252,11 @@ pub const PlanExpr = union(enum) {
     table_column: struct { table_idx: u32, col_idx: u32 },
 
     binary: struct { op: ast.BinOp, left: *PlanExpr, right: *PlanExpr },
-    unary:  struct { op: ast.UnaryOp, expr: *PlanExpr },
+    unary: struct { op: ast.UnaryOp, expr: *PlanExpr },
 
-    cast:   struct { expr: *PlanExpr, to: ast.SqlType },
+    cast: struct { expr: *PlanExpr, to: ast.SqlType },
 
-    is_null:     *PlanExpr,
+    is_null: *PlanExpr,
     is_not_null: *PlanExpr,
 
     fn_call: struct { name: []const u8, args: []*PlanExpr },
@@ -252,10 +290,10 @@ pub const StmtPlan = union(enum) {
 // ─── Planner ─────────────────────────────────────────────────────────────────
 
 pub const Planner = struct {
-    schema:        *const schema_mod.SchemaRegistry,
-    arena:         std.mem.Allocator,
-    nondet_idx:    u32 = 0,
-    scope:         std.ArrayList(PlanScopeEntry) = .empty,
+    schema: *const schema_mod.SchemaRegistry,
+    arena: std.mem.Allocator,
+    nondet_idx: u32 = 0,
+    scope: std.ArrayList(PlanScopeEntry) = .empty,
     post_agg_cols: std.ArrayList(PostAggCol) = .empty,
 
     pub fn init(arena: std.mem.Allocator, schema: *const schema_mod.SchemaRegistry) Planner {
@@ -297,8 +335,8 @@ pub const Planner = struct {
         }
 
         return .{
-            .stmts        = try stmts.toOwnedSlice(self.arena),
-            .param_types  = try param_types.toOwnedSlice(self.arena),
+            .stmts = try stmts.toOwnedSlice(self.arena),
+            .param_types = try param_types.toOwnedSlice(self.arena),
             .nondet_count = self.nondet_idx,
         };
     }
@@ -306,8 +344,8 @@ pub const Planner = struct {
     pub fn planStmt(self: *Planner, s: ast.Stmt, params: []const ast.SqlType) PlanError!ExecutionPlan {
         const sp = try self.planAstStmt(s);
         return .{
-            .stmts        = try self.arena.dupe(StmtPlan, &.{sp}),
-            .param_types  = params,
+            .stmts = try self.arena.dupe(StmtPlan, &.{sp}),
+            .param_types = params,
             .nondet_count = self.nondet_idx,
         };
     }
@@ -318,26 +356,26 @@ pub const Planner = struct {
             .insert => |q| .{ .insert = try self.planInsert(q) },
             .update => |q| .{ .update = try self.planUpdate(q) },
             .delete => |q| .{ .delete = try self.planDelete(q) },
-            .merge  => error.UnsupportedOperation,
+            .merge => error.UnsupportedOperation,
             .assert => |e| .{ .assert = .{ .predicate = try self.planExpr(e), .message = "assertion failed" } },
         };
     }
 
     pub fn planAstStmt(self: *Planner, s: ast.Stmt) PlanError!StmtPlan {
         return switch (s) {
-            .select      => |q| .{ .select = try self.planSelect(q) },
-            .insert      => |q| .{ .insert = try self.planInsert(q) },
-            .update      => |q| .{ .update = try self.planUpdate(q) },
-            .delete      => |q| .{ .delete = try self.planDelete(q) },
-            .merge       => error.UnsupportedOperation,
+            .select => |q| .{ .select = try self.planSelect(q) },
+            .insert => |q| .{ .insert = try self.planInsert(q) },
+            .update => |q| .{ .update = try self.planUpdate(q) },
+            .delete => |q| .{ .delete = try self.planDelete(q) },
+            .merge => error.UnsupportedOperation,
             .create_table, .create_index, .alter_table => error.UnsupportedOperation,
             .transaction => error.UnsupportedOperation,
         };
     }
 
     fn planSelect(self: *Planner, q: ast.SelectStmt) PlanError!*PlanNode {
-        const scope_save     = self.scope.items.len;
-        const post_agg_save  = self.post_agg_cols.items.len;
+        const scope_save = self.scope.items.len;
+        const post_agg_save = self.post_agg_cols.items.len;
         defer {
             self.scope.shrinkRetainingCapacity(scope_save);
             self.post_agg_cols.shrinkRetainingCapacity(post_agg_save);
@@ -356,7 +394,7 @@ pub const Planner = struct {
         for (q.joins) |j| {
             const right = try self.planTableRef(j.table);
             const cond = if (j.condition) |c| switch (c) {
-                .on    => |e| try self.planExpr(e),
+                .on => |e| try self.planExpr(e),
                 .using => blk: {
                     // USING: synthesize equality condition
                     const dummy = try self.arena.create(PlanExpr);
@@ -370,11 +408,11 @@ pub const Planner = struct {
             };
             const join_node = try self.arena.create(PlanNode);
             join_node.* = .{ .hash_join = .{
-                .left      = node,
-                .right     = right,
-                .kind      = j.kind,
+                .left = node,
+                .right = right,
+                .kind = j.kind,
                 .condition = cond,
-            }};
+            } };
             node = join_node;
         }
 
@@ -402,25 +440,26 @@ pub const Planner = struct {
                         if (extractAggFn(ei.expr)) |fn_call| {
                             const arg: ?*PlanExpr = if (fn_call.args.len > 0)
                                 try self.planExpr(fn_call.args[0])
-                            else null;
+                            else
+                                null;
                             try agg_exprs.append(self.arena, .{
-                                .fn_name  = fn_call.name,
-                                .arg      = arg,
+                                .fn_name = fn_call.name,
+                                .arg = arg,
                                 .distinct = fn_call.distinct,
-                                .alias    = ei.alias orelse fn_call.name,
+                                .alias = ei.alias orelse fn_call.name,
                             });
                         }
                     },
                 }
             }
             const group_keys_slice = try keys.toOwnedSlice(self.arena);
-            const agg_exprs_slice  = try agg_exprs.toOwnedSlice(self.arena);
+            const agg_exprs_slice = try agg_exprs.toOwnedSlice(self.arena);
             const agg_node = try self.arena.create(PlanNode);
             agg_node.* = .{ .hash_agg = .{
-                .input      = node,
+                .input = node,
                 .group_keys = group_keys_slice,
-                .agg_exprs  = agg_exprs_slice,
-            }};
+                .agg_exprs = agg_exprs_slice,
+            } };
             node = agg_node;
 
             // Rebuild scope for hash_agg output: [group_key_0, ..., agg_0, ...]
@@ -430,14 +469,14 @@ pub const Planner = struct {
                 if (maybe_ref) |ref| {
                     try self.scope.append(self.arena, .{
                         .table_alias = ref.table orelse "",
-                        .col_name    = ref.column,
-                        .position    = @intCast(i),
+                        .col_name = ref.column,
+                        .position = @intCast(i),
                     });
                 }
             }
             for (agg_exprs_slice, 0..) |ae, i| {
                 try self.post_agg_cols.append(self.arena, .{
-                    .fn_name  = ae.fn_name,
+                    .fn_name = ae.fn_name,
                     .position = @intCast(group_keys_slice.len + i),
                 });
             }
@@ -456,8 +495,8 @@ pub const Planner = struct {
             var keys: std.ArrayList(SortKey) = .empty;
             for (q.order_by) |ob| {
                 try keys.append(self.arena, .{
-                    .expr        = try self.planExpr(ob.expr),
-                    .asc         = ob.asc,
+                    .expr = try self.planExpr(ob.expr),
+                    .asc = ob.asc,
                     .nulls_first = ob.nulls_first orelse !ob.asc, // NULLS LAST for ASC by default
                 });
             }
@@ -470,10 +509,10 @@ pub const Planner = struct {
         if (q.limit != null or q.offset != null) {
             const limit_node = try self.arena.create(PlanNode);
             limit_node.* = .{ .limit = .{
-                .input  = node,
-                .limit  = if (q.limit)  |l| try self.planExpr(l) else null,
+                .input = node,
+                .limit = if (q.limit) |l| try self.planExpr(l) else null,
                 .offset = if (q.offset) |o| try self.planExpr(o) else null,
-            }};
+            } };
             node = limit_node;
         }
 
@@ -484,7 +523,7 @@ pub const Planner = struct {
                 .star => {}, // expand at execution time
                 .expr => |ei| {
                     try proj_items.append(self.arena, .{
-                        .expr  = try self.planExpr(ei.expr),
+                        .expr = try self.planExpr(ei.expr),
                         .alias = ei.alias orelse "",
                     });
                 },
@@ -510,19 +549,19 @@ pub const Planner = struct {
                     try col_ids.append(self.arena, col.id);
                     try self.scope.append(self.arena, .{
                         .table_alias = alias,
-                        .col_name    = col.name,
-                        .position    = start_pos + @as(u32, @intCast(i)),
+                        .col_name = col.name,
+                        .position = start_pos + @as(u32, @intCast(i)),
                     });
                 }
                 const node = try self.arena.create(PlanNode);
                 node.* = .{ .scan = .{
                     .table_id = tbl.id,
-                    .columns  = try col_ids.toOwnedSlice(self.arena),
-                }};
+                    .columns = try col_ids.toOwnedSlice(self.arena),
+                } };
                 return node;
             },
             .subquery => |sq| return self.planSelect(sq.query.*),
-            .cte_ref  => {
+            .cte_ref => {
                 const node = try self.arena.create(PlanNode);
                 node.* = .empty;
                 return node;
@@ -553,13 +592,13 @@ pub const Planner = struct {
         };
         const on_conflict: ?OnConflictPlan = if (stmt.on_conflict) |oc| switch (oc) {
             .do_nothing => .do_nothing,
-            .do_update  => |du| blk: {
+            .do_update => |du| blk: {
                 var assignments: std.ArrayList(UpdateAssignment) = .empty;
                 for (du.sets) |a| {
                     const col = tbl.columnByName(a.column) orelse return error.ColumnNotFound;
                     try assignments.append(self.arena, .{
                         .column_id = col.id,
-                        .value     = try self.planExpr(a.value),
+                        .value = try self.planExpr(a.value),
                     });
                 }
                 break :blk .{ .do_update = try assignments.toOwnedSlice(self.arena) };
@@ -567,9 +606,9 @@ pub const Planner = struct {
         } else null;
 
         return .{
-            .table_id    = tbl.id,
-            .column_ids  = try col_ids.toOwnedSlice(self.arena),
-            .source      = source,
+            .table_id = tbl.id,
+            .column_ids = try col_ids.toOwnedSlice(self.arena),
+            .source = source,
             .on_conflict = on_conflict,
         };
     }
@@ -581,8 +620,8 @@ pub const Planner = struct {
         for (tbl.columns, 0..) |col, i| {
             try self.scope.append(self.arena, .{
                 .table_alias = stmt.table,
-                .col_name    = col.name,
-                .position    = @intCast(i),
+                .col_name = col.name,
+                .position = @intCast(i),
             });
         }
         var assignments: std.ArrayList(UpdateAssignment) = .empty;
@@ -590,14 +629,14 @@ pub const Planner = struct {
             const col = tbl.columnByName(a.column) orelse return error.ColumnNotFound;
             try assignments.append(self.arena, .{
                 .column_id = col.id,
-                .value     = try self.planExpr(a.value),
+                .value = try self.planExpr(a.value),
             });
         }
         const filter = if (stmt.where) |w| try self.planExpr(w) else null;
         return .{
-            .table_id    = tbl.id,
+            .table_id = tbl.id,
             .assignments = try assignments.toOwnedSlice(self.arena),
-            .filter      = filter,
+            .filter = filter,
         };
     }
 
@@ -608,8 +647,8 @@ pub const Planner = struct {
         for (tbl.columns, 0..) |col, i| {
             try self.scope.append(self.arena, .{
                 .table_alias = stmt.table,
-                .col_name    = col.name,
-                .position    = @intCast(i),
+                .col_name = col.name,
+                .position = @intCast(i),
             });
         }
         const filter = if (stmt.where) |w| try self.planExpr(w) else null;
@@ -619,14 +658,14 @@ pub const Planner = struct {
     pub fn planExpr(self: *Planner, e: *ast.Expr) PlanError!*PlanExpr {
         const pe = try self.arena.create(PlanExpr);
         switch (e.*) {
-            .lit_int    => |v| pe.* = .{ .int_literal    = @intCast(v) },
-            .lit_float  => |v| pe.* = .{ .float_literal  = v },
+            .lit_int => |v| pe.* = .{ .int_literal = @intCast(v) },
+            .lit_float => |v| pe.* = .{ .float_literal = v },
             .lit_string => |v| pe.* = .{ .string_literal = v },
-            .lit_bytes  => |v| pe.* = .{ .bytes_literal  = v },
-            .lit_bool   => |v| pe.* = .{ .bool_literal   = v },
-            .lit_null   => pe.* = .null_literal,
-            .param      => |i| pe.* = .{ .param = i },
-            .nondet     => {
+            .lit_bytes => |v| pe.* = .{ .bytes_literal = v },
+            .lit_bool => |v| pe.* = .{ .bool_literal = v },
+            .lit_null => pe.* = .null_literal,
+            .param => |i| pe.* = .{ .param = i },
+            .nondet => {
                 pe.* = .{ .nondet = self.nondet_idx };
                 self.nondet_idx += 1;
             },
@@ -635,34 +674,34 @@ pub const Planner = struct {
                     pe.* = .{ .column = pos };
                 } else {
                     // CTE ref or subquery col — fall back to name-based lookup
-                    pe.* = .{ .fn_call = .{ .name = ref.column, .args = &.{} }};
+                    pe.* = .{ .fn_call = .{ .name = ref.column, .args = &.{} } };
                 }
             },
             .cast => |c| pe.* = .{ .cast = .{
                 .expr = try self.planExpr(c.expr),
-                .to   = c.to,
-            }},
+                .to = c.to,
+            } },
             .binary => |b| pe.* = .{ .binary = .{
-                .op    = b.op,
-                .left  = try self.planExpr(b.left),
+                .op = b.op,
+                .left = try self.planExpr(b.left),
                 .right = try self.planExpr(b.right),
-            }},
+            } },
             .unary => |u| pe.* = .{ .unary = .{
-                .op   = u.op,
+                .op = u.op,
                 .expr = try self.planExpr(u.expr),
-            }},
-            .is_null     => |inner| pe.* = .{ .is_null     = try self.planExpr(inner) },
+            } },
+            .is_null => |inner| pe.* = .{ .is_null = try self.planExpr(inner) },
             .is_not_null => |inner| pe.* = .{ .is_not_null = try self.planExpr(inner) },
             .is_distinct => |pair| pe.* = .{ .binary = .{
-                .op    = .neq,
-                .left  = try self.planExpr(pair.left),
+                .op = .neq,
+                .left = try self.planExpr(pair.left),
                 .right = try self.planExpr(pair.right),
-            }},
+            } },
             .is_not_distinct => |pair| pe.* = .{ .binary = .{
-                .op    = .eq,
-                .left  = try self.planExpr(pair.left),
+                .op = .eq,
+                .left = try self.planExpr(pair.left),
                 .right = try self.planExpr(pair.right),
-            }},
+            } },
             .fn_call => |f| {
                 // In post-agg projection context, resolve aggregate fn names to column positions
                 if (f.args.len == 0 or f.star) {
@@ -676,7 +715,7 @@ pub const Planner = struct {
                 pe.* = .{ .fn_call = .{
                     .name = f.name,
                     .args = try args.toOwnedSlice(self.arena),
-                }};
+                } };
             },
             .window_fn => |w| {
                 var args: std.ArrayList(*PlanExpr) = .empty;
@@ -684,21 +723,21 @@ pub const Planner = struct {
                 pe.* = .{ .fn_call = .{
                     .name = w.call.name,
                     .args = try args.toOwnedSlice(self.arena),
-                }};
+                } };
             },
             .case_searched => |c| {
                 var whens: std.ArrayList(PlanCaseWhen) = .empty;
                 for (c.whens) |w| {
                     try whens.append(self.arena, .{
-                        .cond   = try self.planExpr(w.cond),
+                        .cond = try self.planExpr(w.cond),
                         .result = try self.planExpr(w.result),
                     });
                 }
                 const else_pe: ?*PlanExpr = if (c.else_expr) |ee| try self.planExpr(ee) else null;
                 pe.* = .{ .case_searched = .{
-                    .whens     = try whens.toOwnedSlice(self.arena),
+                    .whens = try whens.toOwnedSlice(self.arena),
                     .else_expr = else_pe,
-                }};
+                } };
             },
             .case_simple => |c| {
                 // Expand to searched CASE
@@ -709,28 +748,28 @@ pub const Planner = struct {
                     const eq_pe = try self.arena.create(PlanExpr);
                     eq_pe.* = .{ .binary = .{ .op = .eq, .left = op_pe, .right = cond_val } };
                     try whens.append(self.arena, .{
-                        .cond   = eq_pe,
+                        .cond = eq_pe,
                         .result = try self.planExpr(w.result),
                     });
                 }
                 const else_pe: ?*PlanExpr = if (c.else_expr) |ee| try self.planExpr(ee) else null;
                 pe.* = .{ .case_searched = .{
-                    .whens     = try whens.toOwnedSlice(self.arena),
+                    .whens = try whens.toOwnedSlice(self.arena),
                     .else_expr = else_pe,
-                }};
+                } };
             },
             .between => |b| {
                 // a BETWEEN low AND high → a >= low AND a <= high
                 const a_low = try self.arena.create(PlanExpr);
                 const a_high = try self.arena.create(PlanExpr);
-                a_low.*  = .{ .binary = .{ .op = .gte, .left = try self.planExpr(b.expr), .right = try self.planExpr(b.low) } };
+                a_low.* = .{ .binary = .{ .op = .gte, .left = try self.planExpr(b.expr), .right = try self.planExpr(b.low) } };
                 a_high.* = .{ .binary = .{ .op = .lte, .left = try self.planExpr(b.expr), .right = try self.planExpr(b.high) } };
                 pe.* = .{ .binary = .{ .op = .and_op, .left = a_low, .right = a_high } };
             },
             .like => |l| pe.* = .{ .fn_call = .{
                 .name = "like",
                 .args = try self.arena.dupe(*PlanExpr, &.{ try self.planExpr(l.expr), try self.planExpr(l.pattern) }),
-            }},
+            } },
             .in_list => |il| {
                 var args: std.ArrayList(*PlanExpr) = .empty;
                 try args.append(self.arena, try self.planExpr(il.expr));

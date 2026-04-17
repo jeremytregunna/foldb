@@ -17,76 +17,158 @@ pub const TokenKind = enum {
     param,
 
     // DDL
-    kw_create, kw_table, kw_index, kw_alter,
-    kw_add, kw_drop, kw_column, kw_primary,
-    kw_key, kw_unique, kw_ordered, kw_hash,
-    kw_vector, kw_path,
+    kw_create,
+    kw_table,
+    kw_index,
+    kw_alter,
+    kw_add,
+    kw_drop,
+    kw_column,
+    kw_primary,
+    kw_key,
+    kw_unique,
+    kw_ordered,
+    kw_hash,
+    kw_vector,
+    kw_path,
 
     // DML
-    kw_select, kw_from, kw_where, kw_insert,
-    kw_into, kw_update, kw_delete, kw_merge,
-    kw_using, kw_matched, kw_values, kw_set,
-    kw_returning, kw_conflict, kw_do, kw_nothing,
-    kw_when, kw_then,
+    kw_select,
+    kw_from,
+    kw_where,
+    kw_insert,
+    kw_into,
+    kw_update,
+    kw_delete,
+    kw_merge,
+    kw_using,
+    kw_matched,
+    kw_values,
+    kw_set,
+    kw_returning,
+    kw_conflict,
+    kw_do,
+    kw_nothing,
+    kw_when,
+    kw_then,
 
     // Query structure
-    kw_with, kw_as, kw_join, kw_inner,
-    kw_left, kw_right, kw_full, kw_outer,
-    kw_cross, kw_on, kw_group, kw_by,
-    kw_having, kw_order, kw_asc, kw_desc,
-    kw_limit, kw_offset, kw_distinct, kw_all,
-    kw_exists, kw_in, kw_between, kw_like,
-    kw_is, kw_not, kw_and, kw_or,
-    kw_case, kw_else, kw_end, kw_cast,
-    kw_window, kw_over, kw_partition, kw_rows,
-    kw_range, kw_unbounded, kw_preceding, kw_following,
-    kw_current, kw_row, kw_filter, kw_of,
-    kw_nulls, kw_first, kw_last, kw_recursive,
+    kw_with,
+    kw_as,
+    kw_join,
+    kw_inner,
+    kw_left,
+    kw_right,
+    kw_full,
+    kw_outer,
+    kw_cross,
+    kw_on,
+    kw_group,
+    kw_by,
+    kw_having,
+    kw_order,
+    kw_asc,
+    kw_desc,
+    kw_limit,
+    kw_offset,
+    kw_distinct,
+    kw_all,
+    kw_exists,
+    kw_in,
+    kw_between,
+    kw_like,
+    kw_is,
+    kw_not,
+    kw_and,
+    kw_or,
+    kw_case,
+    kw_else,
+    kw_end,
+    kw_cast,
+    kw_window,
+    kw_over,
+    kw_partition,
+    kw_rows,
+    kw_range,
+    kw_unbounded,
+    kw_preceding,
+    kw_following,
+    kw_current,
+    kw_row,
+    kw_filter,
+    kw_of,
+    kw_nulls,
+    kw_first,
+    kw_last,
+    kw_recursive,
 
     // Types
     kw_bool,
-    kw_int8, kw_int16, kw_int32, kw_int64,
-    kw_uint8, kw_uint16, kw_uint32, kw_uint64,
-    kw_float32, kw_float64, kw_decimal,
-    kw_string, kw_bytes, kw_uuid,
-    kw_timestamp, kw_interval, kw_months, kw_micros,
-    kw_json, kw_array, kw_struct, kw_wrapping,
+    kw_int8,
+    kw_int16,
+    kw_int32,
+    kw_int64,
+    kw_uint8,
+    kw_uint16,
+    kw_uint32,
+    kw_uint64,
+    kw_float32,
+    kw_float64,
+    kw_decimal,
+    kw_string,
+    kw_bytes,
+    kw_uuid,
+    kw_timestamp,
+    kw_interval,
+    kw_months,
+    kw_micros,
+    kw_json,
+    kw_array,
+    kw_struct,
+    kw_wrapping,
 
     // Transaction block
-    kw_transaction, kw_assert,
+    kw_transaction,
+    kw_assert,
 
     // Operators
-    op_eq,        // =
-    op_neq,       // != or <>
-    op_lt,        // <
-    op_gt,        // >
-    op_lte,       // <=
-    op_gte,       // >=
-    op_plus,      // +
-    op_minus,     // -
-    op_star,      // *
-    op_slash,     // /
-    op_percent,   // %
-    op_concat,    // ||
-    op_cast_op,   // ::
-    op_arrow,     // ->
-    op_darrow,    // ->>
-    op_contains,  // @>
+    op_eq, // =
+    op_neq, // != or <>
+    op_lt, // <
+    op_gt, // >
+    op_lte, // <=
+    op_gte, // >=
+    op_plus, // +
+    op_minus, // -
+    op_star, // *
+    op_slash, // /
+    op_percent, // %
+    op_concat, // ||
+    op_cast_op, // ::
+    op_arrow, // ->
+    op_darrow, // ->>
+    op_contains, // @>
     op_contained, // <@
-    op_pipe,      // |
-    op_amp,       // &
-    op_hat,       // ^
-    op_tilde,     // ~
-    op_lshift,    // <<
-    op_rshift,    // >>
-    op_at,        // @
+    op_pipe, // |
+    op_amp, // &
+    op_hat, // ^
+    op_tilde, // ~
+    op_lshift, // <<
+    op_rshift, // >>
+    op_at, // @
 
     // Symbols
-    sym_lparen, sym_rparen,
-    sym_lbracket, sym_rbracket,
-    sym_lbrace, sym_rbrace,
-    sym_comma, sym_semicolon,
-    sym_dot, sym_colon, sym_bang,
+    sym_lparen,
+    sym_rparen,
+    sym_lbracket,
+    sym_rbracket,
+    sym_lbrace,
+    sym_rbrace,
+    sym_comma,
+    sym_semicolon,
+    sym_dot,
+    sym_colon,
+    sym_bang,
 
     eof,
     invalid,

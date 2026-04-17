@@ -5,7 +5,7 @@ const schema_mod = sql.schema;
 const ast_mod = sql.ast;
 
 const user_cols = [_]ast_mod.ColumnDef{
-    .{ .name = "id",   .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = .{ .start = 0, .end = 0 } },
+    .{ .name = "id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = .{ .start = 0, .end = 0 } },
     .{ .name = "name", .typ = .string, .nullable = .not_null, .span = .{ .start = 0, .end = 0 } },
 };
 
@@ -57,7 +57,7 @@ test "DDL via applyDdl updates schema" {
             .{ .name = "id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = .{ .start = 0, .end = 0 } },
         },
         .primary_key = .{ .columns = &.{"id"} },
-    }});
+    } });
 
     const h = try reg.register("SELECT id FROM orders WHERE id = $1");
     try std.testing.expect(reg.lookup(h) != null);

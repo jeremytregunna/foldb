@@ -2,27 +2,27 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 
-pub const TableId  = u32;
-pub const IndexId  = u32;
+pub const TableId = u32;
+pub const IndexId = u32;
 pub const ColumnId = u16;
 
 pub const ColumnSchema = struct {
-    id:       ColumnId,
-    name:     []const u8,
-    typ:      ast.SqlType,
+    id: ColumnId,
+    name: []const u8,
+    typ: ast.SqlType,
     nullable: ast.NullConstraint,
 };
 
 pub const IndexKind = enum { ordered, hash, vector, json_path };
 
 pub const IndexSchema = struct {
-    id:      IndexId,
-    name:    []const u8,
-    kind:    IndexKind,
-    unique:  bool,
+    id: IndexId,
+    name: []const u8,
+    kind: IndexKind,
+    unique: bool,
     columns: []const ColumnId,
     // For vector indexes: dimension; for json_path: path strings
-    extra:   IndexExtra,
+    extra: IndexExtra,
 };
 
 pub const IndexExtra = union(enum) {
@@ -32,11 +32,11 @@ pub const IndexExtra = union(enum) {
 };
 
 pub const TableSchema = struct {
-    id:          TableId,
-    name:        []const u8,
-    columns:     []const ColumnSchema,
+    id: TableId,
+    name: []const u8,
+    columns: []const ColumnSchema,
     primary_key: []const ColumnId,
-    indexes:     []const IndexSchema,
+    indexes: []const IndexSchema,
 
     pub fn columnByName(self: *const TableSchema, name: []const u8) ?*const ColumnSchema {
         for (self.columns) |*col| {
@@ -67,19 +67,19 @@ pub const SchemaError = error{
 };
 
 pub const SchemaRegistry = struct {
-    tables:     std.StringHashMap(*TableSchema),
+    tables: std.StringHashMap(*TableSchema),
     tables_by_id: std.AutoHashMap(TableId, *TableSchema),
     next_table_id: TableId,
     next_index_id: IndexId,
-    alloc:      std.mem.Allocator,
+    alloc: std.mem.Allocator,
 
     pub fn init(alloc: std.mem.Allocator) SchemaRegistry {
         return .{
-            .tables        = std.StringHashMap(*TableSchema).init(alloc),
-            .tables_by_id  = std.AutoHashMap(TableId, *TableSchema).init(alloc),
+            .tables = std.StringHashMap(*TableSchema).init(alloc),
+            .tables_by_id = std.AutoHashMap(TableId, *TableSchema).init(alloc),
             .next_table_id = 1,
             .next_index_id = 1,
-            .alloc         = alloc,
+            .alloc = alloc,
         };
     }
 
@@ -121,9 +121,9 @@ pub const SchemaRegistry = struct {
         errdefer self.alloc.free(cols);
         for (stmt.columns, 0..) |col_def, i| {
             cols[i] = .{
-                .id       = @intCast(i),
-                .name     = col_def.name,
-                .typ      = col_def.typ,
+                .id = @intCast(i),
+                .name = col_def.name,
+                .typ = col_def.typ,
                 .nullable = col_def.nullable,
             };
         }
@@ -150,11 +150,11 @@ pub const SchemaRegistry = struct {
         const tbl = try self.alloc.create(TableSchema);
         errdefer self.alloc.destroy(tbl);
         tbl.* = .{
-            .id          = self.next_table_id,
-            .name        = stmt.name,
-            .columns     = cols,
+            .id = self.next_table_id,
+            .name = stmt.name,
+            .columns = cols,
             .primary_key = pk_ids,
-            .indexes     = &.{},
+            .indexes = &.{},
         };
         self.next_table_id += 1;
 
@@ -181,24 +181,24 @@ pub const SchemaRegistry = struct {
         }
 
         const kind: IndexKind = switch (stmt.kind) {
-            .ordered  => .ordered,
-            .hash     => .hash,
-            .vector   => .vector,
+            .ordered => .ordered,
+            .hash => .hash,
+            .vector => .vector,
             .json_path => .json_path,
         };
         const extra: IndexExtra = switch (stmt.kind) {
-            .vector   => |dim| .{ .vector_dim = dim },
+            .vector => |dim| .{ .vector_dim = dim },
             .json_path => |paths| .{ .json_paths = paths },
-            else       => .none,
+            else => .none,
         };
 
         const new_idx = IndexSchema{
-            .id      = self.next_index_id,
-            .name    = stmt.name,
-            .kind    = kind,
-            .unique  = stmt.unique,
+            .id = self.next_index_id,
+            .name = stmt.name,
+            .kind = kind,
+            .unique = stmt.unique,
             .columns = col_ids,
-            .extra   = extra,
+            .extra = extra,
         };
         self.next_index_id += 1;
 
@@ -219,9 +219,9 @@ pub const SchemaRegistry = struct {
         const new_cols = try self.alloc.alloc(ColumnSchema, tbl.columns.len + 1);
         @memcpy(new_cols[0..tbl.columns.len], tbl.columns);
         new_cols[tbl.columns.len] = .{
-            .id       = new_id,
-            .name     = col_def.name,
-            .typ      = col_def.typ,
+            .id = new_id,
+            .name = col_def.name,
+            .typ = col_def.typ,
             .nullable = col_def.nullable,
         };
         if (tbl.columns.len > 0) self.alloc.free(tbl.columns);
@@ -233,13 +233,19 @@ pub const SchemaRegistry = struct {
         const tbl = self.tables.get(table) orelse return error.TableNotFound;
         var idx: ?usize = null;
         for (tbl.columns, 0..) |col, i| {
-            if (std.ascii.eqlIgnoreCase(col.name, col_name)) { idx = i; break; }
+            if (std.ascii.eqlIgnoreCase(col.name, col_name)) {
+                idx = i;
+                break;
+            }
         }
         const drop_idx = idx orelse return error.ColumnNotFound;
         const new_cols = try self.alloc.alloc(ColumnSchema, tbl.columns.len - 1);
         var j: usize = 0;
         for (tbl.columns, 0..) |col, i| {
-            if (i != drop_idx) { new_cols[j] = col; j += 1; }
+            if (i != drop_idx) {
+                new_cols[j] = col;
+                j += 1;
+            }
         }
         self.alloc.free(tbl.columns);
         tbl.columns = new_cols;

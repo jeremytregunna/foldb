@@ -18,9 +18,9 @@ pub const ParseError = error{
 } || lex_mod.LexError;
 
 pub const Parser = struct {
-    lexer:   Lexer,
-    arena:   std.mem.Allocator,
-    src:     []const u8,
+    lexer: Lexer,
+    arena: std.mem.Allocator,
+    src: []const u8,
     err_msg: ?[]const u8 = null,
     err_pos: u32 = 0,
 
@@ -113,10 +113,10 @@ pub const Parser = struct {
             .kw_insert => .{ .insert = try self.parseInsert() },
             .kw_update => .{ .update = try self.parseUpdate() },
             .kw_delete => .{ .delete = try self.parseDelete() },
-            .kw_merge  => .{ .merge  = try self.parseMerge()  },
+            .kw_merge => .{ .merge = try self.parseMerge() },
             .kw_create => try self.parseCreate(),
-            .kw_alter  => .{ .alter_table = try self.parseAlter() },
-            .kw_with   => try self.parseWithStmt(),
+            .kw_alter => .{ .alter_table = try self.parseAlter() },
+            .kw_with => try self.parseWithStmt(),
             .kw_transaction => .{ .transaction = try self.parseTransaction() },
             else => {
                 const t = try self.advance();
@@ -248,22 +248,22 @@ pub const Parser = struct {
             order_by = try self.parseOrderByList();
         }
 
-        const limit_expr  = if (try self.eat(.kw_limit))  try self.parseExpr() else null;
+        const limit_expr = if (try self.eat(.kw_limit)) try self.parseExpr() else null;
         const offset_expr = if (try self.eat(.kw_offset)) try self.parseExpr() else null;
 
         return .{
-            .with      = &.{},
-            .distinct  = distinct,
-            .items     = items,
-            .from      = from_ref,
-            .joins     = try joins.toOwnedSlice(self.arena),
-            .where     = where_expr,
-            .group_by  = group_by,
-            .having    = having,
-            .windows   = try windows.toOwnedSlice(self.arena),
-            .order_by  = order_by,
-            .limit     = limit_expr,
-            .offset    = offset_expr,
+            .with = &.{},
+            .distinct = distinct,
+            .items = items,
+            .from = from_ref,
+            .joins = try joins.toOwnedSlice(self.arena),
+            .where = where_expr,
+            .group_by = group_by,
+            .having = having,
+            .windows = try windows.toOwnedSlice(self.arena),
+            .order_by = order_by,
+            .limit = limit_expr,
+            .offset = offset_expr,
         };
     }
 
@@ -315,9 +315,17 @@ pub const Parser = struct {
 
     fn parseJoin(self: *Parser) ParseError!ast.Join {
         const kind: ast.JoinKind = switch (try self.peekKind()) {
-            .kw_cross => blk: { _ = try self.advance(); _ = try self.expect(.kw_join); break :blk .cross; },
-            .kw_inner => blk: { _ = try self.advance(); _ = try self.expect(.kw_join); break :blk .inner; },
-            .kw_left  => blk: {
+            .kw_cross => blk: {
+                _ = try self.advance();
+                _ = try self.expect(.kw_join);
+                break :blk .cross;
+            },
+            .kw_inner => blk: {
+                _ = try self.advance();
+                _ = try self.expect(.kw_join);
+                break :blk .inner;
+            },
+            .kw_left => blk: {
                 _ = try self.advance();
                 _ = try self.eat(.kw_outer);
                 _ = try self.expect(.kw_join);
@@ -329,14 +337,17 @@ pub const Parser = struct {
                 _ = try self.expect(.kw_join);
                 break :blk .right;
             },
-            .kw_full  => blk: {
+            .kw_full => blk: {
                 _ = try self.advance();
                 _ = try self.eat(.kw_outer);
                 _ = try self.expect(.kw_join);
                 break :blk .full;
             },
-            .kw_join  => blk: { _ = try self.advance(); break :blk .inner; },
-            else      => return error.UnexpectedToken,
+            .kw_join => blk: {
+                _ = try self.advance();
+                break :blk .inner;
+            },
+            else => return error.UnexpectedToken,
         };
 
         const tref = try self.parseTableRef();
@@ -410,13 +421,19 @@ pub const Parser = struct {
         while (true) {
             const e = try self.parseExpr();
             var asc = true;
-            if (try self.eat(.kw_asc))  { asc = true;  }
-            if (try self.eat(.kw_desc)) { asc = false; }
+            if (try self.eat(.kw_asc)) {
+                asc = true;
+            }
+            if (try self.eat(.kw_desc)) {
+                asc = false;
+            }
             var nulls_first: ?bool = null;
             if (try self.eat(.kw_nulls)) {
-                if (try self.eat(.kw_first)) { nulls_first = true;  }
-                else if (try self.eat(.kw_last)) { nulls_first = false; }
-                else return error.UnexpectedToken;
+                if (try self.eat(.kw_first)) {
+                    nulls_first = true;
+                } else if (try self.eat(.kw_last)) {
+                    nulls_first = false;
+                } else return error.UnexpectedToken;
             }
             try items.append(self.arena, .{ .expr = e, .asc = asc, .nulls_first = nulls_first });
             if (!try self.eat(.sym_comma)) break;
@@ -482,20 +499,20 @@ pub const Parser = struct {
                 const w = if (try self.eat(.kw_where)) try self.parseExpr() else null;
                 on_conflict = .{ .do_update = .{
                     .target = try target.toOwnedSlice(self.arena),
-                    .sets   = sets,
-                    .where  = w,
-                }};
+                    .sets = sets,
+                    .where = w,
+                } };
             } else return error.UnexpectedToken;
         }
 
         const returning = if (try self.eat(.kw_returning)) try self.parseSelectItems() else &.{};
         return .{
-            .with        = &.{},
-            .table       = table,
-            .columns     = try columns.toOwnedSlice(self.arena),
-            .source      = source,
+            .with = &.{},
+            .table = table,
+            .columns = try columns.toOwnedSlice(self.arena),
+            .source = source,
             .on_conflict = on_conflict,
-            .returning   = returning,
+            .returning = returning,
         };
     }
 
@@ -514,12 +531,12 @@ pub const Parser = struct {
         const where_expr = if (try self.eat(.kw_where)) try self.parseExpr() else null;
         const returning = if (try self.eat(.kw_returning)) try self.parseSelectItems() else &.{};
         return .{
-            .with      = &.{},
-            .table     = table,
-            .alias     = alias,
-            .sets      = sets,
-            .from      = from_ref,
-            .where     = where_expr,
+            .with = &.{},
+            .table = table,
+            .alias = alias,
+            .sets = sets,
+            .from = from_ref,
+            .where = where_expr,
             .returning = returning,
         };
     }
@@ -553,11 +570,11 @@ pub const Parser = struct {
         const where_expr = if (try self.eat(.kw_where)) try self.parseExpr() else null;
         const returning = if (try self.eat(.kw_returning)) try self.parseSelectItems() else &.{};
         return .{
-            .with      = &.{},
-            .table     = table,
-            .alias     = alias,
-            .using     = try using.toOwnedSlice(self.arena),
-            .where     = where_expr,
+            .with = &.{},
+            .table = table,
+            .alias = alias,
+            .using = try using.toOwnedSlice(self.arena),
+            .where = where_expr,
             .returning = returning,
         };
     }
@@ -608,18 +625,18 @@ pub const Parser = struct {
                 const vals = try self.parseExprList();
                 _ = try self.expect(.sym_rparen);
                 try whens.append(self.arena, .{ .not_matched = .{
-                    .cond    = cond,
+                    .cond = cond,
                     .columns = try cols.toOwnedSlice(self.arena),
-                    .values  = vals,
-                }});
+                    .values = vals,
+                } });
             } else return error.UnexpectedToken;
         }
         return .{
-            .with   = &.{},
+            .with = &.{},
             .target = .{ .name = tgt_name, .alias = tgt_alias },
             .source = .{ .ref = src },
-            .on     = on_expr,
-            .whens  = try whens.toOwnedSlice(self.arena),
+            .on = on_expr,
+            .whens = try whens.toOwnedSlice(self.arena),
         };
     }
 
@@ -633,7 +650,10 @@ pub const Parser = struct {
         }
         // CREATE [UNIQUE] [ORDERED|HASH|VECTOR|JSON PATH] INDEX
         var unique = false;
-        if (k == .kw_unique) { _ = try self.advance(); unique = true; }
+        if (k == .kw_unique) {
+            _ = try self.advance();
+            unique = true;
+        }
         return .{ .create_index = try self.parseCreateIndex(unique) };
     }
 
@@ -678,18 +698,18 @@ pub const Parser = struct {
                     return error.MissingNullability;
                 };
                 try columns.append(self.arena, .{
-                    .name     = col_name,
-                    .typ      = col_type,
+                    .name = col_name,
+                    .typ = col_type,
                     .nullable = nullable,
-                    .span     = .{ .start = col_span_start, .end = self.lexer.pos },
+                    .span = .{ .start = col_span_start, .end = self.lexer.pos },
                 });
             }
             if (!try self.eat(.sym_comma)) break;
         }
         _ = try self.expect(.sym_rparen);
         return .{
-            .name        = name,
-            .columns     = try columns.toOwnedSlice(self.arena),
+            .name = name,
+            .columns = try columns.toOwnedSlice(self.arena),
             .primary_key = .{ .columns = try pk_cols.toOwnedSlice(self.arena) },
         };
     }
@@ -698,8 +718,14 @@ pub const Parser = struct {
         // Consume optional kind keyword
         const kind: ast.IndexKind = blk: {
             const k = try self.peekKind();
-            if (k == .kw_ordered)  { _ = try self.advance(); break :blk .ordered; }
-            if (k == .kw_hash)     { _ = try self.advance(); break :blk .hash;    }
+            if (k == .kw_ordered) {
+                _ = try self.advance();
+                break :blk .ordered;
+            }
+            if (k == .kw_hash) {
+                _ = try self.advance();
+                break :blk .hash;
+            }
             if (k == .kw_vector) {
                 _ = try self.advance();
                 _ = try self.expect(.sym_lparen);
@@ -722,7 +748,7 @@ pub const Parser = struct {
             break :blk .ordered; // default
         };
         _ = try self.expect(.kw_index);
-        const name  = try self.expectIdent();
+        const name = try self.expectIdent();
         _ = try self.expect(.kw_on);
         const table = try self.expectIdent();
         _ = try self.expect(.sym_lparen);
@@ -733,10 +759,10 @@ pub const Parser = struct {
         }
         _ = try self.expect(.sym_rparen);
         return .{
-            .name    = name,
-            .unique  = unique,
-            .kind    = kind,
-            .table   = table,
+            .name = name,
+            .unique = unique,
+            .kind = kind,
+            .table = table,
             .columns = try cols.toOwnedSlice(self.arena),
         };
     }
@@ -767,11 +793,11 @@ pub const Parser = struct {
                     return error.MissingNullability;
                 };
                 break :blk .{ .add_column = .{
-                    .name     = col_name,
-                    .typ      = col_type,
+                    .name = col_name,
+                    .typ = col_type,
                     .nullable = nullable,
-                    .span     = .{ .start = col_span_start, .end = col_span_start },
-                }};
+                    .span = .{ .start = col_span_start, .end = col_span_start },
+                } };
             } else if (try self.eat(.kw_drop)) {
                 _ = try self.eat(.kw_column);
                 break :blk .{ .drop_column = try self.expectIdent() };
@@ -788,7 +814,7 @@ pub const Parser = struct {
         if (try self.eat(.sym_lparen)) {
             while (true) {
                 const pname = try self.expectIdent();
-                const ptyp  = try self.parseType();
+                const ptyp = try self.parseType();
                 try params.append(self.arena, .{ .name = pname, .typ = ptyp });
                 if (!try self.eat(.sym_comma)) break;
             }
@@ -803,7 +829,7 @@ pub const Parser = struct {
                 .kw_insert => .{ .insert = try self.parseInsert() },
                 .kw_update => .{ .update = try self.parseUpdate() },
                 .kw_delete => .{ .delete = try self.parseDelete() },
-                .kw_merge  => .{ .merge  = try self.parseMerge()  },
+                .kw_merge => .{ .merge = try self.parseMerge() },
                 .kw_assert => blk: {
                     _ = try self.advance();
                     break :blk .{ .assert = try self.parseExpr() };
@@ -816,7 +842,7 @@ pub const Parser = struct {
         _ = try self.expect(.sym_rbrace);
         return .{
             .params = try params.toOwnedSlice(self.arena),
-            .stmts  = try stmts.toOwnedSlice(self.arena),
+            .stmts = try stmts.toOwnedSlice(self.arena),
         };
     }
 
@@ -831,15 +857,15 @@ pub const Parser = struct {
             break :blk .error_on_overflow;
         };
         return switch (k) {
-            .kw_bool    => .bool,
-            .kw_int8    => .{ .int8  = overflow },
-            .kw_int16   => .{ .int16 = overflow },
-            .kw_int32   => .{ .int32 = overflow },
-            .kw_int64   => .{ .int64 = overflow },
-            .kw_uint8   => .{ .uint8  = overflow },
-            .kw_uint16  => .{ .uint16 = overflow },
-            .kw_uint32  => .{ .uint32 = overflow },
-            .kw_uint64  => .{ .uint64 = overflow },
+            .kw_bool => .bool,
+            .kw_int8 => .{ .int8 = overflow },
+            .kw_int16 => .{ .int16 = overflow },
+            .kw_int32 => .{ .int32 = overflow },
+            .kw_int64 => .{ .int64 = overflow },
+            .kw_uint8 => .{ .uint8 = overflow },
+            .kw_uint16 => .{ .uint16 = overflow },
+            .kw_uint32 => .{ .uint32 = overflow },
+            .kw_uint64 => .{ .uint64 = overflow },
             .kw_float32 => .float32,
             .kw_float64 => .float64,
             .kw_decimal => blk: {
@@ -850,11 +876,11 @@ pub const Parser = struct {
                 _ = try self.expect(.sym_rparen);
                 break :blk .{ .decimal = .{ .precision = @intCast(p), .scale = @intCast(s) } };
             },
-            .kw_string    => .string,
-            .kw_bytes     => .bytes,
-            .kw_uuid      => .uuid,
+            .kw_string => .string,
+            .kw_bytes => .bytes,
+            .kw_uuid => .uuid,
             .kw_timestamp => .timestamp,
-            .kw_interval  => blk: {
+            .kw_interval => blk: {
                 if (try self.eat(.kw_months)) break :blk .interval_months;
                 if (try self.eat(.kw_micros)) break :blk .interval_micros;
                 // Default: error — must specify MONTHS or MICROS
@@ -955,13 +981,13 @@ pub const Parser = struct {
             .op_eq, .op_neq, .op_lt, .op_gt, .op_lte, .op_gte => {
                 _ = try self.advance();
                 const op: ast.BinOp = switch (k) {
-                    .op_eq  => .eq,
+                    .op_eq => .eq,
                     .op_neq => .neq,
-                    .op_lt  => .lt,
-                    .op_gt  => .gt,
+                    .op_lt => .lt,
+                    .op_gt => .gt,
                     .op_lte => .lte,
                     .op_gte => .gte,
-                    else    => unreachable,
+                    else => unreachable,
                 };
                 const right = try self.parseIsExpr();
                 const e = try self.arenaAlloc(ast.Expr);
@@ -970,7 +996,7 @@ pub const Parser = struct {
             },
             .kw_between => {
                 _ = try self.advance();
-                const low  = try self.parseIsExpr();
+                const low = try self.parseIsExpr();
                 _ = try self.expect(.kw_and);
                 const high = try self.parseIsExpr();
                 const e = try self.arenaAlloc(ast.Expr);
@@ -984,7 +1010,7 @@ pub const Parser = struct {
                 const k2 = try self.peekKind();
                 if (k2 == .kw_between) {
                     _ = try self.advance();
-                    const low  = try self.parseIsExpr();
+                    const low = try self.parseIsExpr();
                     _ = try self.expect(.kw_and);
                     const high = try self.parseIsExpr();
                     const inner = try self.arenaAlloc(ast.Expr);
@@ -1078,10 +1104,10 @@ pub const Parser = struct {
         while (true) {
             const k = try self.peekKind();
             const op: ast.BinOp = switch (k) {
-                .op_plus   => .add,
-                .op_minus  => .sub,
+                .op_plus => .add,
+                .op_minus => .sub,
                 .op_concat => .concat,
-                .op_contains  => .contains,
+                .op_contains => .contains,
                 .op_contained => .contained,
                 else => break,
             };
@@ -1099,8 +1125,8 @@ pub const Parser = struct {
         while (true) {
             const k = try self.peekKind();
             const op: ast.BinOp = switch (k) {
-                .op_star    => .mul,
-                .op_slash   => .div,
+                .op_star => .mul,
+                .op_slash => .div,
                 .op_percent => .mod,
                 else => break,
             };
@@ -1136,7 +1162,7 @@ pub const Parser = struct {
         while (true) {
             const k = try self.peekKind();
             const op: ast.BinOp = switch (k) {
-                .op_arrow  => .arrow,
+                .op_arrow => .arrow,
                 .op_darrow => .darrow,
                 else => break,
             };
@@ -1175,10 +1201,19 @@ pub const Parser = struct {
                 // strip x' and '
                 e.* = .{ .lit_bytes = try self.unhexBytes(raw[2 .. raw.len - 1]) };
             },
-            .lit_true  => { _ = try self.advance(); e.* = .{ .lit_bool = true  }; },
-            .lit_false => { _ = try self.advance(); e.* = .{ .lit_bool = false }; },
-            .lit_null  => { _ = try self.advance(); e.* = .lit_null; },
-            .param     => {
+            .lit_true => {
+                _ = try self.advance();
+                e.* = .{ .lit_bool = true };
+            },
+            .lit_false => {
+                _ = try self.advance();
+                e.* = .{ .lit_bool = false };
+            },
+            .lit_null => {
+                _ = try self.advance();
+                e.* = .lit_null;
+            },
+            .param => {
                 _ = try self.advance();
                 const num_str = t.text(self.src)[1..]; // skip '$'
                 const num = std.fmt.parseInt(u32, num_str, 10) catch return error.UnexpectedToken;
@@ -1238,7 +1273,7 @@ pub const Parser = struct {
         const operand: ?*ast.Expr = if (k != .kw_when) try self.parseExpr() else null;
         var whens: std.ArrayList(ast.CaseWhen) = .empty;
         while (try self.eat(.kw_when)) {
-            const cond   = try self.parseExpr();
+            const cond = try self.parseExpr();
             _ = try self.expect(.kw_then);
             const result = try self.parseExpr();
             try whens.append(self.arena, .{ .cond = cond, .result = result });
@@ -1248,15 +1283,15 @@ pub const Parser = struct {
         const e = try self.arenaAlloc(ast.Expr);
         if (operand) |op| {
             e.* = .{ .case_simple = .{
-                .operand   = op,
-                .whens     = try whens.toOwnedSlice(self.arena),
+                .operand = op,
+                .whens = try whens.toOwnedSlice(self.arena),
                 .else_expr = else_expr,
-            }};
+            } };
         } else {
             e.* = .{ .case_searched = .{
-                .whens     = try whens.toOwnedSlice(self.arena),
+                .whens = try whens.toOwnedSlice(self.arena),
                 .else_expr = else_expr,
-            }};
+            } };
         }
         return e;
     }
@@ -1267,19 +1302,25 @@ pub const Parser = struct {
 
         // Check for nondeterministic functions
         if (std.ascii.eqlIgnoreCase(name, "now")) {
-            if (try self.eat(.sym_lparen)) { _ = try self.expect(.sym_rparen); }
+            if (try self.eat(.sym_lparen)) {
+                _ = try self.expect(.sym_rparen);
+            }
             const e = try self.arenaAlloc(ast.Expr);
             e.* = .{ .nondet = .now };
             return e;
         }
         if (std.ascii.eqlIgnoreCase(name, "random")) {
-            if (try self.eat(.sym_lparen)) { _ = try self.expect(.sym_rparen); }
+            if (try self.eat(.sym_lparen)) {
+                _ = try self.expect(.sym_rparen);
+            }
             const e = try self.arenaAlloc(ast.Expr);
             e.* = .{ .nondet = .random };
             return e;
         }
         if (std.ascii.eqlIgnoreCase(name, "uuid") or std.ascii.eqlIgnoreCase(name, "uuid_generate_v7")) {
-            if (try self.eat(.sym_lparen)) { _ = try self.expect(.sym_rparen); }
+            if (try self.eat(.sym_lparen)) {
+                _ = try self.expect(.sym_rparen);
+            }
             const e = try self.arenaAlloc(ast.Expr);
             e.* = .{ .nondet = .uuid_v7 };
             return e;
@@ -1302,7 +1343,9 @@ pub const Parser = struct {
                 _ = try self.advance();
                 star = true;
             } else {
-                if (try self.eat(.kw_distinct)) { distinct = true; }
+                if (try self.eat(.kw_distinct)) {
+                    distinct = true;
+                }
             }
             var args: std.ArrayList(*ast.Expr) = .empty;
             if (!star and (try self.peekKind()) != .sym_rparen) {
@@ -1313,10 +1356,10 @@ pub const Parser = struct {
             }
             _ = try self.expect(.sym_rparen);
             const fn_call = ast.FnCall{
-                .name     = name,
-                .args     = try args.toOwnedSlice(self.arena),
+                .name = name,
+                .args = try args.toOwnedSlice(self.arena),
                 .distinct = distinct,
-                .star     = star,
+                .star = star,
             };
             // Check for OVER clause → window function
             if (try self.eat(.kw_over)) {
@@ -1390,13 +1433,7 @@ fn hexDigit(c: u8) ParseError!u8 {
 fn isKeywordUsableAsIdent(k: TokenKind) bool {
     return switch (k) {
         // Non-reserved keywords usable as identifiers in unambiguous positions
-        .kw_index, .kw_key, .kw_first, .kw_last, .kw_filter,
-        .kw_row, .kw_rows, .kw_range, .kw_window, .kw_partition,
-        .kw_over, .kw_nulls, .kw_recursive, .kw_path, .kw_hash,
-        .kw_ordered, .kw_vector, .kw_months, .kw_micros,
-        .kw_wrapping, .kw_current, .kw_following, .kw_preceding,
-        .kw_unbounded, .kw_offset, .kw_nothing, .kw_do,
-        .kw_conflict, .kw_returning => true,
+        .kw_index, .kw_key, .kw_first, .kw_last, .kw_filter, .kw_row, .kw_rows, .kw_range, .kw_window, .kw_partition, .kw_over, .kw_nulls, .kw_recursive, .kw_path, .kw_hash, .kw_ordered, .kw_vector, .kw_months, .kw_micros, .kw_wrapping, .kw_current, .kw_following, .kw_preceding, .kw_unbounded, .kw_offset, .kw_nothing, .kw_do, .kw_conflict, .kw_returning => true,
         else => false,
     };
 }
@@ -1405,13 +1442,27 @@ fn isBuiltinFn(k: TokenKind) bool {
     return switch (k) {
         // Type names usable as cast/constructor functions
         .kw_bool,
-        .kw_int8, .kw_int16, .kw_int32, .kw_int64,
-        .kw_uint8, .kw_uint16, .kw_uint32, .kw_uint64,
-        .kw_float32, .kw_float64, .kw_decimal,
-        .kw_string, .kw_bytes, .kw_uuid,
-        .kw_timestamp, .kw_json, .kw_array, .kw_struct,
+        .kw_int8,
+        .kw_int16,
+        .kw_int32,
+        .kw_int64,
+        .kw_uint8,
+        .kw_uint16,
+        .kw_uint32,
+        .kw_uint64,
+        .kw_float32,
+        .kw_float64,
+        .kw_decimal,
+        .kw_string,
+        .kw_bytes,
+        .kw_uuid,
+        .kw_timestamp,
+        .kw_json,
+        .kw_array,
+        .kw_struct,
         // Aggregate keywords that appear as function names
-        .kw_exists => true,
+        .kw_exists,
+        => true,
         else => false,
     };
 }

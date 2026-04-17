@@ -3,17 +3,17 @@
 const std = @import("std");
 const testing = std.testing;
 const sql = @import("sql.zig");
-const schema_mod   = sql.schema;
+const schema_mod = sql.schema;
 const registry_mod = sql.registry;
-const eb           = sql.executor_bridge;
+const eb = sql.executor_bridge;
 
-const Storage       = eb.Storage;
-const ColumnValue   = eb.ColumnValue;
-const LogEntry      = eb.LogEntry;
+const Storage = eb.Storage;
+const ColumnValue = eb.ColumnValue;
+const LogEntry = eb.LogEntry;
 const ResolvedValue = eb.ResolvedValue;
 
 // Re-exported from executor_mod through eb
-const executor_mod  = @import("executor.zig");
+const executor_mod = @import("executor.zig");
 const serializeTxnIntent = executor_mod.serializeTxnIntent;
 const storage_mod = @import("storage.zig");
 
@@ -24,11 +24,11 @@ const zero_span = sql.ast.Span{ .start = 0, .end = 0 };
 fn makeSchemaRegistry(alloc: std.mem.Allocator) !schema_mod.SchemaRegistry {
     var sr = schema_mod.SchemaRegistry.init(alloc);
     _ = try sr.createTable(.{
-        .name    = "users",
+        .name = "users",
         .columns = &[_]sql.ast.ColumnDef{
-            .{ .name = "id",    .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
-            .{ .name = "name",  .typ = .string,                          .nullable = .not_null, .span = zero_span },
-            .{ .name = "score", .typ = .float64,                         .nullable = .nullable, .span = zero_span },
+            .{ .name = "id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
+            .{ .name = "name", .typ = .string, .nullable = .not_null, .span = zero_span },
+            .{ .name = "score", .typ = .float64, .nullable = .nullable, .span = zero_span },
         },
         .primary_key = .{ .columns = &.{"id"} },
     });
@@ -38,10 +38,10 @@ fn makeSchemaRegistry(alloc: std.mem.Allocator) !schema_mod.SchemaRegistry {
 fn registerStorage(storage: *Storage) !void {
     try storage.registerTable(.{
         .table_id = 1,
-        .columns  = &.{
-            .{ .col_type = .int64,   .nullable = false },
-            .{ .col_type = .string,  .nullable = false },
-            .{ .col_type = .float64, .nullable = true  },
+        .columns = &.{
+            .{ .col_type = .int64, .nullable = false },
+            .{ .col_type = .string, .nullable = false },
+            .{ .col_type = .float64, .nullable = true },
         },
     });
 }
@@ -72,16 +72,21 @@ fn removeDir(path: []const u8) void {
         if (n <= 0) break;
         var i: usize = 0;
         while (i < @as(usize, @intCast(n))) {
-            const dent: *const std.os.linux.dirent64 = @alignCast(@ptrCast(buf[i..].ptr));
+            const dent: *const std.os.linux.dirent64 = @ptrCast(@alignCast(buf[i..].ptr));
             const name = std.mem.span(@as([*:0]const u8, @ptrCast(&dent.name)));
             if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) {
-                const child = std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ path, name }) catch { i += dent.reclen; continue; };
+                const child = std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ path, name }) catch {
+                    i += dent.reclen;
+                    continue;
+                };
                 defer std.heap.page_allocator.free(child);
-                const null_child = std.heap.page_allocator.allocSentinel(u8, child.len, 0) catch { i += dent.reclen; continue; };
+                const null_child = std.heap.page_allocator.allocSentinel(u8, child.len, 0) catch {
+                    i += dent.reclen;
+                    continue;
+                };
                 defer std.heap.page_allocator.free(null_child);
                 @memcpy(null_child[0..child.len], child);
-                if (dent.type == std.os.linux.DT.DIR) removeDir(child)
-                else _ = std.os.linux.unlink(null_child.ptr);
+                if (dent.type == std.os.linux.DT.DIR) removeDir(child) else _ = std.os.linux.unlink(null_child.ptr);
             }
             i += dent.reclen;
         }
@@ -105,7 +110,7 @@ fn listSstFiles(dir: []const u8, alloc: std.mem.Allocator) ![][]const u8 {
         if (n <= 0) break;
         var i: usize = 0;
         while (i < @as(usize, @intCast(n))) {
-            const dent: *const std.os.linux.dirent64 = @alignCast(@ptrCast(buf[i..].ptr));
+            const dent: *const std.os.linux.dirent64 = @ptrCast(@alignCast(buf[i..].ptr));
             const name = std.mem.span(@as([*:0]const u8, @ptrCast(&dent.name)));
             if (std.mem.endsWith(u8, name, ".sst")) {
                 const full = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name });
@@ -116,7 +121,9 @@ fn listSstFiles(dir: []const u8, alloc: std.mem.Allocator) ![][]const u8 {
     }
     const result = try files.toOwnedSlice(alloc);
     std.mem.sort([]const u8, result, {}, struct {
-        fn lt(_: void, a: []const u8, b: []const u8) bool { return std.mem.order(u8, a, b) == .lt; }
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
     }.lt);
     return result;
 }
@@ -149,9 +156,9 @@ fn readFileBytes(path: []const u8, alloc: std.mem.Allocator) ![]u8 {
 // ─── Entry builder ────────────────────────────────────────────────────────────
 
 fn makeEntry(
-    alloc:  std.mem.Allocator,
-    seq:    u64,
-    hash:   *const [32]u8,
+    alloc: std.mem.Allocator,
+    seq: u64,
+    hash: *const [32]u8,
     params: []const u8,
 ) !LogEntry {
     var payload: std.ArrayList(u8) = .empty;
@@ -165,11 +172,11 @@ fn makeEntry(
 
 const Fixture = struct {
     storage: *Storage,
-    sr:      *schema_mod.SchemaRegistry,
-    reg:     *registry_mod.SqlRegistry,
-    exec:    eb.SqlExecutor,
-    dir:     []const u8,
-    alloc:   std.mem.Allocator,
+    sr: *schema_mod.SchemaRegistry,
+    reg: *registry_mod.SqlRegistry,
+    exec: eb.SqlExecutor,
+    dir: []const u8,
+    alloc: std.mem.Allocator,
 
     fn init(alloc: std.mem.Allocator, dir: []const u8) !Fixture {
         const storage = try alloc.create(Storage);
@@ -205,9 +212,15 @@ fn assertBytEqualSsts(dir_a: []const u8, dir_b: []const u8, alloc: std.mem.Alloc
     defer alloc.free(table_dir_b);
 
     const files_a = try listSstFiles(table_dir_a, alloc);
-    defer { for (files_a) |f| alloc.free(f); alloc.free(files_a); }
+    defer {
+        for (files_a) |f| alloc.free(f);
+        alloc.free(files_a);
+    }
     const files_b = try listSstFiles(table_dir_b, alloc);
-    defer { for (files_b) |f| alloc.free(f); alloc.free(files_b); }
+    defer {
+        for (files_b) |f| alloc.free(f);
+        alloc.free(files_b);
+    }
 
     try testing.expectEqual(files_a.len, files_b.len);
     try testing.expect(files_a.len > 0);
@@ -253,7 +266,7 @@ test "SQL Replay: INSERT UPDATE DELETE produces byte-equal SSTables" {
         const name = try std.fmt.allocPrint(alloc, "user{d}", .{i});
         defer alloc.free(name);
         const params_raw = try eb.encodeParams(&.{
-            .{ .int64  = i },
+            .{ .int64 = i },
             .{ .string = name },
             .{ .float64 = @as(f64, @floatFromInt(i)) * 1.5 },
         }, alloc);
@@ -270,7 +283,7 @@ test "SQL Replay: INSERT UPDATE DELETE produces byte-equal SSTables" {
     i = 1;
     while (i <= 5) : (i += 1) {
         const params_raw = try eb.encodeParams(&.{
-            .{ .int64   = i },
+            .{ .int64 = i },
             .{ .float64 = 99.9 },
         }, alloc);
         defer alloc.free(params_raw);
@@ -335,8 +348,8 @@ test "SQL Replay: constraint-abort aborts do not corrupt state determinism" {
         const name = try std.fmt.allocPrint(alloc, "u{d}", .{i});
         defer alloc.free(name);
         const params_raw = try eb.encodeParams(&.{
-            .{ .int64   = i },
-            .{ .string  = name },
+            .{ .int64 = i },
+            .{ .string = name },
             .{ .float64 = 0.0 },
         }, alloc);
         defer alloc.free(params_raw);
@@ -378,8 +391,8 @@ test "SQL Replay: constraint-abort aborts do not corrupt state determinism" {
         const name = try std.fmt.allocPrint(alloc, "u{d}", .{i});
         defer alloc.free(name);
         const params_raw = try eb.encodeParams(&.{
-            .{ .int64   = i },
-            .{ .string  = name },
+            .{ .int64 = i },
+            .{ .string = name },
             .{ .float64 = 1.0 },
         }, alloc);
         defer alloc.free(params_raw);
@@ -419,8 +432,8 @@ test "SQL Replay: scan returns rows written via INSERT" {
         const name = try std.fmt.allocPrint(alloc, "user{d}", .{i});
         defer alloc.free(name);
         const params_raw = try eb.encodeParams(&.{
-            .{ .int64   = i },
-            .{ .string  = name },
+            .{ .int64 = i },
+            .{ .string = name },
             .{ .float64 = @as(f64, @floatFromInt(i)) * 10.0 },
         }, alloc);
         defer alloc.free(params_raw);
@@ -434,7 +447,7 @@ test "SQL Replay: scan returns rows written via INSERT" {
     const rq = fx.reg.lookup(select_hash).?;
     i = 1;
     while (i <= 3) : (i += 1) {
-        const select_params = try alloc.dupe(ColumnValue, &.{ .{ .int64 = i } });
+        const select_params = try alloc.dupe(ColumnValue, &.{.{ .int64 = i }});
         defer alloc.free(select_params);
 
         var rows = try fx.exec.querySelect(rq.plan, select_params, &.{}, seq, alloc);
@@ -456,7 +469,7 @@ test "SQL Replay: scan returns rows written via INSERT" {
     // Delete row 2, verify it no longer appears
     const delete_hash = try fx.reg.register("DELETE FROM users WHERE id = $1");
     {
-        const params_raw = try eb.encodeParams(&.{ .{ .int64 = 2 } }, alloc);
+        const params_raw = try eb.encodeParams(&.{.{ .int64 = 2 }}, alloc);
         defer alloc.free(params_raw);
         var e = try makeEntry(alloc, seq, &delete_hash, params_raw);
         defer e.deinit(alloc);
@@ -466,10 +479,13 @@ test "SQL Replay: scan returns rows written via INSERT" {
 
     {
         const rq2 = fx.reg.lookup(select_hash).?;
-        const select_params = try alloc.dupe(ColumnValue, &.{ .{ .int64 = 2 } });
+        const select_params = try alloc.dupe(ColumnValue, &.{.{ .int64 = 2 }});
         defer alloc.free(select_params);
         var rows = try fx.exec.querySelect(rq2.plan, select_params, &.{}, seq, alloc);
-        defer { for (rows.items) |r| alloc.free(r); rows.deinit(alloc); }
+        defer {
+            for (rows.items) |r| alloc.free(r);
+            rows.deinit(alloc);
+        }
         try testing.expectEqual(@as(usize, 0), rows.items.len);
     }
 }

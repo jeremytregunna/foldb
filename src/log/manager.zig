@@ -73,7 +73,7 @@ pub const Log = struct {
 
             var i: usize = 0;
             while (i < @as(usize, @intCast(n))) {
-                const dent: *const std.os.linux.dirent64 = @alignCast(@ptrCast(buf[i..].ptr));
+                const dent: *const std.os.linux.dirent64 = @ptrCast(@alignCast(buf[i..].ptr));
                 const name = std.mem.span(@as([*:0]const u8, @ptrCast(&dent.name)));
                 const DT_REG: u8 = 8;
                 if (dent.type == DT_REG and std.mem.endsWith(u8, name, ".seg")) {

@@ -14,21 +14,21 @@ fn makeSchema(alloc: std.mem.Allocator) !schema_mod.SchemaRegistry {
     var sr = schema_mod.SchemaRegistry.init(alloc);
     // users(id INT64 NOT NULL, name STRING NOT NULL, score FLOAT64 NULL)
     _ = try sr.createTable(.{
-        .name    = "users",
+        .name = "users",
         .columns = &[_]ast_mod.ColumnDef{
-            .{ .name = "id",    .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
-            .{ .name = "name",  .typ = .string,                          .nullable = .not_null, .span = zero_span },
-            .{ .name = "score", .typ = .float64,                         .nullable = .nullable, .span = zero_span },
+            .{ .name = "id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
+            .{ .name = "name", .typ = .string, .nullable = .not_null, .span = zero_span },
+            .{ .name = "score", .typ = .float64, .nullable = .nullable, .span = zero_span },
         },
         .primary_key = .{ .columns = &.{"id"} },
     });
     // orders(id INT64 NOT NULL, user_id INT64 NOT NULL, amount FLOAT64 NOT NULL)
     _ = try sr.createTable(.{
-        .name    = "orders",
+        .name = "orders",
         .columns = &[_]ast_mod.ColumnDef{
-            .{ .name = "id",      .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
+            .{ .name = "id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
             .{ .name = "user_id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
-            .{ .name = "amount",  .typ = .float64,                         .nullable = .not_null, .span = zero_span },
+            .{ .name = "amount", .typ = .float64, .nullable = .not_null, .span = zero_span },
         },
         .primary_key = .{ .columns = &.{"id"} },
     });
@@ -89,7 +89,8 @@ test "§10.2 rejects = on nullable column" {
     var r = reg(alloc, &sr);
     defer r.deinit();
 
-    try expectErr(&r,
+    try expectErr(
+        &r,
         "SELECT id FROM users WHERE score = $1",
         error.NullableColumnWithoutGuard,
     );
@@ -102,7 +103,8 @@ test "§10.2 rejects != on nullable column" {
     var r = reg(alloc, &sr);
     defer r.deinit();
 
-    try expectErr(&r,
+    try expectErr(
+        &r,
         "SELECT id FROM users WHERE score != 0.0",
         error.NullableColumnWithoutGuard,
     );
@@ -148,7 +150,8 @@ test "§10.2 rejects unqualified column ref in join ON clause" {
     var r = reg(alloc, &sr);
     defer r.deinit();
 
-    try expectErr(&r,
+    try expectErr(
+        &r,
         "SELECT u.id FROM users u JOIN orders o ON id = o.user_id",
         error.UnqualifiedJoinColumnRef,
     );
@@ -161,7 +164,8 @@ test "§10.2 allows qualified refs in join" {
     var r = reg(alloc, &sr);
     defer r.deinit();
 
-    try expectOk(&r,
+    try expectOk(
+        &r,
         "SELECT u.id, o.amount FROM users u JOIN orders o ON u.id = o.user_id",
     );
 }
@@ -176,7 +180,8 @@ test "§10.2 rejects adding int to string" {
     defer r.deinit();
 
     // id (int64) + name (string) should be a type error
-    try expectErr(&r,
+    try expectErr(
+        &r,
         "SELECT id + name FROM users",
         error.TypeMismatch,
     );
@@ -189,7 +194,8 @@ test "§10.2 rejects comparing int to string" {
     var r = reg(alloc, &sr);
     defer r.deinit();
 
-    try expectErr(&r,
+    try expectErr(
+        &r,
         "SELECT id FROM users WHERE id = 'notanint'",
         error.ImplicitTypeCoercion,
     );
@@ -204,7 +210,8 @@ test "§10.2 rejects NOW() in WHERE" {
     var r = reg(alloc, &sr);
     defer r.deinit();
 
-    try expectErr(&r,
+    try expectErr(
+        &r,
         "SELECT id FROM users WHERE id > NOW()",
         error.SideEffectingFunctionInWhere,
     );
@@ -217,7 +224,8 @@ test "§10.2 rejects RANDOM() in HAVING" {
     var r = reg(alloc, &sr);
     defer r.deinit();
 
-    try expectErr(&r,
+    try expectErr(
+        &r,
         "SELECT id FROM users GROUP BY id HAVING id > RANDOM()",
         error.SideEffectingFunctionInWhere,
     );
@@ -243,7 +251,8 @@ test "rejects query on unknown table" {
     var r = reg(alloc, &sr);
     defer r.deinit();
 
-    try expectErr(&r,
+    try expectErr(
+        &r,
         "SELECT id FROM nonexistent WHERE id = $1",
         error.TableNotFound,
     );
@@ -256,7 +265,8 @@ test "rejects insert into unknown table" {
     var r = reg(alloc, &sr);
     defer r.deinit();
 
-    try expectErr(&r,
+    try expectErr(
+        &r,
         "INSERT INTO ghost (id) VALUES ($1)",
         error.TableNotFound,
     );
@@ -272,7 +282,8 @@ test "rejects CASE arms with mixed types" {
     defer r.deinit();
 
     // CASE WHEN id > 0 THEN 'text' WHEN id < 0 THEN 42 END
-    try expectErr(&r,
+    try expectErr(
+        &r,
         "SELECT CASE WHEN id > 0 THEN 'text' WHEN id < 0 THEN 42 END FROM users",
         error.TypeMismatch,
     );
@@ -285,7 +296,8 @@ test "allows CASE arms with matching types" {
     var r = reg(alloc, &sr);
     defer r.deinit();
 
-    try expectOk(&r,
+    try expectOk(
+        &r,
         "SELECT CASE WHEN id > 0 THEN 'positive' ELSE 'other' END FROM users",
     );
 }
@@ -300,14 +312,14 @@ test "DDL rejects adding column to unknown table" {
     defer r.deinit();
 
     const result = r.applyDdl(.{ .alter_table = .{
-        .table  = "ghost",
+        .table = "ghost",
         .action = .{ .add_column = .{
-            .name     = "foo",
-            .typ      = .string,
+            .name = "foo",
+            .typ = .string,
             .nullable = .not_null,
-            .span     = zero_span,
-        }},
-    }});
+            .span = zero_span,
+        } },
+    } });
     try std.testing.expectError(error.TypeCheckError, result);
 }
 
@@ -323,9 +335,9 @@ test "DDL schema breaking change invalidates registered queries" {
 
     // Drop 'name' — breaks existing query
     const result = r.applyDdl(.{ .alter_table = .{
-        .table  = "users",
+        .table = "users",
         .action = .{ .drop_column = "name" },
-    }});
+    } });
     try std.testing.expectError(error.SchemaBreakingChange, result);
 }
 
@@ -340,14 +352,14 @@ test "DDL adding new column does not break existing queries" {
 
     // Adding a new column is backwards-compatible
     try r.applyDdl(.{ .alter_table = .{
-        .table  = "users",
+        .table = "users",
         .action = .{ .add_column = .{
-            .name     = "email",
-            .typ      = .string,
+            .name = "email",
+            .typ = .string,
             .nullable = .nullable,
-            .span     = zero_span,
-        }},
-    }});
+            .span = zero_span,
+        } },
+    } });
 }
 
 // ─── Transaction block type checks ───────────────────────────────────────────

@@ -23,15 +23,15 @@ pub const RegistryError = error{
 
 /// A registered query, ready for execution.
 pub const RegisteredQuery = struct {
-    hash:         QueryHash,
-    sql_text:     []const u8,
-    plan:         plan_mod.ExecutionPlan,
-    param_types:  []const ast.SqlType,
+    hash: QueryHash,
+    sql_text: []const u8,
+    plan: plan_mod.ExecutionPlan,
+    param_types: []const ast.SqlType,
     nondet_count: u32,
     /// Schema version at registration time (for invalidation on DDL changes).
-    schema_seq:   u64,
+    schema_seq: u64,
     /// Arena that owns all AST/plan allocations for this query.
-    arena:        std.heap.ArenaAllocator,
+    arena: std.heap.ArenaAllocator,
 
     pub fn deinit(self: *RegisteredQuery) void {
         self.arena.deinit();
@@ -39,17 +39,17 @@ pub const RegisteredQuery = struct {
 };
 
 pub const SqlRegistry = struct {
-    queries:  std.AutoHashMap(QueryHash, *RegisteredQuery),
-    schema:   *schema_mod.SchemaRegistry,
-    alloc:    std.mem.Allocator,
+    queries: std.AutoHashMap(QueryHash, *RegisteredQuery),
+    schema: *schema_mod.SchemaRegistry,
+    alloc: std.mem.Allocator,
     /// Monotonically increasing schema version; bumped on any DDL.
     schema_seq: u64,
 
     pub fn init(alloc: std.mem.Allocator, schema: *schema_mod.SchemaRegistry) SqlRegistry {
         return .{
-            .queries    = std.AutoHashMap(QueryHash, *RegisteredQuery).init(alloc),
-            .schema     = schema,
-            .alloc      = alloc,
+            .queries = std.AutoHashMap(QueryHash, *RegisteredQuery).init(alloc),
+            .schema = schema,
+            .alloc = alloc,
             .schema_seq = 0,
         };
     }
@@ -71,11 +71,13 @@ pub const SqlRegistry = struct {
         const arena_alloc = arena.allocator();
 
         const parsed = parser_mod.parse(sql, arena_alloc) catch |e| {
-            arena.deinit(); return e;
+            arena.deinit();
+            return e;
         };
 
         const h = canon.canonicalize(parsed, arena_alloc) catch |e| {
-            arena.deinit(); return e;
+            arena.deinit();
+            return e;
         };
 
         if (self.queries.contains(h)) {
@@ -84,56 +86,64 @@ pub const SqlRegistry = struct {
         }
 
         const param_types = extractParamTypes(parsed, arena_alloc) catch |e| {
-            arena.deinit(); return e;
+            arena.deinit();
+            return e;
         };
 
         var checker = tc_mod.TypeChecker.init(arena_alloc, self.schema);
         for (parsed.stmts) |stmt| {
             checker.checkStmt(stmt, param_types, true) catch |e| {
-                arena.deinit(); return e;
+                arena.deinit();
+                return e;
             };
         }
 
         var planner = plan_mod.Planner.init(arena_alloc, self.schema);
         const exec_plan = if (parsed.stmts.len == 1 and parsed.stmts[0] == .transaction)
             planner.planTransaction(parsed.stmts[0].transaction) catch |e| {
-                arena.deinit(); return e;
+                arena.deinit();
+                return e;
             }
         else blk: {
             var stmts: std.ArrayList(plan_mod.StmtPlan) = .empty;
             for (parsed.stmts) |s| {
                 const sp = planner.planAstStmt(s) catch |e| {
-                    arena.deinit(); return e;
+                    arena.deinit();
+                    return e;
                 };
                 stmts.append(arena_alloc, sp) catch |e| {
-                    arena.deinit(); return e;
+                    arena.deinit();
+                    return e;
                 };
             }
             const owned = stmts.toOwnedSlice(arena_alloc) catch |e| {
-                arena.deinit(); return e;
+                arena.deinit();
+                return e;
             };
             break :blk plan_mod.ExecutionPlan{
-                .stmts        = owned,
-                .param_types  = param_types,
+                .stmts = owned,
+                .param_types = param_types,
                 .nondet_count = planner.nondet_idx,
             };
         };
 
         const sql_copy = arena_alloc.dupe(u8, sql) catch |e| {
-            arena.deinit(); return e;
+            arena.deinit();
+            return e;
         };
 
         const rq = self.alloc.create(RegisteredQuery) catch |e| {
-            arena.deinit(); return e;
+            arena.deinit();
+            return e;
         };
         rq.* = .{
-            .hash         = h,
-            .sql_text     = sql_copy,
-            .plan         = exec_plan,
-            .param_types  = param_types,
+            .hash = h,
+            .sql_text = sql_copy,
+            .plan = exec_plan,
+            .param_types = param_types,
             .nondet_count = exec_plan.nondet_count,
-            .schema_seq   = self.schema_seq,
-            .arena        = arena,
+            .schema_seq = self.schema_seq,
+            .arena = arena,
         };
 
         self.queries.put(h, rq) catch |e| {
@@ -161,7 +171,7 @@ pub const SqlRegistry = struct {
             },
             .alter_table => |s| {
                 switch (s.action) {
-                    .add_column  => |col| self.schema.addColumn(s.table, col) catch return error.TypeCheckError,
+                    .add_column => |col| self.schema.addColumn(s.table, col) catch return error.TypeCheckError,
                     .drop_column => |col| self.schema.dropColumn(s.table, col) catch return error.TypeCheckError,
                 }
             },

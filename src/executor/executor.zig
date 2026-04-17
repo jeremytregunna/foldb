@@ -1,47 +1,47 @@
 /// Fold Executor: consumes committed LogEntries, applies mutations to Storage deterministically.
 const std = @import("std");
-const types_mod   = @import("types.zig");
+const types_mod = @import("types.zig");
 const registry_mod = @import("registry.zig");
-const log_mod     = @import("log.zig");
+const log_mod = @import("log.zig");
 const storage_mod = @import("storage.zig");
 
-pub const QueryHash        = types_mod.QueryHash;
-pub const ResolvedValue    = types_mod.ResolvedValue;
-pub const ResolvedKind     = types_mod.ResolvedKind;
-pub const AbortCode        = types_mod.AbortCode;
-pub const ExecResult       = types_mod.ExecResult;
+pub const QueryHash = types_mod.QueryHash;
+pub const ResolvedValue = types_mod.ResolvedValue;
+pub const ResolvedKind = types_mod.ResolvedKind;
+pub const AbortCode = types_mod.AbortCode;
+pub const ExecResult = types_mod.ExecResult;
 pub const TxnIntentDecoded = types_mod.TxnIntentDecoded;
-pub const TxnIntentHeader  = types_mod.TxnIntentHeader;
-pub const serializeTxnIntent   = types_mod.serializeTxnIntent;
+pub const TxnIntentHeader = types_mod.TxnIntentHeader;
+pub const serializeTxnIntent = types_mod.serializeTxnIntent;
 pub const deserializeTxnIntent = types_mod.deserializeTxnIntent;
 
-pub const QueryContext   = registry_mod.QueryContext;
-pub const QueryHandler   = registry_mod.QueryHandler;
-pub const QueryRegistry  = registry_mod.QueryRegistry;
+pub const QueryContext = registry_mod.QueryContext;
+pub const QueryHandler = registry_mod.QueryHandler;
+pub const QueryRegistry = registry_mod.QueryRegistry;
 
-pub const LogEntry  = log_mod.LogEntry;
+pub const LogEntry = log_mod.LogEntry;
 pub const EntryKind = log_mod.EntryKind;
 
-pub const Storage  = storage_mod.Storage;
+pub const Storage = storage_mod.Storage;
 pub const Mutation = storage_mod.Mutation;
-pub const Seq      = types_mod.Seq;
+pub const Seq = types_mod.Seq;
 
 pub const ExecutorError = error{
     ConstraintViolation,
 };
 
 pub const Executor = struct {
-    storage:       *Storage,
-    registry:      QueryRegistry,
+    storage: *Storage,
+    registry: QueryRegistry,
     committed_seq: Seq,
-    alloc:         std.mem.Allocator,
+    alloc: std.mem.Allocator,
 
     pub fn init(storage: *Storage, alloc: std.mem.Allocator) Executor {
         return .{
-            .storage       = storage,
-            .registry      = QueryRegistry.init(alloc),
+            .storage = storage,
+            .registry = QueryRegistry.init(alloc),
             .committed_seq = 0,
-            .alloc         = alloc,
+            .alloc = alloc,
         };
     }
 
@@ -79,10 +79,10 @@ pub const Executor = struct {
         };
 
         const ctx = QueryContext{
-            .params   = decoded.params,
+            .params = decoded.params,
             .resolved = decoded.nondet,
-            .seq      = entry.header.seq,
-            .alloc    = self.alloc,
+            .seq = entry.header.seq,
+            .alloc = self.alloc,
         };
 
         var mutations: std.ArrayList(Mutation) = .empty;

@@ -27,23 +27,23 @@ pub const WasmError = error{
     OutOfMemory,
 };
 
-const WASM_MAGIC:   [4]u8 = .{ 0x00, 0x61, 0x73, 0x6D };
+const WASM_MAGIC: [4]u8 = .{ 0x00, 0x61, 0x73, 0x6D };
 const WASM_VERSION: [4]u8 = .{ 0x01, 0x00, 0x00, 0x00 };
 
 /// Sections of a WASM binary (§5 of the WASM spec).
 const Section = enum(u8) {
-    custom   = 0,
-    type     = 1,
-    import   = 2,
+    custom = 0,
+    type = 1,
+    import = 2,
     function = 3,
-    table    = 4,
-    memory   = 5,
-    global   = 6,
+    table = 4,
+    memory = 5,
+    global = 6,
     @"export" = 7,
-    start    = 8,
-    element  = 9,
-    code     = 10,
-    data     = 11,
+    start = 8,
+    element = 9,
+    code = 10,
+    data = 11,
     datacount = 12,
     _,
 };
@@ -62,7 +62,7 @@ const ALLOWED_IMPORT_MODULES = [_][]const u8{
 
 /// Allowed foldb host functions (foldb module).
 const ALLOWED_IMPORTS = [_][]const u8{
-    "read_param",   // read an input parameter
+    "read_param", // read an input parameter
     "write_output", // write an output value
     "read_int",
     "read_float",
@@ -71,22 +71,22 @@ const ALLOWED_IMPORTS = [_][]const u8{
     "write_float",
     "write_string",
     "write_bool",
-    "abort",        // signal a constraint violation
+    "abort", // signal a constraint violation
 };
 
 /// Validated WASM module, ready for evaluation.
 pub const WasmModule = struct {
     /// BLAKE3 of the original module bytes.
-    hash:       [32]u8,
+    hash: [32]u8,
     /// Parsed function signatures (name → type index).
-    exports:    []const Export,
+    exports: []const Export,
     /// Raw code section bytes, for the evaluator.
     code_bytes: []const u8,
     /// Parsed type section.
-    types:      []const FuncType,
+    types: []const FuncType,
     /// Function code entries.
-    functions:  []const FuncCode,
-    alloc:      std.mem.Allocator,
+    functions: []const FuncCode,
+    alloc: std.mem.Allocator,
 
     pub fn deinit(self: *WasmModule) void {
         self.alloc.free(self.exports);
@@ -113,7 +113,7 @@ pub const ValType = enum(u8) {
 };
 
 pub const FuncType = struct {
-    params:  []const ValType,
+    params: []const ValType,
     results: []const ValType,
 };
 
@@ -121,24 +121,24 @@ pub const LocalDecl = struct { count: u32, typ: ValType };
 
 pub const FuncCode = struct {
     locals: []const LocalDecl,
-    body:   []const u8,  // raw bytes of the function body
+    body: []const u8, // raw bytes of the function body
 };
 
 // ─── Validator ────────────────────────────────────────────────────────────────
 
 pub fn validate(bytes: []const u8, alloc: std.mem.Allocator) WasmError!WasmModule {
     if (bytes.len < 8) return error.InvalidMagic;
-    if (!std.mem.eql(u8, bytes[0..4], &WASM_MAGIC))   return error.InvalidMagic;
+    if (!std.mem.eql(u8, bytes[0..4], &WASM_MAGIC)) return error.InvalidMagic;
     if (!std.mem.eql(u8, bytes[4..8], &WASM_VERSION)) return error.InvalidVersion;
 
     var hash: [32]u8 = undefined;
     std.crypto.hash.Blake3.hash(bytes, &hash, .{});
 
     var pos: usize = 8;
-    var types:     []const FuncType  = &.{};
-    var exports:   []const Export    = &.{};
-    var functions: []const FuncCode  = &.{};
-    var code_bytes: []const u8       = &.{};
+    var types: []const FuncType = &.{};
+    var exports: []const Export = &.{};
+    var functions: []const FuncCode = &.{};
+    var code_bytes: []const u8 = &.{};
 
     while (pos < bytes.len) {
         if (pos >= bytes.len) break;
@@ -151,15 +151,15 @@ pub fn validate(bytes: []const u8, alloc: std.mem.Allocator) WasmError!WasmModul
 
         const section = @as(Section, @enumFromInt(section_id));
         switch (section) {
-            .type     => types     = try parseTypeSection(section_data, alloc),
-            .import   => try validateImportSection(section_data),
-            .@"export" => exports  = try parseExportSection(section_data, alloc),
-            .code     => {
+            .type => types = try parseTypeSection(section_data, alloc),
+            .import => try validateImportSection(section_data),
+            .@"export" => exports = try parseExportSection(section_data, alloc),
+            .code => {
                 code_bytes = section_data;
-                functions  = try parseCodeSection(section_data, alloc);
+                functions = try parseCodeSection(section_data, alloc);
                 try validateCodeSection(section_data);
             },
-            .custom   => {
+            .custom => {
                 // Custom sections may contain name information or debug info — allowed.
                 // Reject "threads" feature section.
                 if (section_data.len >= 7 and std.mem.eql(u8, section_data[0..7], "threads")) {
@@ -171,12 +171,12 @@ pub fn validate(bytes: []const u8, alloc: std.mem.Allocator) WasmError!WasmModul
     }
 
     return .{
-        .hash       = hash,
-        .exports    = exports,
+        .hash = hash,
+        .exports = exports,
         .code_bytes = code_bytes,
-        .types      = types,
-        .functions  = functions,
-        .alloc      = alloc,
+        .types = types,
+        .functions = functions,
+        .alloc = alloc,
     };
 }
 
@@ -203,14 +203,20 @@ fn validateImportSection(data: []const u8) WasmError!void {
         // Validate module name
         var allowed = false;
         for (ALLOWED_IMPORT_MODULES) |m| {
-            if (std.mem.eql(u8, mod_name, m)) { allowed = true; break; }
+            if (std.mem.eql(u8, mod_name, m)) {
+                allowed = true;
+                break;
+            }
         }
         if (!allowed) return error.ForbiddenImport;
 
         // Validate function name
         var fn_allowed = false;
         for (ALLOWED_IMPORTS) |fn_name| {
-            if (std.mem.eql(u8, import_name, fn_name)) { fn_allowed = true; break; }
+            if (std.mem.eql(u8, import_name, fn_name)) {
+                fn_allowed = true;
+                break;
+            }
         }
         if (!fn_allowed) return error.ForbiddenImport;
     }
@@ -301,7 +307,7 @@ fn opcodeImmediateSize(opcode: u8, rest: []const u8) !usize {
         },
         0x43 => 4, // f32.const
         0x44 => 8, // f64.const
-        else  => 0,
+        else => 0,
     };
 }
 
@@ -342,7 +348,8 @@ fn parseExportSection(data: []const u8, alloc: std.mem.Allocator) WasmError![]co
         pos += nlb;
         const name = data[pos .. pos + name_len];
         pos += name_len;
-        const kind = data[pos]; pos += 1;
+        const kind = data[pos];
+        pos += 1;
         const idx, const ib = readUleb128(data[pos..]) orelse return error.ParseError;
         pos += ib;
         if (kind == 0x00) { // function export
@@ -387,7 +394,7 @@ fn parseCodeSection(data: []const u8, alloc: std.mem.Allocator) WasmError![]cons
 /// Supports: i32/i64 arithmetic, comparisons, local variables, basic control flow.
 pub const Evaluator = struct {
     module: *const WasmModule,
-    alloc:  std.mem.Allocator,
+    alloc: std.mem.Allocator,
 
     pub fn init(module: *const WasmModule, alloc: std.mem.Allocator) Evaluator {
         return .{ .module = module, .alloc = alloc };
@@ -436,11 +443,13 @@ pub const Evaluator = struct {
                 0x00 => return error.ExecutionTrap, // unreachable
                 0x01 => {}, // nop
                 0x0F => break, // return
-                0x1A => { _ = stack.pop(); }, // drop
+                0x1A => {
+                    _ = stack.pop();
+                }, // drop
                 0x1B => { // select
                     const cond = stack.pop();
-                    const b    = stack.pop();
-                    const a    = stack.pop();
+                    const b = stack.pop();
+                    const a = stack.pop();
                     try stack.append(self.alloc, if (valToBool(cond)) a else b);
                 },
 
@@ -543,7 +552,7 @@ pub const Evaluator = struct {
                 },
 
                 0x0B => {}, // end of block/function
-                else  => return error.ForbiddenOpcode,
+                else => return error.ForbiddenOpcode,
             }
         }
 
@@ -559,7 +568,7 @@ fn valToBool(v: Evaluator.WasmVal) bool {
     return switch (v) {
         .i32_val => |n| n != 0,
         .i64_val => |n| n != 0,
-        else     => false,
+        else => false,
     };
 }
 
@@ -594,16 +603,16 @@ fn cmpI32(stack: *std.ArrayList(Evaluator.WasmVal), alloc: std.mem.Allocator, op
     const b = popI32(stack) orelse return error.ExecutionTrap;
     const a = popI32(stack) orelse return error.ExecutionTrap;
     const result: bool = switch (op) {
-        .eq    => a == b,
-        .ne    => a != b,
-        .lt_s  => a < b,
-        .lt_u  => @as(u32, @bitCast(a)) < @as(u32, @bitCast(b)),
-        .gt_s  => a > b,
-        .gt_u  => @as(u32, @bitCast(a)) > @as(u32, @bitCast(b)),
-        .le_s  => a <= b,
-        .le_u  => @as(u32, @bitCast(a)) <= @as(u32, @bitCast(b)),
-        .ge_s  => a >= b,
-        .ge_u  => @as(u32, @bitCast(a)) >= @as(u32, @bitCast(b)),
+        .eq => a == b,
+        .ne => a != b,
+        .lt_s => a < b,
+        .lt_u => @as(u32, @bitCast(a)) < @as(u32, @bitCast(b)),
+        .gt_s => a > b,
+        .gt_u => @as(u32, @bitCast(a)) > @as(u32, @bitCast(b)),
+        .le_s => a <= b,
+        .le_u => @as(u32, @bitCast(a)) <= @as(u32, @bitCast(b)),
+        .ge_s => a >= b,
+        .ge_u => @as(u32, @bitCast(a)) >= @as(u32, @bitCast(b)),
     };
     try stack.append(alloc, .{ .i32_val = if (result) 1 else 0 });
 }
@@ -612,32 +621,50 @@ fn cmpI64(stack: *std.ArrayList(Evaluator.WasmVal), alloc: std.mem.Allocator, op
     const b = popI64(stack) orelse return error.ExecutionTrap;
     const a = popI64(stack) orelse return error.ExecutionTrap;
     const result: bool = switch (op) {
-        .eq   => a == b,
-        .ne   => a != b,
+        .eq => a == b,
+        .ne => a != b,
         .lt_s => a < b,
         .le_s => a <= b,
         .ge_s => a >= b,
-        else  => false,
+        else => false,
     };
     try stack.append(alloc, .{ .i32_val = if (result) 1 else 0 });
 }
 
-fn i32Add(a: i32, b: i32) i32 { return a +% b; }
-fn i32Sub(a: i32, b: i32) i32 { return a -% b; }
-fn i32Mul(a: i32, b: i32) i32 { return a *% b; }
-fn i32And(a: i32, b: i32) i32 { return a & b; }
-fn i32Or (a: i32, b: i32) i32 { return a | b; }
-fn i32Xor(a: i32, b: i32) i32 { return a ^ b; }
-fn i64Add(a: i64, b: i64) i64 { return a +% b; }
-fn i64Sub(a: i64, b: i64) i64 { return a -% b; }
-fn i64Mul(a: i64, b: i64) i64 { return a *% b; }
+fn i32Add(a: i32, b: i32) i32 {
+    return a +% b;
+}
+fn i32Sub(a: i32, b: i32) i32 {
+    return a -% b;
+}
+fn i32Mul(a: i32, b: i32) i32 {
+    return a *% b;
+}
+fn i32And(a: i32, b: i32) i32 {
+    return a & b;
+}
+fn i32Or(a: i32, b: i32) i32 {
+    return a | b;
+}
+fn i32Xor(a: i32, b: i32) i32 {
+    return a ^ b;
+}
+fn i64Add(a: i64, b: i64) i64 {
+    return a +% b;
+}
+fn i64Sub(a: i64, b: i64) i64 {
+    return a -% b;
+}
+fn i64Mul(a: i64, b: i64) i64 {
+    return a *% b;
+}
 
 // ─── LEB128 helpers ───────────────────────────────────────────────────────────
 
 /// Returns (value, bytes_consumed) or null on truncation.
 pub fn readUleb128(data: []const u8) ?struct { usize, usize } {
     var result: usize = 0;
-    var shift:  usize = 0;
+    var shift: usize = 0;
     for (data, 0..) |byte, i| {
         result |= (@as(usize, byte & 0x7F) << @intCast(shift));
         shift += 7;
@@ -649,7 +676,7 @@ pub fn readUleb128(data: []const u8) ?struct { usize, usize } {
 
 pub fn readSleb128(data: []const u8) ?struct { i64, usize } {
     var result: i64 = 0;
-    var shift:  usize = 0;
+    var shift: usize = 0;
     for (data, 0..) |byte, i| {
         result |= (@as(i64, byte & 0x7F) << @intCast(shift));
         shift += 7;

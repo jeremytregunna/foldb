@@ -13,7 +13,7 @@ fn makeSchema() TableSchema {
         .table_id = 1,
         .columns = &.{
             .{ .col_type = .string, .nullable = false },
-            .{ .col_type = .int64,  .nullable = false },
+            .{ .col_type = .int64, .nullable = false },
         },
     };
 }
@@ -26,7 +26,7 @@ test "Block: write and read back rows" {
     defer writer.deinit(alloc);
 
     const vals0 = [_]ColumnValue{ .{ .string = "alice" }, .{ .int64 = 100 } };
-    const vals1 = [_]ColumnValue{ .{ .string = "bob" },   .{ .int64 = 200 } };
+    const vals1 = [_]ColumnValue{ .{ .string = "bob" }, .{ .int64 = 200 } };
     const vals2 = [_]ColumnValue{ .{ .string = "carol" }, .{ .int64 = 300 } };
 
     try writer.append(alloc, "key0", 1, &vals0);
@@ -46,7 +46,10 @@ test "Block: write and read back rows" {
         try testing.expectEqual(@as(u64, 1), kv.seq);
         try testing.expect(!kv.is_tombstone);
         const row = try reader.readRow(0, alloc);
-        defer { var r = row; r.deinit(alloc); }
+        defer {
+            var r = row;
+            r.deinit(alloc);
+        }
         try testing.expectEqualSlices(u8, "key0", row.key);
         try testing.expectEqual(@as(i64, 100), row.values[1].int64);
     }
@@ -54,7 +57,10 @@ test "Block: write and read back rows" {
     // Read row 2
     {
         const row = try reader.readRow(2, alloc);
-        defer { var r = row; r.deinit(alloc); }
+        defer {
+            var r = row;
+            r.deinit(alloc);
+        }
         try testing.expectEqualSlices(u8, "key2", row.key);
         try testing.expectEqual(@as(i64, 300), row.values[1].int64);
     }
@@ -97,7 +103,7 @@ test "Block: mixed column types (string + bool)" {
 
     const v0 = [_]ColumnValue{ .{ .string = "hello" }, .{ .bool_t = true } };
     const v1 = [_]ColumnValue{ .{ .string = "world" }, .{ .bool_t = false } };
-    const v2 = [_]ColumnValue{ .{ .string = "zig" },   .{ .bool_t = true } };
+    const v2 = [_]ColumnValue{ .{ .string = "zig" }, .{ .bool_t = true } };
     try writer.append(alloc, "k0", 1, &v0);
     try writer.append(alloc, "k1", 2, &v1);
     try writer.append(alloc, "k2", 3, &v2);
@@ -108,7 +114,10 @@ test "Block: mixed column types (string + bool)" {
     try testing.expectEqual(@as(u32, 3), reader.row_count);
 
     const row1 = try reader.readRow(1, alloc);
-    defer { var r = row1; r.deinit(alloc); }
+    defer {
+        var r = row1;
+        r.deinit(alloc);
+    }
     try testing.expectEqualSlices(u8, "k1", row1.key);
     try testing.expectEqualSlices(u8, "world", row1.values[0].string);
     try testing.expectEqual(false, row1.values[1].bool_t);
@@ -138,15 +147,24 @@ test "Block: 100 rows round-trip" {
 
     // Spot-check first, middle, last
     const r0 = try reader.readRow(0, alloc);
-    defer { var r = r0; r.deinit(alloc); }
+    defer {
+        var r = r0;
+        r.deinit(alloc);
+    }
     try testing.expectEqual(@as(i64, 0), r0.values[1].int64);
 
     const r50 = try reader.readRow(50, alloc);
-    defer { var r = r50; r.deinit(alloc); }
+    defer {
+        var r = r50;
+        r.deinit(alloc);
+    }
     try testing.expectEqual(@as(i64, 50), r50.values[1].int64);
 
     const r99 = try reader.readRow(99, alloc);
-    defer { var r = r99; r.deinit(alloc); }
+    defer {
+        var r = r99;
+        r.deinit(alloc);
+    }
     try testing.expectEqual(@as(i64, 99), r99.values[1].int64);
 }
 

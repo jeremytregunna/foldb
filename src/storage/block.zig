@@ -179,7 +179,10 @@ pub const BlockWriter = struct {
         var has_nulls = false;
         outer: for (self.null_bits) |nb| {
             for (nb.items) |b| {
-                if (b) { has_nulls = true; break :outer; }
+                if (b) {
+                    has_nulls = true;
+                    break :outer;
+                }
             }
         }
         if (has_nulls) {
@@ -332,7 +335,10 @@ pub const BlockReader = struct {
             const mid_kv = try self.readKey(mid);
             switch (std.mem.order(u8, mid_kv.key, key)) {
                 .lt => lo = mid + 1,
-                .eq => { found = mid; hi = mid; }, // keep searching left for first match
+                .eq => {
+                    found = mid;
+                    hi = mid;
+                }, // keep searching left for first match
                 .gt => hi = mid,
             }
         }
@@ -367,18 +373,18 @@ pub const BlockReader = struct {
 
 fn zeroValue(col_type: ColumnType) ColumnValue {
     return switch (col_type) {
-        .bool_t  => .{ .bool_t = false },
-        .int8    => .{ .int8 = 0 },
-        .int16   => .{ .int16 = 0 },
-        .int32   => .{ .int32 = 0 },
-        .int64   => .{ .int64 = 0 },
-        .uint8   => .{ .uint8 = 0 },
-        .uint16  => .{ .uint16 = 0 },
-        .uint32  => .{ .uint32 = 0 },
-        .uint64  => .{ .uint64 = 0 },
+        .bool_t => .{ .bool_t = false },
+        .int8 => .{ .int8 = 0 },
+        .int16 => .{ .int16 = 0 },
+        .int32 => .{ .int32 = 0 },
+        .int64 => .{ .int64 = 0 },
+        .uint8 => .{ .uint8 = 0 },
+        .uint16 => .{ .uint16 = 0 },
+        .uint32 => .{ .uint32 = 0 },
+        .uint64 => .{ .uint64 = 0 },
         .float32 => .{ .float32 = 0.0 },
         .float64 => .{ .float64 = 0.0 },
-        .bytes   => .{ .bytes = "" },
-        .string  => .{ .string = "" },
+        .bytes => .{ .bytes = "" },
+        .string => .{ .string = "" },
     };
 }

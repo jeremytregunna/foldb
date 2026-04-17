@@ -45,7 +45,7 @@ test "SSTable: write and read back" {
         defer writer.deinit();
 
         const v0 = [_]ColumnValue{ .{ .string = "alice" }, .{ .uint64 = 42 } };
-        const v1 = [_]ColumnValue{ .{ .string = "bob" },   .{ .uint64 = 99 } };
+        const v1 = [_]ColumnValue{ .{ .string = "bob" }, .{ .uint64 = 99 } };
         try writer.append("key0", 1, &v0);
         try writer.append("key1", 2, &v1);
         try writer.finish();
@@ -78,9 +78,9 @@ test "SSTable: MVCC get at specific seq" {
         defer writer.deinit();
         // Two versions of "key0" — seq 10 first (newest), seq 5 second
         const v10 = [_]ColumnValue{ .{ .string = "v10" }, .{ .uint64 = 10 } };
-        const v5  = [_]ColumnValue{ .{ .string = "v5" },  .{ .uint64 = 5 } };
+        const v5 = [_]ColumnValue{ .{ .string = "v5" }, .{ .uint64 = 5 } };
         try writer.append("key0", 10, &v10);
-        try writer.append("key0", 5,  &v5);
+        try writer.append("key0", 5, &v5);
         try writer.finish();
     }
 

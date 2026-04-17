@@ -1,23 +1,23 @@
 const std = @import("std");
 const testing = std.testing;
 const executor_mod = @import("executor.zig");
-const storage_mod  = @import("storage.zig");
-const log_mod      = @import("log.zig");
+const storage_mod = @import("storage.zig");
+const log_mod = @import("log.zig");
 
-const Executor      = executor_mod.Executor;
-const ExecResult    = executor_mod.ExecResult;
-const AbortCode     = executor_mod.AbortCode;
-const QueryContext  = executor_mod.QueryContext;
+const Executor = executor_mod.Executor;
+const ExecResult = executor_mod.ExecResult;
+const AbortCode = executor_mod.AbortCode;
+const QueryContext = executor_mod.QueryContext;
 const ResolvedValue = executor_mod.ResolvedValue;
-const Mutation      = executor_mod.Mutation;
-const Storage       = executor_mod.Storage;
-const LogEntry      = executor_mod.LogEntry;
-const EntryKind     = executor_mod.EntryKind;
+const Mutation = executor_mod.Mutation;
+const Storage = executor_mod.Storage;
+const LogEntry = executor_mod.LogEntry;
+const EntryKind = executor_mod.EntryKind;
 const serializeTxnIntent = executor_mod.serializeTxnIntent;
 
-const TableSchema  = storage_mod.TableSchema;
+const TableSchema = storage_mod.TableSchema;
 const ColumnSchema = storage_mod.ColumnSchema;
-const ColumnValue  = storage_mod.ColumnValue;
+const ColumnValue = storage_mod.ColumnValue;
 
 // --- Schema ---
 
@@ -26,7 +26,7 @@ fn makeSchema() TableSchema {
         .table_id = 1,
         .columns = &.{
             .{ .col_type = .string, .nullable = false },
-            .{ .col_type = .int64,  .nullable = false },
+            .{ .col_type = .int64, .nullable = false },
         },
     };
 }
@@ -60,16 +60,21 @@ fn removeDir(path: []const u8) void {
         if (n <= 0) break;
         var i: usize = 0;
         while (i < @as(usize, @intCast(n))) {
-            const dent: *const std.os.linux.dirent64 = @alignCast(@ptrCast(buf[i..].ptr));
+            const dent: *const std.os.linux.dirent64 = @ptrCast(@alignCast(buf[i..].ptr));
             const name = std.mem.span(@as([*:0]const u8, @ptrCast(&dent.name)));
             if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) {
-                const child = std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ path, name }) catch { i += dent.reclen; continue; };
+                const child = std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ path, name }) catch {
+                    i += dent.reclen;
+                    continue;
+                };
                 defer std.heap.page_allocator.free(child);
-                const null_child = std.heap.page_allocator.allocSentinel(u8, child.len, 0) catch { i += dent.reclen; continue; };
+                const null_child = std.heap.page_allocator.allocSentinel(u8, child.len, 0) catch {
+                    i += dent.reclen;
+                    continue;
+                };
                 defer std.heap.page_allocator.free(null_child);
                 @memcpy(null_child[0..child.len], child);
-                if (dent.type == std.os.linux.DT.DIR) removeDir(child)
-                else _ = std.os.linux.unlink(null_child.ptr);
+                if (dent.type == std.os.linux.DT.DIR) removeDir(child) else _ = std.os.linux.unlink(null_child.ptr);
             }
             i += dent.reclen;
         }
@@ -97,14 +102,14 @@ fn readKey(params: []const u8) !struct { key: []const u8, rest: []const u8 } {
     if (params.len < 2) return error.BadParams;
     const key_len = std.mem.readInt(u16, params[0..2], .little);
     if (params.len < 2 + key_len) return error.BadParams;
-    return .{ .key = params[2..2 + key_len], .rest = params[2 + key_len..] };
+    return .{ .key = params[2 .. 2 + key_len], .rest = params[2 + key_len ..] };
 }
 
 fn encodeInsertParams(alloc: std.mem.Allocator, key: []const u8, value: i64) ![]u8 {
     var buf = try alloc.alloc(u8, 2 + key.len + 8);
     std.mem.writeInt(u16, buf[0..2], @intCast(key.len), .little);
-    @memcpy(buf[2..2 + key.len], key);
-    std.mem.writeInt(i64, buf[2 + key.len..][0..8], value, .little);
+    @memcpy(buf[2 .. 2 + key.len], key);
+    std.mem.writeInt(i64, buf[2 + key.len ..][0..8], value, .little);
     return buf;
 }
 
@@ -178,7 +183,7 @@ fn handlerMultiInsert(ctx: QueryContext, _: *Storage, mutations: *std.ArrayList(
     const value = std.mem.readInt(i64, kv.rest[0..8], .little);
 
     const suffixes = [_][]const u8{ "", "_b" };
-    const deltas   = [_]i64{ 0, 1 };
+    const deltas = [_]i64{ 0, 1 };
     for (suffixes, deltas) |suffix, delta| {
         const full_key = try std.fmt.allocPrint(ctx.alloc, "{s}{s}", .{ kv.key, suffix });
         errdefer ctx.alloc.free(full_key);
@@ -257,14 +262,14 @@ fn setupExecutor(alloc: std.mem.Allocator, dir: []const u8) !Executor {
     storage.* = try Storage.init(dir, alloc);
     try storage.registerTable(makeSchema());
     var exec = Executor.init(storage, alloc);
-    try exec.register(HASH_INSERT,        handlerInsert);
-    try exec.register(HASH_DELETE,        handlerDelete);
-    try exec.register(HASH_UPDATE,        handlerUpdate);
+    try exec.register(HASH_INSERT, handlerInsert);
+    try exec.register(HASH_DELETE, handlerDelete);
+    try exec.register(HASH_UPDATE, handlerUpdate);
     try exec.register(HASH_INSERT_IF_NEW, handlerInsertIfNew);
-    try exec.register(HASH_WRITE_NOW,     handlerWriteNow);
-    try exec.register(HASH_MULTI_INSERT,  handlerMultiInsert);
-    try exec.register(HASH_WRITE_RANDOM,  handlerWriteRandom);
-    try exec.register(HASH_WRITE_UUID,    handlerWriteUuid);
+    try exec.register(HASH_WRITE_NOW, handlerWriteNow);
+    try exec.register(HASH_MULTI_INSERT, handlerMultiInsert);
+    try exec.register(HASH_WRITE_RANDOM, handlerWriteRandom);
+    try exec.register(HASH_WRITE_UUID, handlerWriteUuid);
     return exec;
 }
 
@@ -657,8 +662,8 @@ test "txn_intent round-trip preserves all fields" {
     const hash: [32]u8 = HASH_INSERT;
     const params = "hello world";
     const nondet = [_]ResolvedValue{
-        .{ .now     = 999 },
-        .{ .random  = [_]u8{0xAA} ** 16 },
+        .{ .now = 999 },
+        .{ .random = [_]u8{0xAA} ** 16 },
         .{ .uuid_v7 = [_]u8{0xBB} ** 16 },
     };
 

@@ -407,4 +407,3 @@ pub const SSTableReader = struct {
         return try self.alloc.dupe(u8, self.data[block_offset .. block_offset + total_size]);
     }
 };
-

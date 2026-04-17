@@ -7,7 +7,7 @@ pub const TypeCheckError = error{
     // §10.2 violations
     SelectStarInRegisteredQuery,
     ImplicitTypeCoercion,
-    NullableColumnWithoutGuard,   // = on nullable column without IS NULL guard
+    NullableColumnWithoutGuard, // = on nullable column without IS NULL guard
     UnqualifiedJoinColumnRef,
     SideEffectingFunctionInWhere,
     IsolationLevelClause,
@@ -19,26 +19,26 @@ pub const TypeCheckError = error{
     UndefinedFunction,
     WrongArgCount,
     ParamOutOfRange,
-    NonDeterministicInPlan,       // nondeterministic fn not resolved
+    NonDeterministicInPlan, // nondeterministic fn not resolved
     OutOfMemory,
 };
 
 pub const TypedExpr = struct {
     expr: *ast.Expr,
-    typ:  ast.SqlType,
+    typ: ast.SqlType,
 };
 
 pub const CheckContext = struct {
-    schema:       *const schema_mod.SchemaRegistry,
-    params:       []const ast.SqlType,   // parameter types for this query
-    nondet_count: u32,                   // how many nondets assigned so far
-    in_join:      bool,                  // are we in a JOIN ON/USING clause?
-    in_where:     bool,
-    in_having:    bool,
-    alloc:        std.mem.Allocator,
+    schema: *const schema_mod.SchemaRegistry,
+    params: []const ast.SqlType, // parameter types for this query
+    nondet_count: u32, // how many nondets assigned so far
+    in_join: bool, // are we in a JOIN ON/USING clause?
+    in_where: bool,
+    in_having: bool,
+    alloc: std.mem.Allocator,
 
     /// Table bindings visible in the current scope: alias or name → table schema
-    scope:       []const ScopeEntry,
+    scope: []const ScopeEntry,
 };
 
 pub const ScopeEntry = struct {
@@ -47,8 +47,8 @@ pub const ScopeEntry = struct {
 };
 
 pub const TypeChecker = struct {
-    alloc:   std.mem.Allocator,
-    schema:  *const schema_mod.SchemaRegistry,
+    alloc: std.mem.Allocator,
+    schema: *const schema_mod.SchemaRegistry,
     err_msg: []const u8 = "",
 
     pub fn init(alloc: std.mem.Allocator, schema: *const schema_mod.SchemaRegistry) TypeChecker {
@@ -59,15 +59,15 @@ pub const TypeChecker = struct {
 
     pub fn checkStmt(self: *TypeChecker, s: ast.Stmt, params: []const ast.SqlType, is_registered: bool) TypeCheckError!void {
         switch (s) {
-            .select    => |q| try self.checkSelect(q, params, is_registered),
-            .insert    => |q| try self.checkInsert(q, params),
-            .update    => |q| try self.checkUpdate(q, params),
-            .delete    => |q| try self.checkDelete(q, params),
-            .merge     => |q| try self.checkMerge(q, params),
+            .select => |q| try self.checkSelect(q, params, is_registered),
+            .insert => |q| try self.checkInsert(q, params),
+            .update => |q| try self.checkUpdate(q, params),
+            .delete => |q| try self.checkDelete(q, params),
+            .merge => |q| try self.checkMerge(q, params),
             .create_table => |q| try self.checkCreateTable(q),
             .create_index => |q| try self.checkCreateIndex(q),
-            .alter_table  => |q| try self.checkAlterTable(q),
-            .transaction  => |q| try self.checkTransaction(q),
+            .alter_table => |q| try self.checkAlterTable(q),
+            .transaction => |q| try self.checkTransaction(q),
         }
     }
 
@@ -78,7 +78,10 @@ pub const TypeChecker = struct {
         for (stmt.primary_key.columns) |pk_col| {
             var found = false;
             for (stmt.columns) |col| {
-                if (std.ascii.eqlIgnoreCase(col.name, pk_col)) { found = true; break; }
+                if (std.ascii.eqlIgnoreCase(col.name, pk_col)) {
+                    found = true;
+                    break;
+                }
             }
             if (!found) return error.ColumnNotFound;
         }
@@ -116,7 +119,7 @@ pub const TypeChecker = struct {
                 .insert => |q| try self.checkInsert(q, param_slice),
                 .update => |q| try self.checkUpdate(q, param_slice),
                 .delete => |q| try self.checkDelete(q, param_slice),
-                .merge  => |q| try self.checkMerge(q, param_slice),
+                .merge => |q| try self.checkMerge(q, param_slice),
                 .assert => |e| {
                     const ctx = self.makeCtx(param_slice, &.{});
                     const t = try self.inferExpr(e, ctx);
@@ -228,7 +231,9 @@ pub const TypeChecker = struct {
         if (!on_t.eql(.bool)) return error.TypeMismatch;
         for (stmt.whens) |w| {
             switch (w) {
-                .matched    => |m| { if (m.cond) |c| _ = try self.inferExpr(c, ctx); },
+                .matched => |m| {
+                    if (m.cond) |c| _ = try self.inferExpr(c, ctx);
+                },
                 .not_matched => |nm| {
                     if (nm.cond) |c| _ = try self.inferExpr(c, ctx);
                     for (nm.values) |e| _ = try self.inferExpr(e, ctx);
@@ -241,12 +246,12 @@ pub const TypeChecker = struct {
 
     pub fn inferExpr(self: *TypeChecker, e: *ast.Expr, ctx: CheckContext) TypeCheckError!ast.SqlType {
         return switch (e.*) {
-            .lit_int    => .{ .int64 = .error_on_overflow }, // widest compatible
-            .lit_float  => .float64,
+            .lit_int => .{ .int64 = .error_on_overflow }, // widest compatible
+            .lit_float => .float64,
             .lit_string => .string,
-            .lit_bytes  => .bytes,
-            .lit_bool   => .bool,
-            .lit_null   => .null_type,
+            .lit_bytes => .bytes,
+            .lit_bool => .bool,
+            .lit_null => .null_type,
 
             .param => |idx| {
                 // No declared params (non-transaction query): treat as polymorphic
@@ -261,8 +266,8 @@ pub const TypeChecker = struct {
                     return error.SideEffectingFunctionInWhere;
                 }
                 return switch (kind) {
-                    .now     => .timestamp,
-                    .random  => .bytes,
+                    .now => .timestamp,
+                    .random => .bytes,
                     .uuid_v7 => .uuid,
                 };
             },
@@ -307,14 +312,14 @@ pub const TypeChecker = struct {
 
             .between => |b| {
                 const et = try self.inferExpr(b.expr, ctx);
-                const lt = try self.inferExpr(b.low,  ctx);
+                const lt = try self.inferExpr(b.low, ctx);
                 const ht = try self.inferExpr(b.high, ctx);
                 if (!et.eql(lt) or !et.eql(ht)) return error.TypeMismatch;
                 return .bool;
             },
 
             .like => |l| {
-                const et = try self.inferExpr(l.expr,    ctx);
+                const et = try self.inferExpr(l.expr, ctx);
                 const pt = try self.inferExpr(l.pattern, ctx);
                 if (!et.eql(.string) or !pt.eql(.string)) return error.TypeMismatch;
                 return .bool;
@@ -341,9 +346,9 @@ pub const TypeChecker = struct {
             .exists, .not_exists => .bool,
 
             .case_searched => |c| try self.inferCaseSearched(c.whens, c.else_expr, ctx),
-            .case_simple   => |c| try self.inferCaseSimple(c.operand, c.whens, c.else_expr, ctx),
+            .case_simple => |c| try self.inferCaseSimple(c.operand, c.whens, c.else_expr, ctx),
 
-            .fn_call   => |f| try self.inferFnCall(f, ctx),
+            .fn_call => |f| try self.inferFnCall(f, ctx),
             .window_fn => |w| try self.inferFnCall(w.call, ctx),
 
             .subquery => .null_type, // scalar subquery — type unknown without full plan
@@ -400,13 +405,13 @@ pub const TypeChecker = struct {
     }
 
     fn inferBinary(
-        self:  *TypeChecker,
-        op:    ast.BinOp,
-        left:  *ast.Expr,
+        self: *TypeChecker,
+        op: ast.BinOp,
+        left: *ast.Expr,
         right: *ast.Expr,
-        ctx:   CheckContext,
+        ctx: CheckContext,
     ) TypeCheckError!ast.SqlType {
-        const lt = try self.inferExpr(left,  ctx);
+        const lt = try self.inferExpr(left, ctx);
         const rt = try self.inferExpr(right, ctx);
 
         switch (op) {
@@ -464,10 +469,10 @@ pub const TypeChecker = struct {
     }
 
     fn inferCaseSearched(
-        self:      *TypeChecker,
-        whens:     []ast.CaseWhen,
+        self: *TypeChecker,
+        whens: []ast.CaseWhen,
         else_expr: ?*ast.Expr,
-        ctx:       CheckContext,
+        ctx: CheckContext,
     ) TypeCheckError!ast.SqlType {
         var result_type: ?ast.SqlType = null;
         for (whens) |w| {
@@ -486,11 +491,11 @@ pub const TypeChecker = struct {
     }
 
     fn inferCaseSimple(
-        self:      *TypeChecker,
-        operand:   *ast.Expr,
-        whens:     []ast.CaseWhen,
+        self: *TypeChecker,
+        operand: *ast.Expr,
+        whens: []ast.CaseWhen,
         else_expr: ?*ast.Expr,
-        ctx:       CheckContext,
+        ctx: CheckContext,
     ) TypeCheckError!ast.SqlType {
         const ot = try self.inferExpr(operand, ctx);
         var result_type: ?ast.SqlType = null;
@@ -548,14 +553,14 @@ pub const TypeChecker = struct {
 
     fn makeCtx(self: *TypeChecker, params: []const ast.SqlType, scope: []const ScopeEntry) CheckContext {
         return .{
-            .schema       = self.schema,
-            .params       = params,
+            .schema = self.schema,
+            .params = params,
             .nondet_count = 0,
-            .in_join      = false,
-            .in_where     = false,
-            .in_having    = false,
-            .alloc        = self.alloc,
-            .scope        = scope,
+            .in_join = false,
+            .in_where = false,
+            .in_having = false,
+            .alloc = self.alloc,
+            .scope = scope,
         };
     }
 };
@@ -572,14 +577,14 @@ fn isSideEffecting(name: []const u8) bool {
 fn inferBuiltinReturn(name: []const u8, arg_count: usize, star: bool) TypeCheckError!ast.SqlType {
     _ = arg_count;
     if (star or std.ascii.eqlIgnoreCase(name, "count")) return .{ .int64 = .error_on_overflow };
-    if (std.ascii.eqlIgnoreCase(name, "sum"))  return .{ .int64 = .error_on_overflow };
-    if (std.ascii.eqlIgnoreCase(name, "avg"))  return .float64;
+    if (std.ascii.eqlIgnoreCase(name, "sum")) return .{ .int64 = .error_on_overflow };
+    if (std.ascii.eqlIgnoreCase(name, "avg")) return .float64;
     if (std.ascii.eqlIgnoreCase(name, "min") or std.ascii.eqlIgnoreCase(name, "max")) return .null_type; // depends on arg
     if (std.ascii.eqlIgnoreCase(name, "coalesce")) return .null_type;
-    if (std.ascii.eqlIgnoreCase(name, "nullif"))   return .null_type;
+    if (std.ascii.eqlIgnoreCase(name, "nullif")) return .null_type;
     if (std.ascii.eqlIgnoreCase(name, "length") or std.ascii.eqlIgnoreCase(name, "char_length")) return .{ .int64 = .error_on_overflow };
     if (std.ascii.eqlIgnoreCase(name, "lower") or std.ascii.eqlIgnoreCase(name, "upper") or
-        std.ascii.eqlIgnoreCase(name, "trim")  or std.ascii.eqlIgnoreCase(name, "ltrim") or
+        std.ascii.eqlIgnoreCase(name, "trim") or std.ascii.eqlIgnoreCase(name, "ltrim") or
         std.ascii.eqlIgnoreCase(name, "rtrim") or std.ascii.eqlIgnoreCase(name, "substr") or
         std.ascii.eqlIgnoreCase(name, "replace") or std.ascii.eqlIgnoreCase(name, "concat")) return .string;
     if (std.ascii.eqlIgnoreCase(name, "row_number") or std.ascii.eqlIgnoreCase(name, "rank") or
@@ -587,7 +592,7 @@ fn inferBuiltinReturn(name: []const u8, arg_count: usize, star: bool) TypeCheckE
     if (std.ascii.eqlIgnoreCase(name, "lag") or std.ascii.eqlIgnoreCase(name, "lead") or
         std.ascii.eqlIgnoreCase(name, "first_value") or std.ascii.eqlIgnoreCase(name, "last_value")) return .null_type;
     if (std.ascii.eqlIgnoreCase(name, "json_extract") or std.ascii.eqlIgnoreCase(name, "json_object") or
-        std.ascii.eqlIgnoreCase(name, "json_array"))  return .json;
+        std.ascii.eqlIgnoreCase(name, "json_array")) return .json;
     // Unknown function — allowed (could be a user WASM function)
     return .null_type;
 }

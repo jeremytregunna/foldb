@@ -130,7 +130,7 @@ test "Dict: string low cardinality" {
 
 test "Dict: bool values" {
     const vals = [_]ColumnValue{
-        .{ .bool_t = true }, .{ .bool_t = false }, .{ .bool_t = true }, .{ .bool_t = false },
+        .{ .bool_t = true },  .{ .bool_t = false }, .{ .bool_t = true }, .{ .bool_t = false },
         .{ .bool_t = false }, .{ .bool_t = true },
     };
     // 1/5 adjacent pairs equal = 20% < 50% → not RLE; not integer → not FOR; 2 distinct ≤ 256 → dict
@@ -139,7 +139,7 @@ test "Dict: bool values" {
 
 test "Dict: float32 values" {
     const vals = [_]ColumnValue{
-        .{ .float32 = 1.0 }, .{ .float32 = 2.5 }, .{ .float32 = 1.0 },
+        .{ .float32 = 1.0 },  .{ .float32 = 2.5 }, .{ .float32 = 1.0 },
         .{ .float32 = 3.14 }, .{ .float32 = 2.5 }, .{ .float32 = 1.0 },
     };
     // 2/5 adjacent equal = 40% < 50% → not RLE; not integer → not FOR; 3 distinct ≤ 256 → dict

@@ -37,10 +37,16 @@ pub fn chooseCodec(col_type: ColumnType, values: []const ColumnValue) CodecId {
     outer: for (values) |v| {
         var found = false;
         for (seen[0..distinct]) |s| {
-            if (s.eql(v)) { found = true; break; }
+            if (s.eql(v)) {
+                found = true;
+                break;
+            }
         }
         if (!found) {
-            if (distinct >= 256) { distinct = 257; break :outer; }
+            if (distinct >= 256) {
+                distinct = 257;
+                break :outer;
+            }
             seen[distinct] = v;
             distinct += 1;
         }
@@ -53,8 +59,7 @@ pub fn chooseCodec(col_type: ColumnType, values: []const ColumnValue) CodecId {
 fn intMinMax(col_type: ColumnType, values: []const ColumnValue) ?[2]u64 {
     if (values.len == 0) return null;
     return switch (col_type) {
-        .int8, .int16, .int32, .int64,
-        .uint8, .uint16, .uint32, .uint64 => blk: {
+        .int8, .int16, .int32, .int64, .uint8, .uint16, .uint32, .uint64 => blk: {
             var mn = valueToU64(values[0]);
             var mx = valueToU64(values[0]);
             for (values[1..]) |v| {
@@ -70,11 +75,11 @@ fn intMinMax(col_type: ColumnType, values: []const ColumnValue) ?[2]u64 {
 
 fn valueToU64(v: ColumnValue) u64 {
     return switch (v) {
-        .int8  => |x| @bitCast(@as(i64, x)),
+        .int8 => |x| @bitCast(@as(i64, x)),
         .int16 => |x| @bitCast(@as(i64, x)),
         .int32 => |x| @bitCast(@as(i64, x)),
         .int64 => |x| @bitCast(x),
-        .uint8  => |x| x,
+        .uint8 => |x| x,
         .uint16 => |x| x,
         .uint32 => |x| x,
         .uint64 => |x| x,
@@ -84,11 +89,11 @@ fn valueToU64(v: ColumnValue) u64 {
 
 fn u64ToValue(u: u64, col_type: ColumnType) ColumnValue {
     return switch (col_type) {
-        .int8  => .{ .int8  = @intCast(@as(i64, @bitCast(u))) },
+        .int8 => .{ .int8 = @intCast(@as(i64, @bitCast(u))) },
         .int16 => .{ .int16 = @intCast(@as(i64, @bitCast(u))) },
         .int32 => .{ .int32 = @intCast(@as(i64, @bitCast(u))) },
         .int64 => .{ .int64 = @bitCast(u) },
-        .uint8  => .{ .uint8  = @intCast(u) },
+        .uint8 => .{ .uint8 = @intCast(u) },
         .uint16 => .{ .uint16 = @intCast(u) },
         .uint32 => .{ .uint32 = @intCast(u) },
         .uint64 => .{ .uint64 = u },
@@ -106,8 +111,8 @@ pub fn encode(
     alloc: std.mem.Allocator,
 ) !void {
     switch (codec) {
-        .raw  => try encodeRaw(col_type, values, out, alloc),
-        .rle  => try encodeRle(col_type, values, out, alloc),
+        .raw => try encodeRaw(col_type, values, out, alloc),
+        .rle => try encodeRle(col_type, values, out, alloc),
         .dict => try encodeDict(col_type, values, out, alloc),
         .for_ => try encodeFor(col_type, values, out, alloc),
     }
@@ -122,8 +127,8 @@ pub fn decode(
     alloc: std.mem.Allocator,
 ) !void {
     switch (codec) {
-        .raw  => try decodeRaw(col_type, data, count, out, alloc),
-        .rle  => try decodeRle(col_type, data, count, out, alloc),
+        .raw => try decodeRaw(col_type, data, count, out, alloc),
+        .rle => try decodeRle(col_type, data, count, out, alloc),
         .dict => try decodeDict(col_type, data, count, out, alloc),
         .for_ => try decodeFor(col_type, data, count, out),
     }
@@ -200,7 +205,11 @@ fn encodeDict(col_type: ColumnType, values: []const ColumnValue, out: *std.Array
         var idx: u8 = 0;
         var found = false;
         for (dict.items, 0..) |d, di| {
-            if (d.eql(v)) { idx = @intCast(di); found = true; break; }
+            if (d.eql(v)) {
+                idx = @intCast(di);
+                found = true;
+                break;
+            }
         }
         if (!found) {
             idx = @intCast(dict.items.len);
@@ -277,19 +286,55 @@ const ReadResult = struct { value: ColumnValue, bytes_read: usize };
 
 fn writeValue(col_type: ColumnType, v: ColumnValue, out: *std.ArrayList(u8), alloc: std.mem.Allocator) !void {
     switch (col_type) {
-        .bool_t  => try out.append(alloc, if (v.bool_t) 1 else 0),
-        .int8    => try out.append(alloc, @bitCast(v.int8)),
-        .int16   => { var b: [2]u8 = undefined; std.mem.writeInt(i16, &b, v.int16, .little); try out.appendSlice(alloc, &b); },
-        .int32   => { var b: [4]u8 = undefined; std.mem.writeInt(i32, &b, v.int32, .little); try out.appendSlice(alloc, &b); },
-        .int64   => { var b: [8]u8 = undefined; std.mem.writeInt(i64, &b, v.int64, .little); try out.appendSlice(alloc, &b); },
-        .uint8   => try out.append(alloc, v.uint8),
-        .uint16  => { var b: [2]u8 = undefined; std.mem.writeInt(u16, &b, v.uint16, .little); try out.appendSlice(alloc, &b); },
-        .uint32  => { var b: [4]u8 = undefined; std.mem.writeInt(u32, &b, v.uint32, .little); try out.appendSlice(alloc, &b); },
-        .uint64  => { var b: [8]u8 = undefined; std.mem.writeInt(u64, &b, v.uint64, .little); try out.appendSlice(alloc, &b); },
-        .float32 => { var b: [4]u8 = undefined; std.mem.writeInt(u32, &b, @bitCast(v.float32), .little); try out.appendSlice(alloc, &b); },
-        .float64 => { var b: [8]u8 = undefined; std.mem.writeInt(u64, &b, @bitCast(v.float64), .little); try out.appendSlice(alloc, &b); },
+        .bool_t => try out.append(alloc, if (v.bool_t) 1 else 0),
+        .int8 => try out.append(alloc, @bitCast(v.int8)),
+        .int16 => {
+            var b: [2]u8 = undefined;
+            std.mem.writeInt(i16, &b, v.int16, .little);
+            try out.appendSlice(alloc, &b);
+        },
+        .int32 => {
+            var b: [4]u8 = undefined;
+            std.mem.writeInt(i32, &b, v.int32, .little);
+            try out.appendSlice(alloc, &b);
+        },
+        .int64 => {
+            var b: [8]u8 = undefined;
+            std.mem.writeInt(i64, &b, v.int64, .little);
+            try out.appendSlice(alloc, &b);
+        },
+        .uint8 => try out.append(alloc, v.uint8),
+        .uint16 => {
+            var b: [2]u8 = undefined;
+            std.mem.writeInt(u16, &b, v.uint16, .little);
+            try out.appendSlice(alloc, &b);
+        },
+        .uint32 => {
+            var b: [4]u8 = undefined;
+            std.mem.writeInt(u32, &b, v.uint32, .little);
+            try out.appendSlice(alloc, &b);
+        },
+        .uint64 => {
+            var b: [8]u8 = undefined;
+            std.mem.writeInt(u64, &b, v.uint64, .little);
+            try out.appendSlice(alloc, &b);
+        },
+        .float32 => {
+            var b: [4]u8 = undefined;
+            std.mem.writeInt(u32, &b, @bitCast(v.float32), .little);
+            try out.appendSlice(alloc, &b);
+        },
+        .float64 => {
+            var b: [8]u8 = undefined;
+            std.mem.writeInt(u64, &b, @bitCast(v.float64), .little);
+            try out.appendSlice(alloc, &b);
+        },
         .bytes, .string => {
-            const s = switch (v) { .bytes => |x| x, .string => |x| x, else => unreachable };
+            const s = switch (v) {
+                .bytes => |x| x,
+                .string => |x| x,
+                else => unreachable,
+            };
             var len_buf: [4]u8 = undefined;
             std.mem.writeInt(u32, &len_buf, @intCast(s.len), .little);
             try out.appendSlice(alloc, &len_buf);
@@ -300,22 +345,55 @@ fn writeValue(col_type: ColumnType, v: ColumnValue, out: *std.ArrayList(u8), all
 
 fn readValue(col_type: ColumnType, data: []const u8, alloc: std.mem.Allocator) !ReadResult {
     switch (col_type) {
-        .bool_t  => { if (data.len < 1) return error.EndOfData; return .{ .value = .{ .bool_t = data[0] != 0 }, .bytes_read = 1 }; },
-        .int8    => { if (data.len < 1) return error.EndOfData; return .{ .value = .{ .int8 = @bitCast(data[0]) }, .bytes_read = 1 }; },
-        .int16   => { if (data.len < 2) return error.EndOfData; return .{ .value = .{ .int16 = std.mem.readInt(i16, data[0..2], .little) }, .bytes_read = 2 }; },
-        .int32   => { if (data.len < 4) return error.EndOfData; return .{ .value = .{ .int32 = std.mem.readInt(i32, data[0..4], .little) }, .bytes_read = 4 }; },
-        .int64   => { if (data.len < 8) return error.EndOfData; return .{ .value = .{ .int64 = std.mem.readInt(i64, data[0..8], .little) }, .bytes_read = 8 }; },
-        .uint8   => { if (data.len < 1) return error.EndOfData; return .{ .value = .{ .uint8 = data[0] }, .bytes_read = 1 }; },
-        .uint16  => { if (data.len < 2) return error.EndOfData; return .{ .value = .{ .uint16 = std.mem.readInt(u16, data[0..2], .little) }, .bytes_read = 2 }; },
-        .uint32  => { if (data.len < 4) return error.EndOfData; return .{ .value = .{ .uint32 = std.mem.readInt(u32, data[0..4], .little) }, .bytes_read = 4 }; },
-        .uint64  => { if (data.len < 8) return error.EndOfData; return .{ .value = .{ .uint64 = std.mem.readInt(u64, data[0..8], .little) }, .bytes_read = 8 }; },
-        .float32 => { if (data.len < 4) return error.EndOfData; return .{ .value = .{ .float32 = @bitCast(std.mem.readInt(u32, data[0..4], .little)) }, .bytes_read = 4 }; },
-        .float64 => { if (data.len < 8) return error.EndOfData; return .{ .value = .{ .float64 = @bitCast(std.mem.readInt(u64, data[0..8], .little)) }, .bytes_read = 8 }; },
+        .bool_t => {
+            if (data.len < 1) return error.EndOfData;
+            return .{ .value = .{ .bool_t = data[0] != 0 }, .bytes_read = 1 };
+        },
+        .int8 => {
+            if (data.len < 1) return error.EndOfData;
+            return .{ .value = .{ .int8 = @bitCast(data[0]) }, .bytes_read = 1 };
+        },
+        .int16 => {
+            if (data.len < 2) return error.EndOfData;
+            return .{ .value = .{ .int16 = std.mem.readInt(i16, data[0..2], .little) }, .bytes_read = 2 };
+        },
+        .int32 => {
+            if (data.len < 4) return error.EndOfData;
+            return .{ .value = .{ .int32 = std.mem.readInt(i32, data[0..4], .little) }, .bytes_read = 4 };
+        },
+        .int64 => {
+            if (data.len < 8) return error.EndOfData;
+            return .{ .value = .{ .int64 = std.mem.readInt(i64, data[0..8], .little) }, .bytes_read = 8 };
+        },
+        .uint8 => {
+            if (data.len < 1) return error.EndOfData;
+            return .{ .value = .{ .uint8 = data[0] }, .bytes_read = 1 };
+        },
+        .uint16 => {
+            if (data.len < 2) return error.EndOfData;
+            return .{ .value = .{ .uint16 = std.mem.readInt(u16, data[0..2], .little) }, .bytes_read = 2 };
+        },
+        .uint32 => {
+            if (data.len < 4) return error.EndOfData;
+            return .{ .value = .{ .uint32 = std.mem.readInt(u32, data[0..4], .little) }, .bytes_read = 4 };
+        },
+        .uint64 => {
+            if (data.len < 8) return error.EndOfData;
+            return .{ .value = .{ .uint64 = std.mem.readInt(u64, data[0..8], .little) }, .bytes_read = 8 };
+        },
+        .float32 => {
+            if (data.len < 4) return error.EndOfData;
+            return .{ .value = .{ .float32 = @bitCast(std.mem.readInt(u32, data[0..4], .little)) }, .bytes_read = 4 };
+        },
+        .float64 => {
+            if (data.len < 8) return error.EndOfData;
+            return .{ .value = .{ .float64 = @bitCast(std.mem.readInt(u64, data[0..8], .little)) }, .bytes_read = 8 };
+        },
         .bytes, .string => {
             if (data.len < 4) return error.EndOfData;
             const len = std.mem.readInt(u32, data[0..4], .little);
             if (data.len < 4 + len) return error.EndOfData;
-            const s = try alloc.dupe(u8, data[4..4 + len]);
+            const s = try alloc.dupe(u8, data[4 .. 4 + len]);
             const value: ColumnValue = if (col_type == .bytes) .{ .bytes = s } else .{ .string = s };
             return .{ .value = value, .bytes_read = 4 + len };
         },

@@ -8,7 +8,7 @@ fn makeUsersTable(sr: *schema_mod.SchemaRegistry) !void {
     _ = try sr.createTable(.{
         .name = "users",
         .columns = &[_]ast_mod.ColumnDef{
-            .{ .name = "id",   .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = .{ .start = 0, .end = 0 } },
+            .{ .name = "id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = .{ .start = 0, .end = 0 } },
             .{ .name = "name", .typ = .string, .nullable = .not_null, .span = .{ .start = 0, .end = 0 } },
         },
         .primary_key = .{ .columns = &.{"id"} },

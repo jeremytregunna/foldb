@@ -18,9 +18,9 @@ const FOOTER_SIZE = log.FOOTER_SIZE;
 test "Segment: header fields are correct" {
     const base_seq: Seq = 42;
     const node_id: NodeId = 1;
-    
+
     const header = SegmentHeader.init(base_seq, node_id);
-    
+
     // Validate header fields
     try testing.expectEqualSlices(u8, &log.MAGIC, &header.magic);
     try testing.expectEqual(@as(u32, 1), header.version);
@@ -34,9 +34,9 @@ test "Segment: footer fields are correct" {
     const entry_count: u32 = 100;
     const last_seq: Seq = 200;
     const index_offset: u64 = 1024;
-    
+
     const footer = SegmentFooter.init(entry_count, last_seq, index_offset);
-    
+
     // Validate footer fields
     try testing.expectEqual(entry_count, footer.entry_count);
     try testing.expectEqual(last_seq, footer.last_seq);
@@ -46,9 +46,9 @@ test "Segment: footer fields are correct" {
 test "Segment: index entry fields are correct" {
     const seq: Seq = 12345;
     const file_offset: u64 = 2048;
-    
+
     const index_entry = IndexEntry{ .seq = seq, .file_offset = file_offset };
-    
+
     try testing.expectEqual(seq, index_entry.seq);
     try testing.expectEqual(file_offset, index_entry.file_offset);
 }
@@ -57,9 +57,9 @@ test "Segment: LogEntry creation" {
     const seq: Seq = 1;
     const epoch: u64 = 0;
     const payload = "test data";
-    
+
     const entry = LogEntry.create(seq, epoch, .txn_intent, payload);
-    
+
     try testing.expectEqual(seq, entry.header.seq);
     try testing.expectEqual(epoch, entry.header.epoch);
     try testing.expectEqual(@as(u32, @intCast(payload.len)), entry.header.payload_len);
@@ -70,7 +70,7 @@ test "Segment: LogEntry creation" {
 test "Segment: LogEntry sizes" {
     const payload = "hello";
     const entry = LogEntry.create(1, 0, .txn_intent, payload);
-    
+
     const total_size = entry.totalSize();
     try testing.expectEqual(@as(usize, 25) + payload.len, total_size);
 }
@@ -78,7 +78,7 @@ test "Segment: LogEntry sizes" {
 test "Segment: CRC verification" {
     const payload = "test data for CRC verification";
     const entry = LogEntry.create(1, 0, .txn_intent, payload);
-    
+
     try testing.expect(entry.verifyCrc());
 }
 
@@ -86,7 +86,7 @@ test "Segment: different entry kinds" {
     const txn_entry = LogEntry.create(1, 0, .txn_intent, "txn");
     const noop_entry = LogEntry.create(2, 0, .noop, "");
     const snapshot_entry = LogEntry.create(3, 0, .snapshot_marker, "snapshot");
-    
+
     try testing.expectEqual(@as(u8, 1), @intFromEnum(txn_entry.header.kind));
     try testing.expectEqual(@as(u8, 4), @intFromEnum(noop_entry.header.kind));
     try testing.expectEqual(@as(u8, 5), @intFromEnum(snapshot_entry.header.kind));
@@ -96,11 +96,11 @@ test "Segment: EntryKind fromByte" {
     const txn_kind = try EntryKind.fromByte(1);
     const noop_kind = try EntryKind.fromByte(4);
     const snapshot_kind = try EntryKind.fromByte(5);
-    
+
     try testing.expectEqual(.txn_intent, txn_kind);
     try testing.expectEqual(.noop, noop_kind);
     try testing.expectEqual(.snapshot_marker, snapshot_kind);
-    
+
     // Invalid kind should error
     const invalid_result = EntryKind.fromByte(99);
     try testing.expectError(error.InvalidEntryKind, invalid_result);
@@ -109,7 +109,7 @@ test "Segment: EntryKind fromByte" {
 test "Segment: TxnIntent" {
     const payload = "transaction payload";
     const intent = TxnIntent.init(payload);
-    
+
     try testing.expectEqualSlices(u8, payload, intent.payload);
 }
 

@@ -2,8 +2,8 @@
 const std = @import("std");
 const sql = @import("sql.zig");
 const schema_mod = sql.schema;
-const ast_mod    = sql.ast;
-const plan_mod   = sql.plan;
+const ast_mod = sql.ast;
+const plan_mod = sql.plan;
 const parser_mod = sql.parser;
 
 const zero_span: ast_mod.Span = .{ .start = 0, .end = 0 };
@@ -11,20 +11,20 @@ const zero_span: ast_mod.Span = .{ .start = 0, .end = 0 };
 fn makeSchema(alloc: std.mem.Allocator) !schema_mod.SchemaRegistry {
     var sr = schema_mod.SchemaRegistry.init(alloc);
     _ = try sr.createTable(.{
-        .name    = "users",
+        .name = "users",
         .columns = &[_]ast_mod.ColumnDef{
-            .{ .name = "id",    .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
-            .{ .name = "name",  .typ = .string,                          .nullable = .not_null, .span = zero_span },
-            .{ .name = "score", .typ = .float64,                         .nullable = .nullable, .span = zero_span },
+            .{ .name = "id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
+            .{ .name = "name", .typ = .string, .nullable = .not_null, .span = zero_span },
+            .{ .name = "score", .typ = .float64, .nullable = .nullable, .span = zero_span },
         },
         .primary_key = .{ .columns = &.{"id"} },
     });
     _ = try sr.createTable(.{
-        .name    = "orders",
+        .name = "orders",
         .columns = &[_]ast_mod.ColumnDef{
-            .{ .name = "id",      .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
+            .{ .name = "id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
             .{ .name = "user_id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
-            .{ .name = "amount",  .typ = .float64,                         .nullable = .not_null, .span = zero_span },
+            .{ .name = "amount", .typ = .float64, .nullable = .not_null, .span = zero_span },
         },
         .primary_key = .{ .columns = &.{"id"} },
     });
@@ -144,7 +144,7 @@ test "qualified column ref in JOIN resolves correctly" {
     const cond = join_node.hash_join.condition;
     try std.testing.expect(cond.* == .binary);
     try std.testing.expect(cond.binary.left.* == .column);
-    try std.testing.expectEqual(@as(u32, 0), cond.binary.left.column);  // u.id
+    try std.testing.expectEqual(@as(u32, 0), cond.binary.left.column); // u.id
     try std.testing.expect(cond.binary.right.* == .column);
     try std.testing.expectEqual(@as(u32, 4), cond.binary.right.column); // o.user_id
 }

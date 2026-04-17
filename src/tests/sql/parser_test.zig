@@ -270,7 +270,7 @@ test "parse MERGE statement" {
         \\MERGE INTO users USING orders ON users.id = orders.user_id
         \\WHEN MATCHED THEN UPDATE SET name = 'updated'
         \\WHEN NOT MATCHED THEN INSERT (id, name) VALUES (orders.user_id, 'new')
-        ,
+    ,
         arena.allocator(),
     );
 }
@@ -334,7 +334,7 @@ test "parse TRANSACTION block" {
         \\  INSERT INTO users (id, name) VALUES ($1, $2);
         \\  ASSERT (SELECT COUNT(*) FROM users WHERE id = $1) = 1;
         \\}
-        ,
+    ,
         arena.allocator(),
     );
     try std.testing.expect(q.stmts[0] == .transaction);
@@ -351,7 +351,7 @@ test "parse TRANSACTION with multiple DML" {
         \\  UPDATE users SET name = 'deleted' WHERE id = $1;
         \\  DELETE FROM orders WHERE user_id = $1;
         \\}
-        ,
+    ,
         arena.allocator(),
     );
 }
@@ -367,7 +367,7 @@ test "parse all integer types" {
         \\  e UINT8 NOT NULL, f UINT16 NOT NULL, g UINT32 NOT NULL, h UINT64 NOT NULL,
         \\  PRIMARY KEY (a)
         \\)
-        ,
+    ,
         arena.allocator(),
     );
 }

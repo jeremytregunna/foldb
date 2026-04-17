@@ -11,7 +11,6 @@
 ///
 /// const seq = try my_log.append(log.TxnIntent.init("data"));
 /// ```
-
 const crc_mod = @import("crc.zig");
 const entry = @import("entry.zig");
 const segment = @import("segment.zig");

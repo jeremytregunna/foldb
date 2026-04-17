@@ -46,7 +46,7 @@ fn removeDirRecursive(path: []const u8) void {
         if (n <= 0) break;
         var i: usize = 0;
         while (i < @as(usize, @intCast(n))) {
-            const dent: *const std.os.linux.dirent64 = @alignCast(@ptrCast(buf[i..].ptr));
+            const dent: *const std.os.linux.dirent64 = @ptrCast(@alignCast(buf[i..].ptr));
             const name = std.mem.span(@as([*:0]const u8, @ptrCast(&dent.name)));
             if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) {
                 const child = std.mem.concat(std.heap.page_allocator, u8, &.{ path, "/", name }) catch {
@@ -115,7 +115,9 @@ test "Node: election timeout triggers candidacy" {
     var rv_count: usize = 0;
     for (out.items) |o| switch (o) {
         .persist => persist_count += 1,
-        .send => |s| if (s.msg == .request_vote) { rv_count += 1; },
+        .send => |s| if (s.msg == .request_vote) {
+            rv_count += 1;
+        },
         else => {},
     };
     try testing.expectEqual(@as(usize, 1), persist_count);
@@ -252,7 +254,10 @@ test "Node: follower appends entries from leader" {
     var committed_seen = false;
     var success_seen = false;
     for (out.items) |o| switch (o) {
-        .committed => |seq| { committed_seen = true; try testing.expectEqual(@as(u64, 2), seq); },
+        .committed => |seq| {
+            committed_seen = true;
+            try testing.expectEqual(@as(u64, 2), seq);
+        },
         .send => |s| if (s.msg == .append_entries_result) {
             success_seen = true;
             try testing.expect(s.msg.append_entries_result.success);
@@ -347,7 +352,9 @@ test "Node: leader commits on majority matchIndex" {
 
     // Self + peer 2 = majority for 3-node cluster.
     var committed: ?u64 = null;
-    for (out.items) |o| if (o == .committed) { committed = o.committed; };
+    for (out.items) |o| if (o == .committed) {
+        committed = o.committed;
+    };
     try testing.expect(committed != null);
     try testing.expectEqual(seq, committed.?);
     try testing.expectEqual(seq, node.commit_index);

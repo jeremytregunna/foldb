@@ -9,11 +9,11 @@ pub const IntOverflow = enum { error_on_overflow, wrapping };
 
 pub const SqlType = union(enum) {
     bool,
-    int8:  IntOverflow,
+    int8: IntOverflow,
     int16: IntOverflow,
     int32: IntOverflow,
     int64: IntOverflow,
-    uint8:  IntOverflow,
+    uint8: IntOverflow,
     uint16: IntOverflow,
     uint32: IntOverflow,
     uint64: IntOverflow,
@@ -27,7 +27,7 @@ pub const SqlType = union(enum) {
     interval_months,
     interval_micros,
     json,
-    vector: u32,          // dimension
+    vector: u32, // dimension
     array: *const SqlType,
     struct_type: []const StructField,
     // Internal-only: type of NULL literal before resolution
@@ -35,75 +35,82 @@ pub const SqlType = union(enum) {
 
     pub fn isNumeric(self: SqlType) bool {
         return switch (self) {
-            .int8, .int16, .int32, .int64,
-            .uint8, .uint16, .uint32, .uint64,
-            .float32, .float64, .decimal => true,
+            .int8, .int16, .int32, .int64, .uint8, .uint16, .uint32, .uint64, .float32, .float64, .decimal => true,
             else => false,
         };
     }
 
     pub fn isInteger(self: SqlType) bool {
         return switch (self) {
-            .int8, .int16, .int32, .int64,
-            .uint8, .uint16, .uint32, .uint64 => true,
+            .int8, .int16, .int32, .int64, .uint8, .uint16, .uint32, .uint64 => true,
             else => false,
         };
     }
 
     pub fn eql(self: SqlType, other: SqlType) bool {
         return switch (self) {
-            .bool         => other == .bool,
-            .int8         => other == .int8,
-            .int16        => other == .int16,
-            .int32        => other == .int32,
-            .int64        => other == .int64,
-            .uint8        => other == .uint8,
-            .uint16       => other == .uint16,
-            .uint32       => other == .uint32,
-            .uint64       => other == .uint64,
-            .float32      => other == .float32,
-            .float64      => other == .float64,
-            .string       => other == .string,
-            .bytes        => other == .bytes,
-            .uuid         => other == .uuid,
-            .timestamp    => other == .timestamp,
+            .bool => other == .bool,
+            .int8 => other == .int8,
+            .int16 => other == .int16,
+            .int32 => other == .int32,
+            .int64 => other == .int64,
+            .uint8 => other == .uint8,
+            .uint16 => other == .uint16,
+            .uint32 => other == .uint32,
+            .uint64 => other == .uint64,
+            .float32 => other == .float32,
+            .float64 => other == .float64,
+            .string => other == .string,
+            .bytes => other == .bytes,
+            .uuid => other == .uuid,
+            .timestamp => other == .timestamp,
             .interval_months => other == .interval_months,
             .interval_micros => other == .interval_micros,
-            .json         => other == .json,
-            .null_type    => other == .null_type,
-            .decimal      => |a| switch (other) {
+            .json => other == .json,
+            .null_type => other == .null_type,
+            .decimal => |a| switch (other) {
                 .decimal => |b| a.precision == b.precision and a.scale == b.scale,
                 else => false,
             },
-            .vector       => |a| switch (other) {
+            .vector => |a| switch (other) {
                 .vector => |b| a == b,
                 else => false,
             },
-            .array        => |a| switch (other) {
+            .array => |a| switch (other) {
                 .array => |b| a.eql(b.*),
                 else => false,
             },
-            .struct_type  => false,
+            .struct_type => false,
         };
     }
 };
 
 pub const StructField = struct {
     name: []const u8,
-    typ:  SqlType,
+    typ: SqlType,
 };
 
 // ─── Expressions ─────────────────────────────────────────────────────────────
 
 pub const BinOp = enum {
-    add, sub, mul, div, mod,
-    eq, neq, lt, gt, lte, gte,
-    and_op, or_op,
-    concat,    // ||
-    contains,  // @>
+    add,
+    sub,
+    mul,
+    div,
+    mod,
+    eq,
+    neq,
+    lt,
+    gt,
+    lte,
+    gte,
+    and_op,
+    or_op,
+    concat, // ||
+    contains, // @>
     contained, // <@
-    arrow,     // ->  (JSON field access, returns JSON)
-    darrow,    // ->> (JSON field access, returns text)
+    arrow, // ->  (JSON field access, returns JSON)
+    darrow, // ->> (JSON field access, returns text)
 };
 
 pub const UnaryOp = enum { neg, not };
@@ -119,62 +126,62 @@ pub const WindowFrame = struct {
         unbounded_following,
     };
     pub const Mode = enum { rows, range };
-    mode:  Mode,
+    mode: Mode,
     start: Bound,
-    end:   Bound,
+    end: Bound,
 };
 
 pub const WindowSpec = struct {
     partition_by: []const *Expr,
-    order_by:     []const OrderByItem,
-    frame:        ?WindowFrame,
+    order_by: []const OrderByItem,
+    frame: ?WindowFrame,
 };
 
 pub const OrderByItem = struct {
-    expr:       *Expr,
-    asc:        bool,
+    expr: *Expr,
+    asc: bool,
     nulls_first: ?bool,
 };
 
 pub const CaseWhen = struct {
-    cond:   *Expr,
+    cond: *Expr,
     result: *Expr,
 };
 
 pub const Expr = union(enum) {
-    lit_int:    i128,
-    lit_float:  f64,
+    lit_int: i128,
+    lit_float: f64,
     lit_string: []const u8,
-    lit_bytes:  []const u8,
-    lit_bool:   bool,
+    lit_bytes: []const u8,
+    lit_bool: bool,
     lit_null,
 
     column_ref: ColumnRef,
-    param:      u32,          // $1 → 0, $2 → 1 (0-based index)
-    nondet:     NondetKind,   // NOW(), RANDOM(), UUID() — resolved by gateway
+    param: u32, // $1 → 0, $2 → 1 (0-based index)
+    nondet: NondetKind, // NOW(), RANDOM(), UUID() — resolved by gateway
 
     cast: struct { expr: *Expr, to: SqlType },
 
     binary: struct { op: BinOp, left: *Expr, right: *Expr },
-    unary:  struct { op: UnaryOp, expr: *Expr },
+    unary: struct { op: UnaryOp, expr: *Expr },
 
-    is_null:         *Expr,
-    is_not_null:     *Expr,
-    is_distinct:     struct { left: *Expr, right: *Expr },
+    is_null: *Expr,
+    is_not_null: *Expr,
+    is_distinct: struct { left: *Expr, right: *Expr },
     is_not_distinct: struct { left: *Expr, right: *Expr },
 
     between: struct { expr: *Expr, low: *Expr, high: *Expr },
-    like:    struct { expr: *Expr, pattern: *Expr },
+    like: struct { expr: *Expr, pattern: *Expr },
 
-    in_list:    struct { expr: *Expr, values: []*Expr },
+    in_list: struct { expr: *Expr, values: []*Expr },
     not_in_list: struct { expr: *Expr, values: []*Expr },
-    in_subquery:     struct { expr: *Expr, query: *SelectStmt },
+    in_subquery: struct { expr: *Expr, query: *SelectStmt },
     not_in_subquery: struct { expr: *Expr, query: *SelectStmt },
-    exists:     *SelectStmt,
+    exists: *SelectStmt,
     not_exists: *SelectStmt,
 
     case_searched: struct { whens: []CaseWhen, else_expr: ?*Expr },
-    case_simple:   struct { operand: *Expr, whens: []CaseWhen, else_expr: ?*Expr },
+    case_simple: struct { operand: *Expr, whens: []CaseWhen, else_expr: ?*Expr },
 
     fn_call: FnCall,
     window_fn: struct { call: FnCall, window: WindowSpec },
@@ -191,63 +198,63 @@ pub const ColumnRef = struct {
 };
 
 pub const FnCall = struct {
-    name:     []const u8,
-    args:     []*Expr,
+    name: []const u8,
+    args: []*Expr,
     distinct: bool,
-    star:     bool, // COUNT(*)
+    star: bool, // COUNT(*)
 };
 
 // ─── SELECT ──────────────────────────────────────────────────────────────────
 
 pub const SelectItem = union(enum) {
-    star,                             // * — rejected in registered queries
+    star, // * — rejected in registered queries
     expr: struct { expr: *Expr, alias: ?[]const u8 },
 };
 
 pub const JoinKind = enum { inner, left, right, full, cross };
 
 pub const JoinCondition = union(enum) {
-    on:    *Expr,
+    on: *Expr,
     using: []const []const u8,
 };
 
 pub const Join = struct {
-    kind:      JoinKind,
-    table:     TableRef,
+    kind: JoinKind,
+    table: TableRef,
     condition: ?JoinCondition,
 };
 
 pub const TableRef = union(enum) {
-    named:    struct { name: []const u8, alias: ?[]const u8 },
+    named: struct { name: []const u8, alias: ?[]const u8 },
     subquery: struct { query: *SelectStmt, alias: []const u8 },
-    cte_ref:  struct { name: []const u8, alias: ?[]const u8 },
+    cte_ref: struct { name: []const u8, alias: ?[]const u8 },
 };
 
 pub const SelectStmt = struct {
-    with:      []const Cte,
-    distinct:  bool,
-    items:     []const SelectItem,
-    from:      ?TableRef,
-    joins:     []const Join,
-    where:     ?*Expr,
-    group_by:  []const *Expr,
-    having:    ?*Expr,
-    windows:   []const NamedWindow,
-    order_by:  []const OrderByItem,
-    limit:     ?*Expr,
-    offset:    ?*Expr,
+    with: []const Cte,
+    distinct: bool,
+    items: []const SelectItem,
+    from: ?TableRef,
+    joins: []const Join,
+    where: ?*Expr,
+    group_by: []const *Expr,
+    having: ?*Expr,
+    windows: []const NamedWindow,
+    order_by: []const OrderByItem,
+    limit: ?*Expr,
+    offset: ?*Expr,
 };
 
 pub const NamedWindow = struct {
-    name:   []const u8,
-    spec:   WindowSpec,
+    name: []const u8,
+    spec: WindowSpec,
 };
 
 pub const Cte = struct {
-    name:      []const u8,
+    name: []const u8,
     recursive: bool,
-    columns:   ?[]const []const u8,
-    query:     *SelectStmt,
+    columns: ?[]const []const u8,
+    query: *SelectStmt,
 };
 
 // ─── DML ─────────────────────────────────────────────────────────────────────
@@ -256,58 +263,58 @@ pub const OnConflict = union(enum) {
     do_nothing,
     do_update: struct {
         target: []const []const u8, // conflict columns
-        sets:   []const Assignment,
-        where:  ?*Expr,
+        sets: []const Assignment,
+        where: ?*Expr,
     },
 };
 
 pub const InsertStmt = struct {
-    with:        []const Cte,
-    table:       []const u8,
-    columns:     []const []const u8,
-    source:      InsertSource,
+    with: []const Cte,
+    table: []const u8,
+    columns: []const []const u8,
+    source: InsertSource,
     on_conflict: ?OnConflict,
-    returning:   []const SelectItem,
+    returning: []const SelectItem,
 };
 
 pub const InsertSource = union(enum) {
-    values:  []const []*Expr,   // VALUES (a, b), (c, d)
-    query:   *SelectStmt,
+    values: []const []*Expr, // VALUES (a, b), (c, d)
+    query: *SelectStmt,
 };
 
 pub const Assignment = struct {
     column: []const u8,
-    value:  *Expr,
+    value: *Expr,
 };
 
 pub const UpdateStmt = struct {
-    with:      []const Cte,
-    table:     []const u8,
-    alias:     ?[]const u8,
-    sets:      []const Assignment,
-    from:      ?TableRef,
-    where:     ?*Expr,
+    with: []const Cte,
+    table: []const u8,
+    alias: ?[]const u8,
+    sets: []const Assignment,
+    from: ?TableRef,
+    where: ?*Expr,
     returning: []const SelectItem,
 };
 
 pub const DeleteStmt = struct {
-    with:      []const Cte,
-    table:     []const u8,
-    alias:     ?[]const u8,
-    using:     []const TableRef,
-    where:     ?*Expr,
+    with: []const Cte,
+    table: []const u8,
+    alias: ?[]const u8,
+    using: []const TableRef,
+    where: ?*Expr,
     returning: []const SelectItem,
 };
 
 pub const MergeWhen = union(enum) {
     matched: struct {
-        cond:   ?*Expr,
+        cond: ?*Expr,
         action: MergeAction,
     },
     not_matched: struct {
-        cond:    ?*Expr,
+        cond: ?*Expr,
         columns: []const []const u8,
-        values:  []*Expr,
+        values: []*Expr,
     },
 };
 
@@ -318,11 +325,11 @@ pub const MergeAction = union(enum) {
 };
 
 pub const MergeStmt = struct {
-    with:   []const Cte,
+    with: []const Cte,
     target: struct { name: []const u8, alias: ?[]const u8 },
     source: struct { ref: TableRef },
-    on:     *Expr,
-    whens:  []const MergeWhen,
+    on: *Expr,
+    whens: []const MergeWhen,
 };
 
 // ─── DDL ─────────────────────────────────────────────────────────────────────
@@ -330,10 +337,10 @@ pub const MergeStmt = struct {
 pub const NullConstraint = enum { not_null, nullable };
 
 pub const ColumnDef = struct {
-    name:     []const u8,
-    typ:      SqlType,
+    name: []const u8,
+    typ: SqlType,
     nullable: NullConstraint,
-    span:     Span,
+    span: Span,
 };
 
 pub const PrimaryKey = struct {
@@ -341,8 +348,8 @@ pub const PrimaryKey = struct {
 };
 
 pub const CreateTableStmt = struct {
-    name:        []const u8,
-    columns:     []const ColumnDef,
+    name: []const u8,
+    columns: []const ColumnDef,
     primary_key: PrimaryKey,
 };
 
@@ -354,20 +361,20 @@ pub const IndexKind = union(enum) {
 };
 
 pub const CreateIndexStmt = struct {
-    name:    []const u8,
-    unique:  bool,
-    kind:    IndexKind,
-    table:   []const u8,
+    name: []const u8,
+    unique: bool,
+    kind: IndexKind,
+    table: []const u8,
     columns: []const []const u8,
 };
 
 pub const AlterAction = union(enum) {
-    add_column:  ColumnDef,
+    add_column: ColumnDef,
     drop_column: []const u8,
 };
 
 pub const AlterTableStmt = struct {
-    table:  []const u8,
+    table: []const u8,
     action: AlterAction,
 };
 
@@ -375,7 +382,7 @@ pub const AlterTableStmt = struct {
 
 pub const TxnParam = struct {
     name: []const u8,
-    typ:  SqlType,
+    typ: SqlType,
 };
 
 pub const TxnStmt = union(enum) {
@@ -383,27 +390,27 @@ pub const TxnStmt = union(enum) {
     insert: InsertStmt,
     update: UpdateStmt,
     delete: DeleteStmt,
-    merge:  MergeStmt,
+    merge: MergeStmt,
     assert: *Expr,
 };
 
 pub const TransactionBlock = struct {
     params: []const TxnParam,
-    stmts:  []const TxnStmt,
+    stmts: []const TxnStmt,
 };
 
 // ─── Top-level ───────────────────────────────────────────────────────────────
 
 pub const Stmt = union(enum) {
-    select:       SelectStmt,
-    insert:       InsertStmt,
-    update:       UpdateStmt,
-    delete:       DeleteStmt,
-    merge:        MergeStmt,
+    select: SelectStmt,
+    insert: InsertStmt,
+    update: UpdateStmt,
+    delete: DeleteStmt,
+    merge: MergeStmt,
     create_table: CreateTableStmt,
     create_index: CreateIndexStmt,
-    alter_table:  AlterTableStmt,
-    transaction:  TransactionBlock,
+    alter_table: AlterTableStmt,
+    transaction: TransactionBlock,
 };
 
 /// Top-level parse result: one or more statements.

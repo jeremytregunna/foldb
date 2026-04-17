@@ -2,13 +2,13 @@
 /// Uses synthetic ExecutionPlans (no real data needed for expression-only tests).
 const std = @import("std");
 const sql = @import("sql.zig");
-const plan_mod     = sql.plan;
-const schema_mod   = sql.schema;
+const plan_mod = sql.plan;
+const schema_mod = sql.schema;
 const registry_mod = sql.registry;
-const eb           = sql.executor_bridge;
+const eb = sql.executor_bridge;
 
-const ColumnValue   = eb.ColumnValue;
-const Storage       = eb.Storage;
+const ColumnValue = eb.ColumnValue;
+const Storage = eb.Storage;
 const ResolvedValue = eb.ResolvedValue;
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
@@ -66,7 +66,10 @@ fn evalExpr(exec: *eb.SqlExecutor, expr: *plan_mod.PlanExpr, alloc: std.mem.Allo
     const exprs = try alloc.dupe(*plan_mod.PlanExpr, &.{expr});
     const ep = try makeSelectPlan(alloc, exprs);
     var rows = try exec.querySelect(ep, &.{}, &.{}, 1, alloc);
-    defer { for (rows.items) |r| alloc.free(r); rows.deinit(alloc); }
+    defer {
+        for (rows.items) |r| alloc.free(r);
+        rows.deinit(alloc);
+    }
     if (rows.items.len == 0) return null;
     return rows.items[0][0];
 }
@@ -165,9 +168,9 @@ test "substr with start and length" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const str_arg   = try makeStrLit(a, "hello world");
+    const str_arg = try makeStrLit(a, "hello world");
     const start_arg = try makeIntLit(a, 1); // 1-based
-    const len_arg   = try makeIntLit(a, 5);
+    const len_arg = try makeIntLit(a, 5);
     const args = try a.dupe(*plan_mod.PlanExpr, &.{ str_arg, start_arg, len_arg });
     const fn_e = try makeFnCall(a, "substr", args);
 
@@ -191,7 +194,7 @@ test "substr from middle" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const str_arg   = try makeStrLit(a, "hello world");
+    const str_arg = try makeStrLit(a, "hello world");
     const start_arg = try makeIntLit(a, 7); // 1-based → position 6
     const args = try a.dupe(*plan_mod.PlanExpr, &.{ str_arg, start_arg });
     const fn_e = try makeFnCall(a, "substr", args);
@@ -218,7 +221,7 @@ test "replace substitutes all occurrences" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const s  = try makeStrLit(a, "foo bar foo");
+    const s = try makeStrLit(a, "foo bar foo");
     const fr = try makeStrLit(a, "foo");
     const to = try makeStrLit(a, "baz");
     const args = try a.dupe(*plan_mod.PlanExpr, &.{ s, fr, to });
@@ -353,7 +356,7 @@ test "coalesce returns first non-null" {
     const a = arena.allocator();
 
     const null_e = try makeNullLit(a);
-    const val_e  = try makeIntLit(a, 42);
+    const val_e = try makeIntLit(a, 42);
     const args = try a.dupe(*plan_mod.PlanExpr, &.{ null_e, val_e });
     const fn_e = try makeFnCall(a, "coalesce", args);
 
@@ -430,9 +433,9 @@ test "binary add two integers" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const left  = try makeIntLit(a, 10);
+    const left = try makeIntLit(a, 10);
     const right = try makeIntLit(a, 32);
-    const add   = try a.create(plan_mod.PlanExpr);
+    const add = try a.create(plan_mod.PlanExpr);
     add.* = .{ .binary = .{ .op = .add, .left = left, .right = right } };
 
     const result = try evalExpr(&exec, add, a);
@@ -458,7 +461,7 @@ test "CASE WHEN false THEN x ELSE y returns y" {
     const cond = try a.create(plan_mod.PlanExpr);
     cond.* = .{ .bool_literal = false };
     const yes = try makeStrLit(a, "yes");
-    const no  = try makeStrLit(a, "no");
+    const no = try makeStrLit(a, "no");
     const whens = try a.dupe(plan_mod.PlanCaseWhen, &.{.{ .cond = cond, .result = yes }});
     const case_pe = try a.create(plan_mod.PlanExpr);
     case_pe.* = .{ .case_searched = .{ .whens = whens, .else_expr = no } };
@@ -489,17 +492,17 @@ test "hash_agg COUNT star on empty returns 0" {
     empty_node.* = .empty;
 
     const agg_exprs = try a.dupe(plan_mod.AggExpr, &.{.{
-        .fn_name  = "count",
-        .arg      = null,
+        .fn_name = "count",
+        .arg = null,
         .distinct = false,
-        .alias    = "cnt",
+        .alias = "cnt",
     }});
     const agg_node = try a.create(plan_mod.PlanNode);
     agg_node.* = .{ .hash_agg = .{
-        .input      = empty_node,
+        .input = empty_node,
         .group_keys = &.{},
-        .agg_exprs  = agg_exprs,
-    }};
+        .agg_exprs = agg_exprs,
+    } };
 
     // Project column 0 (the count result)
     const col_pe = try a.create(plan_mod.PlanExpr);
@@ -512,7 +515,10 @@ test "hash_agg COUNT star on empty returns 0" {
     const ep = plan_mod.ExecutionPlan{ .stmts = stmt, .param_types = &.{}, .nondet_count = 0 };
 
     var rows = try exec.querySelect(ep, &.{}, &.{}, 1, a);
-    defer { for (rows.items) |r| a.free(r); rows.deinit(a); }
+    defer {
+        for (rows.items) |r| a.free(r);
+        rows.deinit(a);
+    }
 
     try std.testing.expectEqual(@as(usize, 1), rows.items.len);
     try std.testing.expectEqual(@as(i64, 0), rows.items[0][0].?.int64);
@@ -563,17 +569,20 @@ test "hash_join inner join matching rows" {
 
     const join_node = try a.create(plan_mod.PlanNode);
     join_node.* = .{ .hash_join = .{
-        .left      = left_proj,
-        .right     = right_proj,
-        .kind      = .inner,
+        .left = left_proj,
+        .right = right_proj,
+        .kind = .inner,
         .condition = cond,
-    }};
+    } };
 
     const stmt = try a.dupe(plan_mod.StmtPlan, &.{.{ .select = join_node }});
     const ep = plan_mod.ExecutionPlan{ .stmts = stmt, .param_types = &.{}, .nondet_count = 0 };
 
     var rows = try exec.querySelect(ep, &.{}, &.{}, 1, a);
-    defer { for (rows.items) |r| a.free(r); rows.deinit(a); }
+    defer {
+        for (rows.items) |r| a.free(r);
+        rows.deinit(a);
+    }
 
     // One matching row: combined = [42, 42]
     try std.testing.expectEqual(@as(usize, 1), rows.items.len);
@@ -613,8 +622,10 @@ test "hash_join inner join no match yields empty result" {
     const right_proj = try a.create(plan_mod.PlanNode);
     right_proj.* = .{ .project = .{ .input = right_node, .exprs = right_items } };
 
-    const lc = try a.create(plan_mod.PlanExpr); lc.* = .{ .column = 0 };
-    const rc = try a.create(plan_mod.PlanExpr); rc.* = .{ .column = 1 };
+    const lc = try a.create(plan_mod.PlanExpr);
+    lc.* = .{ .column = 0 };
+    const rc = try a.create(plan_mod.PlanExpr);
+    rc.* = .{ .column = 1 };
     const cond = try a.create(plan_mod.PlanExpr);
     cond.* = .{ .binary = .{ .op = .eq, .left = lc, .right = rc } };
 
@@ -625,7 +636,10 @@ test "hash_join inner join no match yields empty result" {
     const ep = plan_mod.ExecutionPlan{ .stmts = stmt, .param_types = &.{}, .nondet_count = 0 };
 
     var rows = try exec.querySelect(ep, &.{}, &.{}, 1, a);
-    defer { for (rows.items) |r| a.free(r); rows.deinit(a); }
+    defer {
+        for (rows.items) |r| a.free(r);
+        rows.deinit(a);
+    }
 
     try std.testing.expectEqual(@as(usize, 0), rows.items.len);
 }

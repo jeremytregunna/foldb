@@ -12,6 +12,6 @@ pub fn exampleFunction(allocator: std.mem.Allocator) !void {
 test "example function works" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    
+
     try exampleFunction(arena.allocator());
 }
