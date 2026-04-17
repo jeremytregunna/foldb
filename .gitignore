@@ -1,0 +1,36 @@
+# Build directories
+zig-out/
+zig-cache/
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+
+# Generated files
+build.zig.zon
+
+# Temporary files
+tmp/
+temp/
+
+# Coverage reports
+*.gcno
+*.gcda
+*.lcov
+coverage/
+
+# Test artifacts
+test_output/
