@@ -1,36 +1,54 @@
-# Build directories
-zig-out/
+# Zig build directories
+.zig-cache/
 zig-cache/
+zig-out/
+build/
 
-# Build artifacts
-*.o
-*.a
-*.so
-*.dylib
-
-# IDE and editor files
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Logs
-*.log
-
-# Generated files
+# Zig build.zon file (auto-generated)
 build.zig.zon
 
-# Temporary files
-tmp/
-temp/
+# Zig object files
+*.o
+*.obj
 
-# Coverage reports
+# Zig static libraries
+*.a
+
+# Zig shared libraries
+*.so
+*.dylib
+*.dll
+
+# Zig test artifacts
+*.test
+
+# Zig coverage reports
 *.gcno
 *.gcda
 *.lcov
 coverage/
 
-# Test artifacts
-test_output/
+.pi/
+
+# Neovim
+*.swp
+*.swo
+*.swn
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+.nfs*
