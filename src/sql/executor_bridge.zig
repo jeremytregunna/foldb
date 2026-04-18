@@ -238,6 +238,7 @@ pub const SqlExecutor = struct {
             .update => |upd| try self.executeUpdate(upd, ctx, mutations),
             .delete => |del| try self.executeDelete(del, ctx, mutations),
             .assert => |a| try self.executeAssert(a, ctx),
+            .merge => |m| try self.executeMerge(m, ctx, mutations),
         }
     }
 
@@ -375,6 +376,41 @@ pub const SqlExecutor = struct {
                 const r = try ctx.alloc.alloc(?ColumnValue, 0);
                 try out.append(ctx.alloc, r);
             },
+
+            .window => |w| {
+                var inner: std.ArrayList([]const ?ColumnValue) = .empty;
+                defer {
+                    for (inner.items) |r| ctx.alloc.free(r);
+                    inner.deinit(ctx.alloc);
+                }
+                try self.executeScan(w.input, ctx, &inner);
+
+                if (inner.items.len == 0) return;
+
+                // Allocate result matrix: [row_idx][fn_idx] = ColumnValue
+                const win_results = try ctx.alloc.alloc([]?ColumnValue, inner.items.len);
+                defer {
+                    for (win_results) |r| ctx.alloc.free(r);
+                    ctx.alloc.free(win_results);
+                }
+                for (win_results) |*r| {
+                    r.* = try ctx.alloc.alloc(?ColumnValue, w.fns.len);
+                    for (r.*) |*v| v.* = null;
+                }
+
+                for (w.fns, 0..) |wf, fi| {
+                    try self.computeWindowFnForAll(wf, inner.items, win_results, fi, ctx);
+                }
+
+                for (inner.items, 0..) |row, ri| {
+                    const aug = try ctx.alloc.alloc(?ColumnValue, row.len + w.fns.len);
+                    @memcpy(aug[0..row.len], row);
+                    @memcpy(aug[row.len..], win_results[ri]);
+                    try out.append(ctx.alloc, aug);
+                }
+            },
+
+            .merge => {}, // not a scan context
 
             .hash_join => |j| {
                 var left_rows: std.ArrayList([]const ?ColumnValue) = .empty;
@@ -676,6 +712,296 @@ pub const SqlExecutor = struct {
         _ = self;
         const v = try evalExpr(a.predicate, ctx);
         if (!(v.toBool() orelse false)) return error.AssertionFailed;
+    }
+
+    fn computeWindowFnForAll(
+        self: *SqlExecutor,
+        wf: plan_mod.WindowFnSpec,
+        rows: []const []const ?ColumnValue,
+        results: [][]?ColumnValue,
+        fn_idx: usize,
+        ctx: EvalCtx,
+    ) SqlExecError!void {
+        _ = self;
+
+        // Group rows into partitions by evaluating partition_by expressions
+        const PartKey = struct { vals: []?ColumnValue, indices: std.ArrayList(usize) };
+        var parts: std.ArrayList(PartKey) = .empty;
+        defer {
+            for (parts.items) |*p| {
+                ctx.alloc.free(p.vals);
+                p.indices.deinit(ctx.alloc);
+            }
+            parts.deinit(ctx.alloc);
+        }
+
+        for (rows, 0..) |row, ri| {
+            var row_ctx = ctx;
+            row_ctx.row = row;
+            const pk = try ctx.alloc.alloc(?ColumnValue, wf.partition_by.len);
+            for (wf.partition_by, 0..) |pb, i| {
+                const v = evalExpr(pb, row_ctx) catch .null_val;
+                pk[i] = planValueToColumnValue(v, ctx.alloc) catch null;
+            }
+
+            var found: ?*PartKey = null;
+            for (parts.items) |*p| {
+                if (aggKeyEquals(p.vals, pk)) {
+                    found = p;
+                    break;
+                }
+            }
+            if (found) |p| {
+                ctx.alloc.free(pk);
+                try p.indices.append(ctx.alloc, ri);
+            } else {
+                var idx_list: std.ArrayList(usize) = .empty;
+                try idx_list.append(ctx.alloc, ri);
+                try parts.append(ctx.alloc, .{ .vals = pk, .indices = idx_list });
+            }
+        }
+
+        // For each partition, sort by order_by, then assign window fn values
+        for (parts.items) |*p| {
+            const indices = p.indices.items;
+            var sorted = try ctx.alloc.dupe(usize, indices);
+            defer ctx.alloc.free(sorted);
+
+            // Stable insertion sort by order_by keys
+            for (1..sorted.len) |i| {
+                const key_idx = sorted[i];
+                var j: usize = i;
+                while (j > 0) {
+                    var ctx_a = ctx;
+                    var ctx_b = ctx;
+                    ctx_a.row = rows[sorted[j - 1]];
+                    ctx_b.row = rows[key_idx];
+                    const swap = blk: {
+                        for (wf.order_by) |sk| {
+                            const va = evalExpr(sk.expr, ctx_a) catch break :blk false;
+                            const vb = evalExpr(sk.expr, ctx_b) catch break :blk false;
+                            if (!va.eql(vb)) break :blk if (sk.asc) vb.lessThan(va) else va.lessThan(vb);
+                        }
+                        break :blk false;
+                    };
+                    if (!swap) break;
+                    sorted[j] = sorted[j - 1];
+                    j -= 1;
+                }
+                sorted[j] = key_idx;
+            }
+
+            if (std.ascii.eqlIgnoreCase(wf.fn_name, "row_number")) {
+                for (sorted, 0..) |ri, pos| {
+                    results[ri][fn_idx] = .{ .int64 = @intCast(pos + 1) };
+                }
+            } else if (std.ascii.eqlIgnoreCase(wf.fn_name, "rank")) {
+                var rank: i64 = 1;
+                var count: i64 = 0;
+                var prev_order_vals: ?[]plan_mod.Value = null;
+                defer if (prev_order_vals) |pv| ctx.alloc.free(pv);
+                for (sorted) |ri| {
+                    count += 1;
+                    var row_ctx = ctx;
+                    row_ctx.row = rows[ri];
+                    const cur = try ctx.alloc.alloc(plan_mod.Value, wf.order_by.len);
+                    defer ctx.alloc.free(cur);
+                    for (wf.order_by, 0..) |sk, i| {
+                        cur[i] = evalExpr(sk.expr, row_ctx) catch .null_val;
+                    }
+                    if (prev_order_vals) |pv| {
+                        var same = true;
+                        for (cur, pv) |cv, pval| {
+                            if (!cv.eql(pval)) { same = false; break; }
+                        }
+                        if (!same) {
+                            rank = count;
+                            ctx.alloc.free(pv);
+                            prev_order_vals = try ctx.alloc.dupe(plan_mod.Value, cur);
+                        }
+                    } else {
+                        prev_order_vals = try ctx.alloc.dupe(plan_mod.Value, cur);
+                    }
+                    results[ri][fn_idx] = .{ .int64 = rank };
+                }
+            } else if (std.ascii.eqlIgnoreCase(wf.fn_name, "dense_rank")) {
+                var rank: i64 = 0;
+                var prev_order_vals: ?[]plan_mod.Value = null;
+                defer if (prev_order_vals) |pv| ctx.alloc.free(pv);
+                for (sorted) |ri| {
+                    var row_ctx = ctx;
+                    row_ctx.row = rows[ri];
+                    const cur = try ctx.alloc.alloc(plan_mod.Value, wf.order_by.len);
+                    defer ctx.alloc.free(cur);
+                    for (wf.order_by, 0..) |sk, i| {
+                        cur[i] = evalExpr(sk.expr, row_ctx) catch .null_val;
+                    }
+                    if (prev_order_vals) |pv| {
+                        var same = true;
+                        for (cur, pv) |cv, pval| {
+                            if (!cv.eql(pval)) { same = false; break; }
+                        }
+                        if (!same) {
+                            rank += 1;
+                            ctx.alloc.free(pv);
+                            prev_order_vals = try ctx.alloc.dupe(plan_mod.Value, cur);
+                        }
+                    } else {
+                        rank = 1;
+                        prev_order_vals = try ctx.alloc.dupe(plan_mod.Value, cur);
+                    }
+                    results[ri][fn_idx] = .{ .int64 = rank };
+                }
+            }
+            // Unknown window functions leave result as null
+        }
+    }
+
+    fn executeMerge(
+        self: *SqlExecutor,
+        m: plan_mod.MergePlan,
+        ctx: EvalCtx,
+        mutations: *std.ArrayList(Mutation),
+    ) SqlExecError!void {
+        const tbl = self.schema.getTableById(m.target_id) orelse return error.TableNotFound;
+
+        // Collect source rows
+        var source_rows: std.ArrayList([]const ?ColumnValue) = .empty;
+        defer {
+            for (source_rows.items) |r| ctx.alloc.free(r);
+            source_rows.deinit(ctx.alloc);
+        }
+        try self.executeScan(m.source, ctx, &source_rows);
+
+        // Collect target rows with their storage keys
+        const TargetEntry = struct { key: []const u8, vals: []const ?ColumnValue };
+        var target_data: std.ArrayList(TargetEntry) = .empty;
+        defer {
+            for (target_data.items) |td| {
+                ctx.alloc.free(td.key);
+                ctx.alloc.free(td.vals);
+            }
+            target_data.deinit(ctx.alloc);
+        }
+        var target_iter = self.storage.scan(m.target_id, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch return error.TableNotFound;
+        defer target_iter.deinit();
+        while (target_iter.next() catch null) |row| {
+            const key_copy = try ctx.alloc.dupe(u8, row.key);
+            const vals = try self.rowToValues(row, &.{}, ctx.alloc);
+            try target_data.append(ctx.alloc, .{ .key = key_copy, .vals = vals });
+        }
+
+        // Track which target rows were matched (for WHEN NOT MATCHED logic)
+        const matched = try ctx.alloc.alloc(bool, target_data.items.len);
+        defer ctx.alloc.free(matched);
+        @memset(matched, false);
+
+        for (source_rows.items) |src_row| {
+            // Find a matching target row via ON condition
+            var found_target_idx: ?usize = null;
+            for (target_data.items, 0..) |td, ti| {
+                const combined = try ctx.alloc.alloc(?ColumnValue, td.vals.len + src_row.len);
+                @memcpy(combined[0..td.vals.len], td.vals);
+                @memcpy(combined[td.vals.len..], src_row);
+                var row_ctx = ctx;
+                row_ctx.row = combined;
+                const on_eval = evalExpr(m.on_condition, row_ctx) catch plan_mod.Value.null_val;
+                const on_result = on_eval.toBool() orelse false;
+                ctx.alloc.free(combined);
+                if (on_result) {
+                    found_target_idx = ti;
+                    matched[ti] = true;
+                    break;
+                }
+            }
+
+            // Apply first matching WHEN clause
+            when_loop: for (m.whens) |when| {
+                switch (when) {
+                    .matched => |mw| {
+                        const ti = found_target_idx orelse continue :when_loop;
+                        const td = target_data.items[ti];
+                        const combined = try ctx.alloc.alloc(?ColumnValue, td.vals.len + src_row.len);
+                        defer ctx.alloc.free(combined);
+                        @memcpy(combined[0..td.vals.len], td.vals);
+                        @memcpy(combined[td.vals.len..], src_row);
+                        var row_ctx = ctx;
+                        row_ctx.row = combined;
+
+                        if (mw.cond) |c| {
+                            const cv = evalExpr(c, row_ctx) catch plan_mod.Value.null_val;
+                            if (!(cv.toBool() orelse false)) continue :when_loop;
+                        }
+
+                        switch (mw.action) {
+                            .update => |asgns| {
+                                const new_vals = try ctx.alloc.alloc(ColumnValue, tbl.columns.len);
+                                errdefer ctx.alloc.free(new_vals);
+                                for (tbl.columns, 0..) |col, ci| {
+                                    new_vals[ci] = if (ci < td.vals.len)
+                                        if (td.vals[ci]) |cv| cv.dupe(ctx.alloc) catch defaultValue(col.typ)
+                                        else defaultValue(col.typ)
+                                    else
+                                        defaultValue(col.typ);
+                                }
+                                for (asgns) |asgn| {
+                                    const pv = try evalExpr(asgn.value, row_ctx);
+                                    const col = tbl.columnById(asgn.column_id) orelse return error.ColumnNotFound;
+                                    const ci: usize = @intCast(asgn.column_id);
+                                    if (ci < new_vals.len) {
+                                        new_vals[ci] = try planValueToTypedColumnValue(pv, col.typ, ctx.alloc);
+                                    }
+                                }
+                                const key = try ctx.alloc.dupe(u8, td.key);
+                                try mutations.append(ctx.alloc, .{
+                                    .kind = .update,
+                                    .table_id = m.target_id,
+                                    .key = key,
+                                    .values = new_vals,
+                                });
+                            },
+                            .delete => {
+                                const key = try ctx.alloc.dupe(u8, td.key);
+                                try mutations.append(ctx.alloc, .{
+                                    .kind = .delete,
+                                    .table_id = m.target_id,
+                                    .key = key,
+                                    .values = null,
+                                });
+                            },
+                            .do_nothing => {},
+                        }
+                        break :when_loop;
+                    },
+                    .not_matched => |nm| {
+                        if (found_target_idx != null) continue :when_loop;
+                        var row_ctx = ctx;
+                        row_ctx.row = src_row;
+
+                        if (nm.cond) |c| {
+                            const nv = evalExpr(c, row_ctx) catch plan_mod.Value.null_val;
+                            if (!(nv.toBool() orelse false)) continue :when_loop;
+                        }
+
+                        const values = try ctx.alloc.alloc(ColumnValue, nm.column_ids.len);
+                        errdefer ctx.alloc.free(values);
+                        for (nm.column_ids, 0..) |col_id, vi| {
+                            const pv = try evalExpr(nm.values[vi], row_ctx);
+                            const col = tbl.columnById(col_id) orelse return error.ColumnNotFound;
+                            values[vi] = try planValueToTypedColumnValue(pv, col.typ, ctx.alloc);
+                        }
+                        const key = try buildPrimaryKey(tbl, nm.column_ids, values, ctx.alloc);
+                        try mutations.append(ctx.alloc, .{
+                            .kind = .insert,
+                            .table_id = m.target_id,
+                            .key = key,
+                            .values = values,
+                        });
+                        break :when_loop;
+                    },
+                }
+            }
+        }
     }
 
     fn rowToValues(

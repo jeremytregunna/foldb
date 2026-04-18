@@ -208,6 +208,50 @@ pub const AssertPlan = struct {
     message: []const u8,
 };
 
+pub const WindowFnSpec = struct {
+    fn_name: []const u8,
+    args: []const *PlanExpr,
+    partition_by: []const *PlanExpr,
+    order_by: []const SortKey,
+    result_col: u32,
+};
+
+pub const WindowNode = struct {
+    input: *PlanNode,
+    fns: []const WindowFnSpec,
+    input_width: u32,
+};
+
+pub const MergeActionPlan = union(enum) {
+    update: []const UpdateAssignment,
+    delete,
+    do_nothing,
+};
+
+pub const MergeWhenMatchedPlan = struct {
+    cond: ?*PlanExpr,
+    action: MergeActionPlan,
+};
+
+pub const MergeWhenNotMatchedPlan = struct {
+    cond: ?*PlanExpr,
+    column_ids: []const schema_mod.ColumnId,
+    values: []const *PlanExpr,
+};
+
+pub const MergeWhenPlan = union(enum) {
+    matched: MergeWhenMatchedPlan,
+    not_matched: MergeWhenNotMatchedPlan,
+};
+
+pub const MergePlan = struct {
+    target_id: schema_mod.TableId,
+    source: *PlanNode,
+    on_condition: *PlanExpr,
+    target_width: u32,
+    whens: []const MergeWhenPlan,
+};
+
 pub const PlanNode = union(enum) {
     scan: ScanNode,
     pk_lookup: PkLookupNode,
@@ -217,11 +261,13 @@ pub const PlanNode = union(enum) {
     limit: LimitNode,
     hash_agg: HashAggNode,
     hash_join: HashJoinNode,
+    window: WindowNode,
     // DML nodes
     insert: InsertPlan,
     update: UpdatePlan,
     delete: DeletePlan,
     assert: AssertPlan,
+    merge: MergePlan,
     // Empty result (zero rows)
     empty,
     // Single-row source for FROM-less SELECT (produces exactly one empty row)
@@ -277,7 +323,7 @@ pub const ExecutionPlan = struct {
     nondet_count: u32,
 };
 
-pub const StmtKind = enum { select, insert, update, delete, assert };
+pub const StmtKind = enum { select, insert, update, delete, assert, merge };
 
 pub const StmtPlan = union(enum) {
     select: *PlanNode,
@@ -285,6 +331,15 @@ pub const StmtPlan = union(enum) {
     update: UpdatePlan,
     delete: DeletePlan,
     assert: AssertPlan,
+    merge: MergePlan,
+};
+
+// ─── CTE tracking ────────────────────────────────────────────────────────────
+
+const CteEntry = struct {
+    name: []const u8,
+    node: *PlanNode,
+    items: []const ast.SelectItem, // output column info for scope setup
 };
 
 // ─── Planner ─────────────────────────────────────────────────────────────────
@@ -295,6 +350,8 @@ pub const Planner = struct {
     nondet_idx: u32 = 0,
     scope: std.ArrayList(PlanScopeEntry) = .empty,
     post_agg_cols: std.ArrayList(PostAggCol) = .empty,
+    cte_stack: std.ArrayList(CteEntry) = .empty,
+    window_fn_cols: std.ArrayList(PostAggCol) = .empty,
 
     pub fn init(arena: std.mem.Allocator, schema: *const schema_mod.SchemaRegistry) Planner {
         return .{ .schema = schema, .arena = arena };
@@ -318,6 +375,24 @@ pub const Planner = struct {
         if (self.post_agg_cols.items.len == 0) return null;
         for (self.post_agg_cols.items) |e| {
             if (std.ascii.eqlIgnoreCase(e.fn_name, name)) return e.position;
+        }
+        return null;
+    }
+
+    fn resolveWindowFn(self: *const Planner, name: []const u8) ?u32 {
+        for (self.window_fn_cols.items) |e| {
+            if (std.ascii.eqlIgnoreCase(e.fn_name, name)) return e.position;
+        }
+        return null;
+    }
+
+    fn resolveCte(self: *const Planner, name: []const u8) ?CteEntry {
+        var i = self.cte_stack.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (std.ascii.eqlIgnoreCase(self.cte_stack.items[i].name, name)) {
+                return self.cte_stack.items[i];
+            }
         }
         return null;
     }
@@ -356,7 +431,7 @@ pub const Planner = struct {
             .insert => |q| .{ .insert = try self.planInsert(q) },
             .update => |q| .{ .update = try self.planUpdate(q) },
             .delete => |q| .{ .delete = try self.planDelete(q) },
-            .merge => error.UnsupportedOperation,
+            .merge => |q| .{ .merge = try self.planMerge(q) },
             .assert => |e| .{ .assert = .{ .predicate = try self.planExpr(e), .message = "assertion failed" } },
         };
     }
@@ -367,7 +442,7 @@ pub const Planner = struct {
             .insert => |q| .{ .insert = try self.planInsert(q) },
             .update => |q| .{ .update = try self.planUpdate(q) },
             .delete => |q| .{ .delete = try self.planDelete(q) },
-            .merge => error.UnsupportedOperation,
+            .merge => |q| .{ .merge = try self.planMerge(q) },
             .create_table, .create_index, .alter_table => error.UnsupportedOperation,
             .transaction => error.UnsupportedOperation,
         };
@@ -376,9 +451,23 @@ pub const Planner = struct {
     fn planSelect(self: *Planner, q: ast.SelectStmt) PlanError!*PlanNode {
         const scope_save = self.scope.items.len;
         const post_agg_save = self.post_agg_cols.items.len;
+        const cte_save = self.cte_stack.items.len;
+        const win_fn_save = self.window_fn_cols.items.len;
         defer {
             self.scope.shrinkRetainingCapacity(scope_save);
             self.post_agg_cols.shrinkRetainingCapacity(post_agg_save);
+            self.cte_stack.shrinkRetainingCapacity(cte_save);
+            self.window_fn_cols.shrinkRetainingCapacity(win_fn_save);
+        }
+
+        // Register CTEs so planTableRef can resolve cte_ref nodes
+        for (q.with) |cte| {
+            const cte_node = try self.planSelect(cte.query.*);
+            try self.cte_stack.append(self.arena, .{
+                .name = cte.name,
+                .node = cte_node,
+                .items = cte.query.items,
+            });
         }
 
         const tbl_ref = q.from orelse {
@@ -490,6 +579,55 @@ pub const Planner = struct {
             node = filter_node;
         }
 
+        // Window functions: pre-scan SELECT items, assign positions, build WindowNode
+        {
+            const win_base: u32 = @intCast(self.scope.items.len);
+            var win_specs: std.ArrayList(WindowFnSpec) = .empty;
+            for (q.items) |item| {
+                switch (item) {
+                    .star => {},
+                    .expr => |ei| {
+                        if (ei.expr.* == .window_fn) {
+                            const wf = ei.expr.window_fn;
+                            const pos = win_base + @as(u32, @intCast(win_specs.items.len));
+                            var args_pe: std.ArrayList(*PlanExpr) = .empty;
+                            for (wf.call.args) |a| try args_pe.append(self.arena, try self.planExpr(a));
+                            var pb_pe: std.ArrayList(*PlanExpr) = .empty;
+                            for (wf.window.partition_by) |pb| try pb_pe.append(self.arena, try self.planExpr(pb));
+                            var ob_keys: std.ArrayList(SortKey) = .empty;
+                            for (wf.window.order_by) |ob| {
+                                try ob_keys.append(self.arena, .{
+                                    .expr = try self.planExpr(ob.expr),
+                                    .asc = ob.asc,
+                                    .nulls_first = ob.nulls_first orelse !ob.asc,
+                                });
+                            }
+                            try win_specs.append(self.arena, .{
+                                .fn_name = wf.call.name,
+                                .args = try args_pe.toOwnedSlice(self.arena),
+                                .partition_by = try pb_pe.toOwnedSlice(self.arena),
+                                .order_by = try ob_keys.toOwnedSlice(self.arena),
+                                .result_col = pos,
+                            });
+                            try self.window_fn_cols.append(self.arena, .{
+                                .fn_name = wf.call.name,
+                                .position = pos,
+                            });
+                        }
+                    },
+                }
+            }
+            if (win_specs.items.len > 0) {
+                const win_node = try self.arena.create(PlanNode);
+                win_node.* = .{ .window = .{
+                    .input = node,
+                    .fns = try win_specs.toOwnedSlice(self.arena),
+                    .input_width = win_base,
+                } };
+                node = win_node;
+            }
+        }
+
         // ORDER BY (always with deterministic ordering)
         if (q.order_by.len > 0) {
             var keys: std.ArrayList(SortKey) = .empty;
@@ -561,7 +699,31 @@ pub const Planner = struct {
                 return node;
             },
             .subquery => |sq| return self.planSelect(sq.query.*),
-            .cte_ref => {
+            .cte_ref => |cref| {
+                if (self.resolveCte(cref.name)) |entry| {
+                    // Add output columns of the CTE to scope so column refs resolve
+                    const alias = cref.alias orelse cref.name;
+                    const start_pos: u32 = @intCast(self.scope.items.len);
+                    for (entry.items, 0..) |item, i| {
+                        switch (item) {
+                            .star => {},
+                            .expr => |ei| {
+                                const col_name = ei.alias orelse blk: {
+                                    if (ei.expr.* == .column_ref) break :blk ei.expr.column_ref.column;
+                                    break :blk "";
+                                };
+                                if (col_name.len > 0) {
+                                    try self.scope.append(self.arena, .{
+                                        .table_alias = alias,
+                                        .col_name = col_name,
+                                        .position = start_pos + @as(u32, @intCast(i)),
+                                    });
+                                }
+                            },
+                        }
+                    }
+                    return entry.node;
+                }
                 const node = try self.arena.create(PlanNode);
                 node.* = .empty;
                 return node;
@@ -655,6 +817,94 @@ pub const Planner = struct {
         return .{ .table_id = tbl.id, .filter = filter };
     }
 
+    fn planMerge(self: *Planner, stmt: ast.MergeStmt) PlanError!MergePlan {
+        const target_tbl = self.schema.getTable(stmt.target.name) orelse return error.TableNotFound;
+        const target_alias = stmt.target.alias orelse stmt.target.name;
+        const scope_save = self.scope.items.len;
+        defer self.scope.shrinkRetainingCapacity(scope_save);
+
+        // Target columns come first in the combined row
+        const target_width: u32 = @intCast(target_tbl.columns.len);
+        for (target_tbl.columns, 0..) |col, i| {
+            try self.scope.append(self.arena, .{
+                .table_alias = target_alias,
+                .col_name = col.name,
+                .position = @intCast(i),
+            });
+        }
+
+        // Plan source and add source columns to scope after target columns
+        const source_node = try self.planTableRef(stmt.source.ref);
+        switch (stmt.source.ref) {
+            .named => |n| {
+                const src_tbl = self.schema.getTable(n.name) orelse return error.TableNotFound;
+                const src_alias = n.alias orelse n.name;
+                for (src_tbl.columns, 0..) |col, i| {
+                    try self.scope.append(self.arena, .{
+                        .table_alias = src_alias,
+                        .col_name = col.name,
+                        .position = target_width + @as(u32, @intCast(i)),
+                    });
+                }
+            },
+            else => {},
+        }
+
+        const on_condition = try self.planExpr(stmt.on);
+
+        var whens: std.ArrayList(MergeWhenPlan) = .empty;
+        for (stmt.whens) |when| {
+            switch (when) {
+                .matched => |m| {
+                    const cond = if (m.cond) |c| try self.planExpr(c) else null;
+                    const action: MergeActionPlan = switch (m.action) {
+                        .update => |sets| blk: {
+                            var asgns: std.ArrayList(UpdateAssignment) = .empty;
+                            for (sets) |a| {
+                                const col = target_tbl.columnByName(a.column) orelse return error.ColumnNotFound;
+                                try asgns.append(self.arena, .{
+                                    .column_id = col.id,
+                                    .value = try self.planExpr(a.value),
+                                });
+                            }
+                            break :blk .{ .update = try asgns.toOwnedSlice(self.arena) };
+                        },
+                        .delete => .delete,
+                        .do_nothing => .do_nothing,
+                    };
+                    try whens.append(self.arena, .{
+                        .matched = .{ .cond = cond, .action = action },
+                    });
+                },
+                .not_matched => |nm| {
+                    const cond = if (nm.cond) |c| try self.planExpr(c) else null;
+                    var col_ids: std.ArrayList(schema_mod.ColumnId) = .empty;
+                    for (nm.columns) |col_name| {
+                        const col = target_tbl.columnByName(col_name) orelse return error.ColumnNotFound;
+                        try col_ids.append(self.arena, col.id);
+                    }
+                    var vals: std.ArrayList(*PlanExpr) = .empty;
+                    for (nm.values) |v| try vals.append(self.arena, try self.planExpr(v));
+                    try whens.append(self.arena, .{
+                        .not_matched = .{
+                            .cond = cond,
+                            .column_ids = try col_ids.toOwnedSlice(self.arena),
+                            .values = try vals.toOwnedSlice(self.arena),
+                        },
+                    });
+                },
+            }
+        }
+
+        return .{
+            .target_id = target_tbl.id,
+            .source = source_node,
+            .on_condition = on_condition,
+            .target_width = target_width,
+            .whens = try whens.toOwnedSlice(self.arena),
+        };
+    }
+
     pub fn planExpr(self: *Planner, e: *ast.Expr) PlanError!*PlanExpr {
         const pe = try self.arena.create(PlanExpr);
         switch (e.*) {
@@ -718,12 +968,18 @@ pub const Planner = struct {
                 } };
             },
             .window_fn => |w| {
-                var args: std.ArrayList(*PlanExpr) = .empty;
-                for (w.call.args) |a| try args.append(self.arena, try self.planExpr(a));
-                pe.* = .{ .fn_call = .{
-                    .name = w.call.name,
-                    .args = try args.toOwnedSlice(self.arena),
-                } };
+                // If a window node was inserted upstream, resolve to the computed column
+                if (self.resolveWindowFn(w.call.name)) |pos| {
+                    pe.* = .{ .column = pos };
+                } else {
+                    // No window node in context — fall back to plain fn_call (returns null)
+                    var args: std.ArrayList(*PlanExpr) = .empty;
+                    for (w.call.args) |a| try args.append(self.arena, try self.planExpr(a));
+                    pe.* = .{ .fn_call = .{
+                        .name = w.call.name,
+                        .args = try args.toOwnedSlice(self.arena),
+                    } };
+                }
             },
             .case_searched => |c| {
                 var whens: std.ArrayList(PlanCaseWhen) = .empty;
