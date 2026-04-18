@@ -43,6 +43,7 @@ pub const Log = struct {
     segment_max_entries: u32,
     sealed_segments: std.ArrayList(Segment),
     sealed: bool,
+    last_snapshot_seq: Seq = 0,
 
     /// Creates or opens a log at the given directory path.
     /// partition_id identifies which data/ordering partition this log belongs to.
@@ -261,10 +262,28 @@ pub const Log = struct {
         return max_seq;
     }
 
+    pub fn notifySnapshot(self: *Log, seq: Seq) void {
+        if (seq > self.last_snapshot_seq) self.last_snapshot_seq = seq;
+    }
+
+    pub fn appendMarker(self: *Log, kind: entry_mod.EntryKind, payload: []const u8) !Seq {
+        if (self.sealed) return LogError.LogSealed;
+        self.current_seq += 1;
+        const seq = self.current_seq;
+        const log_entry = entry_mod.LogEntry.create(seq, self.current_term, kind, payload);
+        try self.current_segment.append(log_entry);
+        if (self.current_segment.entry_count >= self.segment_max_entries) {
+            try self.rotate();
+        }
+        return seq;
+    }
+
     pub fn truncate_prefix(self: *Log, before_seq: Seq) !void {
+        const safe_seq = if (self.last_snapshot_seq == 0) before_seq
+                         else @min(before_seq, self.last_snapshot_seq);
         var removed: usize = 0;
         for (self.sealed_segments.items) |*seg| {
-            if (seg.last_seq < before_seq) {
+            if (seg.last_seq < safe_seq) {
                 const null_path = try toNullPath(seg.path);
                 defer std.heap.page_allocator.free(null_path);
                 _ = std.os.linux.unlink(null_path.ptr);

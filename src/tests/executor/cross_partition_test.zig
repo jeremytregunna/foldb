@@ -269,27 +269,42 @@ fn makeEntry(
 fn setupPartitionSet(alloc: std.mem.Allocator, dirs: []const []const u8) !struct {
     ps: PartitionSet,
     storages: []*Storage,
+    obj_store: *storage_mod.MemoryObjectStore,
 } {
+    const obj_store = try alloc.create(storage_mod.MemoryObjectStore);
+    obj_store.* = storage_mod.MemoryObjectStore.init(alloc);
+    errdefer {
+        obj_store.deinit();
+        alloc.destroy(obj_store);
+    }
+
     const storages = try alloc.alloc(*Storage, dirs.len);
     errdefer alloc.free(storages);
     for (dirs, 0..) |dir, i| {
         storages[i] = try alloc.create(Storage);
         storages[i].* = try Storage.init(dir, alloc);
+        const cache_dir = try std.fmt.allocPrint(alloc, "{s}/cache", .{dir});
+        defer alloc.free(cache_dir);
+        try storages[i].setObjectStore(obj_store.objectStore(), cache_dir);
         try storages[i].registerTable(accountsSchema());
     }
     var ps = try PartitionSet.init(storages, alloc);
     try ps.registerAll(HASH_SETUP, handlerSetup);
     try ps.registerCrossAll(HASH_TRANSFER, TRANSFER_HANDLER);
-    return .{ .ps = ps, .storages = storages };
+    return .{ .ps = ps, .storages = storages, .obj_store = obj_store };
 }
 
-fn teardownPartitionSet(ps: *PartitionSet, storages: []*Storage, alloc: std.mem.Allocator) void {
+fn teardownPartitionSet(ps: *PartitionSet, storages: []*Storage, obj_store: ?*storage_mod.MemoryObjectStore, alloc: std.mem.Allocator) void {
     ps.deinit();
     for (storages) |s| {
         s.deinit();
         alloc.destroy(s);
     }
     alloc.free(storages);
+    if (obj_store) |os| {
+        os.deinit();
+        alloc.destroy(os);
+    }
 }
 
 // --- Tests ---
@@ -302,7 +317,7 @@ test "cross-partition transfer: happy path" {
     defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
-    defer teardownPartitionSet(&setup.ps, setup.storages, alloc);
+    defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
 
     // seq=1: insert sender (partition 0, balance=100)
     const p0 = try encodeSetupParams(alloc, "alice", 100);
@@ -365,7 +380,7 @@ test "cross-partition transfer: insufficient funds aborts all partitions" {
     defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
-    defer teardownPartitionSet(&setup.ps, setup.storages, alloc);
+    defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
 
     // seq=1: insert sender with only 10
     const p0 = try encodeSetupParams(alloc, "alice", 10);
@@ -421,7 +436,7 @@ test "PartitionSet: single-partition fast path" {
     defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
-    defer teardownPartitionSet(&setup.ps, setup.storages, alloc);
+    defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
 
     // Single-partition entry targeting partition 1 only
     const params = try encodeSetupParams(alloc, "carol", 999);
@@ -456,7 +471,7 @@ test "PartitionSet: missing cross-partition handler returns abort" {
     defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
-    defer teardownPartitionSet(&setup.ps, setup.storages, alloc);
+    defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
 
     // Build a cross-partition entry using HASH_SETUP (a single-partition handler)
     const params = try encodeSetupParams(alloc, "x", 1);
@@ -493,10 +508,10 @@ test "cross-partition replay equivalence" {
     }
 
     var setupA = try setupPartitionSet(alloc, &dirsA);
-    defer teardownPartitionSet(&setupA.ps, setupA.storages, alloc);
+    defer teardownPartitionSet(&setupA.ps, setupA.storages, setupA.obj_store, alloc);
 
     var setupB = try setupPartitionSet(alloc, &dirsB);
-    defer teardownPartitionSet(&setupB.ps, setupB.storages, alloc);
+    defer teardownPartitionSet(&setupB.ps, setupB.storages, setupB.obj_store, alloc);
 
     // Build the entry sequence
     const p_alice = try encodeSetupParams(alloc, "alice", 200);
@@ -556,7 +571,7 @@ test "PartitionSet: crc mismatch returns bad_params abort" {
     defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
-    defer teardownPartitionSet(&setup.ps, setup.storages, alloc);
+    defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
 
     const params = try encodeSetupParams(alloc, "x", 1);
     defer alloc.free(params);
@@ -579,7 +594,7 @@ test "PartitionSet: invalid payload returns bad_params abort" {
     defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
-    defer teardownPartitionSet(&setup.ps, setup.storages, alloc);
+    defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
 
     const garbage = try alloc.dupe(u8, "not a valid txn intent payload");
     const entry = LogEntry.create(1, 1, .txn_intent, garbage);
@@ -600,7 +615,7 @@ test "PartitionSet: single-partition write_set_hint out of range" {
     defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
-    defer teardownPartitionSet(&setup.ps, setup.storages, alloc);
+    defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
 
     const params = try encodeSetupParams(alloc, "x", 1);
     defer alloc.free(params);
@@ -622,7 +637,7 @@ test "PartitionSet: cross-partition write_set_hint partition out of range" {
     defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
-    defer teardownPartitionSet(&setup.ps, setup.storages, alloc);
+    defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
 
     const tp = try encodeTransferParams(alloc, "alice", "bob", 10);
     defer alloc.free(tp);
@@ -653,7 +668,7 @@ test "PartitionSet: non-ConstraintViolation error in Phase C propagates" {
         try storages[i].registerTable(accountsSchema());
     }
     var ps = try PartitionSet.init(storages, alloc);
-    defer teardownPartitionSet(&ps, storages, alloc);
+    defer teardownPartitionSet(&ps, storages, null, alloc);
 
     const HASH_BOOM: [32]u8 = [_]u8{0x30} ++ [_]u8{0} ** 31;
     const boom_handler = CrossPartitionQueryHandler{
@@ -683,7 +698,7 @@ test "PartitionSet: non-txn entry advances committed_seq on all executors" {
     defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
-    defer teardownPartitionSet(&setup.ps, setup.storages, alloc);
+    defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
 
     const empty = try alloc.dupe(u8, "");
     const entry = LogEntry.create(7, 1, .noop, empty);
@@ -705,7 +720,7 @@ test "PartitionSet: write_set_hint empty defaults to partition 0" {
     defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
-    defer teardownPartitionSet(&setup.ps, setup.storages, alloc);
+    defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
 
     const params = try encodeSetupParams(alloc, "zero", 42);
     defer alloc.free(params);
@@ -805,7 +820,7 @@ test "PartitionSet: three-partition transfer" {
         try storages[i].registerTable(accountsSchema());
     }
     var ps = try PartitionSet.init(storages, alloc);
-    defer teardownPartitionSet(&ps, storages, alloc);
+    defer teardownPartitionSet(&ps, storages, null, alloc);
     try ps.registerAll(HASH_SETUP, handlerSetup);
     try ps.registerCrossAll(HASH_TRANSFER3, TRANSFER3_HANDLER);
 

@@ -5,6 +5,18 @@ const lsm_mod = @import("lsm.zig");
 const codec_mod = @import("codec.zig");
 const block_mod = @import("block.zig");
 const sstable_mod = @import("sstable.zig");
+const object_store_mod = @import("object_store.zig");
+const snapshot_mod = @import("snapshot.zig");
+
+pub const SnapshotLogWriter = snapshot_mod.SnapshotLogWriter;
+
+pub const SnapshotPolicy = struct {
+    interval: u64,
+    counter: u64 = 0,
+    store: object_store_mod.ObjectStore,
+    log_writer: ?snapshot_mod.SnapshotLogWriter = null,
+    partition_id: u32 = 0,
+};
 
 // Core types
 pub const TableId = types.TableId;
@@ -39,6 +51,18 @@ pub const SSTableMeta = sstable_mod.SSTableMeta;
 // LSM
 pub const LSM = lsm_mod.LSM;
 
+// Object store
+pub const ObjectStore = object_store_mod.ObjectStore;
+pub const MemoryObjectStore = object_store_mod.MemoryObjectStore;
+
+// Snapshot
+pub const SnapshotManifest = snapshot_mod.SnapshotManifest;
+pub const SnapshotMarkerPayload = snapshot_mod.SnapshotMarkerPayload;
+pub const takeSnapshot = snapshot_mod.takeSnapshot;
+pub const restoreFromSnapshot = snapshot_mod.restoreFromSnapshot;
+pub const manifestToBytes = snapshot_mod.manifestToBytes;
+pub const manifestFromBytes = snapshot_mod.manifestFromBytes;
+
 pub const ScanIterator = struct {
     rows: []Row,
     pos: usize,
@@ -61,6 +85,9 @@ pub const Storage = struct {
     tables: std.AutoHashMap(TableId, lsm_mod.LSM),
     dir: []const u8,
     alloc: std.mem.Allocator,
+    object_store: ?object_store_mod.ObjectStore = null,
+    cache_dir: ?[]const u8 = null,
+    snapshot_policy: ?SnapshotPolicy = null,
 
     pub fn init(dir: []const u8, alloc: std.mem.Allocator) !Storage {
         mkdirAll(dir);
@@ -75,13 +102,27 @@ pub const Storage = struct {
         var it = self.tables.valueIterator();
         while (it.next()) |lsm| lsm.deinit();
         self.tables.deinit();
+        if (self.cache_dir) |cd| self.alloc.free(cd);
+    }
+
+    pub fn setObjectStore(self: *Storage, store: object_store_mod.ObjectStore, cache_dir: []const u8) !void {
+        self.object_store = store;
+        if (self.cache_dir) |old| self.alloc.free(old);
+        self.cache_dir = try self.alloc.dupe(u8, cache_dir);
+    }
+
+    pub fn setSnapshotPolicy(self: *Storage, policy: SnapshotPolicy) void {
+        self.snapshot_policy = policy;
     }
 
     pub fn registerTable(self: *Storage, schema: TableSchema) !void {
         if (self.tables.contains(schema.table_id)) return;
         const table_dir = try std.fmt.allocPrint(self.alloc, "{s}/t{d}", .{ self.dir, schema.table_id });
         defer self.alloc.free(table_dir);
-        const lsm = try lsm_mod.LSM.init(schema, table_dir, self.alloc);
+        var lsm = try lsm_mod.LSM.init(schema, table_dir, self.alloc);
+        if (self.object_store) |store| {
+            lsm.withObjectStore(store, self.cache_dir orelse table_dir);
+        }
         try self.tables.put(schema.table_id, lsm);
     }
 
@@ -108,6 +149,25 @@ pub const Storage = struct {
         for (table_ids.items) |tid| {
             const lsm = self.tables.getPtr(tid) orelse return error.TableNotFound;
             try lsm.apply(mutations, at_seq);
+        }
+
+        if (self.snapshot_policy) |*policy| {
+            policy.counter += @intCast(mutations.len);
+            if (policy.counter >= policy.interval) {
+                policy.counter = 0;
+                var it = self.tables.valueIterator();
+                while (it.next()) |lsm| {
+                    var manifest = try snapshot_mod.takeSnapshot(
+                        lsm,
+                        at_seq,
+                        policy.partition_id,
+                        policy.store,
+                        policy.log_writer,
+                        self.alloc,
+                    );
+                    manifest.deinit();
+                }
+            }
         }
     }
 

@@ -225,11 +225,13 @@ pub const SSTableMeta = struct {
     key_max: []const u8,
     block_count: u32,
     file_size: u64,
+    remote_key: ?[]const u8 = null,
 
     pub fn deinit(self: *SSTableMeta, alloc: std.mem.Allocator) void {
         alloc.free(self.path);
         alloc.free(self.key_min);
         alloc.free(self.key_max);
+        if (self.remote_key) |rk| alloc.free(rk);
     }
 };
 

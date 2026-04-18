@@ -226,6 +226,26 @@ pub fn build(b: *std.Build) void {
     const storage_lsm_tests = b.addTest(.{ .root_module = storage_lsm_test_module });
     const run_storage_lsm_tests = b.addRunArtifact(storage_lsm_tests);
 
+    // Storage tiered tests
+    const storage_tiered_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/storage/tiered_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    storage_tiered_test_module.addImport("storage.zig", storage_module);
+    const storage_tiered_tests = b.addTest(.{ .root_module = storage_tiered_test_module });
+    const run_storage_tiered_tests = b.addRunArtifact(storage_tiered_tests);
+
+    // Storage snapshot tests
+    const storage_snapshot_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/storage/snapshot_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    storage_snapshot_test_module.addImport("storage.zig", storage_module);
+    const storage_snapshot_tests = b.addTest(.{ .root_module = storage_snapshot_test_module });
+    const run_storage_snapshot_tests = b.addRunArtifact(storage_snapshot_tests);
+
     // Storage replay (DST) tests
     const storage_replay_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/storage/replay_test.zig"),
@@ -244,6 +264,29 @@ pub fn build(b: *std.Build) void {
     });
     executor_module.addImport("storage.zig", storage_module);
     executor_module.addImport("log.zig", log_module);
+
+    // Recovery module
+    const recovery_module = b.createModule(.{
+        .root_source_file = b.path("src/storage/recovery.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    recovery_module.addImport("storage.zig", storage_module);
+    recovery_module.addImport("executor.zig", executor_module);
+    recovery_module.addImport("log.zig", log_module);
+
+    // Recovery tests
+    const recovery_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/storage/recovery_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    recovery_test_module.addImport("recovery.zig", recovery_module);
+    recovery_test_module.addImport("storage.zig", storage_module);
+    recovery_test_module.addImport("executor.zig", executor_module);
+    recovery_test_module.addImport("log.zig", log_module);
+    const recovery_tests = b.addTest(.{ .root_module = recovery_test_module });
+    const run_recovery_tests = b.addRunArtifact(recovery_tests);
 
     // PartitionSet module (separate from executor to avoid circular imports)
     const partition_set_module = b.createModule(.{
@@ -531,7 +574,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_storage_block_tests.step);
     test_step.dependOn(&run_storage_sstable_tests.step);
     test_step.dependOn(&run_storage_lsm_tests.step);
+    test_step.dependOn(&run_storage_tiered_tests.step);
+    test_step.dependOn(&run_storage_snapshot_tests.step);
     test_step.dependOn(&run_executor_tests.step);
+    test_step.dependOn(&run_recovery_tests.step);
     test_step.dependOn(&run_cross_partition_tests.step);
     test_step.dependOn(&run_sql_lexer_tests.step);
     test_step.dependOn(&run_sql_parser_tests.step);
