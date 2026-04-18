@@ -113,6 +113,16 @@ pub fn build(b: *std.Build) void {
 
     const run_log_durability_tests = b.addRunArtifact(log_durability_tests);
 
+    // Log replay (DST)
+    const log_replay_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/log/replay_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    log_replay_test_module.addImport("log.zig", log_module);
+    const log_replay_tests = b.addTest(.{ .root_module = log_replay_test_module });
+    const run_log_replay_tests = b.addRunArtifact(log_replay_tests);
+
     // Raft module
     const raft_module = b.createModule(.{
         .root_source_file = b.path("src/raft/raft.zig"),
@@ -391,6 +401,17 @@ pub fn build(b: *std.Build) void {
     const gateway_tests = b.addTest(.{ .root_module = gateway_test_module });
     const run_gateway_tests = b.addRunArtifact(gateway_tests);
 
+    // Gateway replay (DST)
+    const gateway_replay_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/gateway/replay_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gateway_replay_test_module.addImport("gateway.zig", gateway_module);
+    gateway_replay_test_module.addImport("storage.zig", storage_module);
+    const gateway_replay_tests = b.addTest(.{ .root_module = gateway_replay_test_module });
+    const run_gateway_replay_tests = b.addRunArtifact(gateway_replay_tests);
+
     // Unit tests: pure logic, no simulation harness
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
@@ -422,4 +443,6 @@ pub fn build(b: *std.Build) void {
     dst_step.dependOn(&run_storage_replay_tests.step);
     dst_step.dependOn(&run_executor_replay_tests.step);
     dst_step.dependOn(&run_sql_replay_tests.step);
+    dst_step.dependOn(&run_log_replay_tests.step);
+    dst_step.dependOn(&run_gateway_replay_tests.step);
 }

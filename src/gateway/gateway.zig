@@ -187,7 +187,7 @@ pub const Gateway = struct {
             rq.plan,
             decoded_params,
             nondet,
-            self.executor.committed_seq,
+            self.executor.committed_seq + 1,
             self.alloc,
         );
         const rows_slice = try rows.toOwnedSlice(self.alloc);
@@ -216,7 +216,7 @@ pub const Gateway = struct {
             rq.plan,
             decoded_params,
             &.{},
-            seq,
+            seq + 1,
             self.alloc,
         );
         const rows_slice = try rows.toOwnedSlice(self.alloc);

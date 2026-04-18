@@ -305,3 +305,263 @@ test "Gateway: multiple tables" {
     defer testing.allocator.free(post_params[2].string);
     _ = try gateway.execute(insert_post.hash, &post_params, &.{});
 }
+
+test "Gateway: querySelect returns inserted rows" {
+    const temp_path = try makeTempDir();
+    defer {
+        removeDirRecursive(temp_path);
+        testing.allocator.free(temp_path);
+    }
+
+    const gateway = try Gateway.init(temp_path, testing.allocator);
+    defer gateway.deinit();
+
+    try gateway.applyDdl("CREATE TABLE accounts (id INT64 NOT NULL, balance INT64 NOT NULL, PRIMARY KEY (id))");
+
+    const insert_reg = try gateway.register("INSERT INTO accounts (id, balance) VALUES ($1, $2)");
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 100 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 2 }, .{ .int64 = 200 } }, &.{});
+
+    const select_reg = try gateway.register("SELECT id, balance FROM accounts");
+    var rs = try gateway.querySelect(select_reg.hash, &.{}, &.{});
+    defer rs.deinit();
+
+    try testing.expectEqual(@as(usize, 2), rs.rows.len);
+
+    // Find the row with id=1 and verify balance=100
+    var found_row1 = false;
+    var found_row2 = false;
+    for (rs.rows) |row| {
+        const id_val = row[0] orelse continue;
+        const bal_val = row[1] orelse continue;
+        if (id_val == .int64 and id_val.int64 == 1) {
+            try testing.expectEqual(@as(i64, 100), bal_val.int64);
+            found_row1 = true;
+        } else if (id_val == .int64 and id_val.int64 == 2) {
+            try testing.expectEqual(@as(i64, 200), bal_val.int64);
+            found_row2 = true;
+        }
+    }
+    try testing.expect(found_row1);
+    try testing.expect(found_row2);
+}
+
+test "Gateway: readAt returns data at correct seq" {
+    const temp_path = try makeTempDir();
+    defer {
+        removeDirRecursive(temp_path);
+        testing.allocator.free(temp_path);
+    }
+
+    const gateway = try Gateway.init(temp_path, testing.allocator);
+    defer gateway.deinit();
+
+    try gateway.applyDdl("CREATE TABLE log (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
+
+    const seq_before = gateway.currentSeq();
+
+    const insert_reg = try gateway.register("INSERT INTO log (id, val) VALUES ($1, $2)");
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 42 } }, &.{});
+
+    const seq_after = gateway.currentSeq();
+
+    const select_reg = try gateway.register("SELECT id, val FROM log");
+
+    // Read at seq_after: should see the inserted row
+    var rs_after = try gateway.readAt(select_reg.hash, &.{}, seq_after);
+    defer rs_after.deinit();
+    try testing.expectEqual(@as(usize, 1), rs_after.rows.len);
+
+    // Read at seq_before: should see nothing (row not yet committed at that point)
+    var rs_before = try gateway.readAt(select_reg.hash, &.{}, seq_before);
+    defer rs_before.deinit();
+    try testing.expectEqual(@as(usize, 0), rs_before.rows.len);
+}
+
+test "Gateway: querySelect with WHERE param returns matching row only" {
+    const temp_path = try makeTempDir();
+    defer {
+        removeDirRecursive(temp_path);
+        testing.allocator.free(temp_path);
+    }
+
+    const gateway = try Gateway.init(temp_path, testing.allocator);
+    defer gateway.deinit();
+
+    try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
+
+    const insert_reg = try gateway.register("INSERT INTO items (id, val) VALUES ($1, $2)");
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 3 }, .{ .int64 = 30 } }, &.{});
+
+    const select_reg = try gateway.register("SELECT id, val FROM items WHERE id = $1");
+
+    var rs = try gateway.querySelect(select_reg.hash, &[_]ColumnValue{.{ .int64 = 2 }}, &.{});
+    defer rs.deinit();
+
+    try testing.expectEqual(@as(usize, 1), rs.rows.len);
+    try testing.expectEqual(@as(i64, 2), rs.rows[0][0].?.int64);
+    try testing.expectEqual(@as(i64, 20), rs.rows[0][1].?.int64);
+}
+
+test "Gateway: querySelect on empty table returns zero rows" {
+    const temp_path = try makeTempDir();
+    defer {
+        removeDirRecursive(temp_path);
+        testing.allocator.free(temp_path);
+    }
+
+    const gateway = try Gateway.init(temp_path, testing.allocator);
+    defer gateway.deinit();
+
+    try gateway.applyDdl("CREATE TABLE empty_tbl (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
+
+    const select_reg = try gateway.register("SELECT id, val FROM empty_tbl");
+    var rs = try gateway.querySelect(select_reg.hash, &.{}, &.{});
+    defer rs.deinit();
+
+    try testing.expectEqual(@as(usize, 0), rs.rows.len);
+}
+
+test "Gateway: DELETE makes row invisible in subsequent SELECT" {
+    const temp_path = try makeTempDir();
+    defer {
+        removeDirRecursive(temp_path);
+        testing.allocator.free(temp_path);
+    }
+
+    const gateway = try Gateway.init(temp_path, testing.allocator);
+    defer gateway.deinit();
+
+    try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
+
+    const insert_reg = try gateway.register("INSERT INTO items (id, val) VALUES ($1, $2)");
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
+
+    const delete_reg = try gateway.register("DELETE FROM items WHERE id = $1");
+    _ = try gateway.execute(delete_reg.hash, &[_]ColumnValue{.{ .int64 = 1 }}, &.{});
+
+    const select_reg = try gateway.register("SELECT id, val FROM items");
+    var rs = try gateway.querySelect(select_reg.hash, &.{}, &.{});
+    defer rs.deinit();
+
+    try testing.expectEqual(@as(usize, 1), rs.rows.len);
+    try testing.expectEqual(@as(i64, 2), rs.rows[0][0].?.int64);
+}
+
+test "Gateway: UPDATE value is visible in subsequent SELECT" {
+    const temp_path = try makeTempDir();
+    defer {
+        removeDirRecursive(temp_path);
+        testing.allocator.free(temp_path);
+    }
+
+    const gateway = try Gateway.init(temp_path, testing.allocator);
+    defer gateway.deinit();
+
+    try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
+
+    const insert_reg = try gateway.register("INSERT INTO items (id, val) VALUES ($1, $2)");
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+
+    const update_reg = try gateway.register("UPDATE items SET val = $2 WHERE id = $1");
+    _ = try gateway.execute(update_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 99 } }, &.{});
+
+    const select_reg = try gateway.register("SELECT id, val FROM items WHERE id = $1");
+    var rs = try gateway.querySelect(select_reg.hash, &[_]ColumnValue{.{ .int64 = 1 }}, &.{});
+    defer rs.deinit();
+
+    try testing.expectEqual(@as(usize, 1), rs.rows.len);
+    try testing.expectEqual(@as(i64, 99), rs.rows[0][1].?.int64);
+}
+
+test "Gateway: UPDATE with no matching rows returns rows_affected zero" {
+    const temp_path = try makeTempDir();
+    defer {
+        removeDirRecursive(temp_path);
+        testing.allocator.free(temp_path);
+    }
+
+    const gateway = try Gateway.init(temp_path, testing.allocator);
+    defer gateway.deinit();
+
+    try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
+
+    const update_reg = try gateway.register("UPDATE items SET val = $2 WHERE id = $1");
+    const result = try gateway.execute(update_reg.hash, &[_]ColumnValue{ .{ .int64 = 999 }, .{ .int64 = 42 } }, &.{});
+    try testing.expectEqual(@as(u64, 0), result.rows_affected);
+}
+
+test "Gateway: DELETE with no matching rows returns rows_affected zero" {
+    const temp_path = try makeTempDir();
+    defer {
+        removeDirRecursive(temp_path);
+        testing.allocator.free(temp_path);
+    }
+
+    const gateway = try Gateway.init(temp_path, testing.allocator);
+    defer gateway.deinit();
+
+    try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
+
+    const delete_reg = try gateway.register("DELETE FROM items WHERE id = $1");
+    const result = try gateway.execute(delete_reg.hash, &[_]ColumnValue{.{ .int64 = 999 }}, &.{});
+    try testing.expectEqual(@as(u64, 0), result.rows_affected);
+}
+
+test "Gateway: currentSeq advances with each execute" {
+    const temp_path = try makeTempDir();
+    defer {
+        removeDirRecursive(temp_path);
+        testing.allocator.free(temp_path);
+    }
+
+    const gateway = try Gateway.init(temp_path, testing.allocator);
+    defer gateway.deinit();
+
+    try testing.expectEqual(@as(Seq, 0), gateway.currentSeq());
+
+    try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
+    const insert_reg = try gateway.register("INSERT INTO items (id, val) VALUES ($1, $2)");
+
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    try testing.expectEqual(@as(Seq, 1), gateway.currentSeq());
+
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
+    try testing.expectEqual(@as(Seq, 2), gateway.currentSeq());
+
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 3 }, .{ .int64 = 30 } }, &.{});
+    try testing.expectEqual(@as(Seq, 3), gateway.currentSeq());
+}
+
+test "Gateway: readAt intermediate state shows partial history" {
+    const temp_path = try makeTempDir();
+    defer {
+        removeDirRecursive(temp_path);
+        testing.allocator.free(temp_path);
+    }
+
+    const gateway = try Gateway.init(temp_path, testing.allocator);
+    defer gateway.deinit();
+
+    try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
+    const insert_reg = try gateway.register("INSERT INTO items (id, val) VALUES ($1, $2)");
+    const select_reg = try gateway.register("SELECT id, val FROM items");
+
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    const seq1 = gateway.currentSeq();
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 3 }, .{ .int64 = 30 } }, &.{});
+
+    // At seq1 only the first row was committed
+    var rs1 = try gateway.readAt(select_reg.hash, &.{}, seq1);
+    defer rs1.deinit();
+    try testing.expectEqual(@as(usize, 1), rs1.rows.len);
+
+    // At current seq all three rows are visible
+    var rs3 = try gateway.readAt(select_reg.hash, &.{}, gateway.currentSeq());
+    defer rs3.deinit();
+    try testing.expectEqual(@as(usize, 3), rs3.rows.len);
+}
