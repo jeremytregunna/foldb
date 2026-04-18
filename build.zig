@@ -371,6 +371,43 @@ pub fn build(b: *std.Build) void {
     const sql_planner_tests = b.addTest(.{ .root_module = sql_planner_test_module });
     const run_sql_planner_tests = b.addRunArtifact(sql_planner_tests);
 
+    // Sequencer sub-modules
+    const seq_types_module = b.createModule(.{
+        .root_source_file = b.path("src/sequencer/types.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    seq_types_module.addImport("log.zig", log_module);
+
+    const seq_idempotency_module = b.createModule(.{
+        .root_source_file = b.path("src/sequencer/idempotency.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    seq_idempotency_module.addImport("types.zig", seq_types_module);
+
+    const seq_epoch_module = b.createModule(.{
+        .root_source_file = b.path("src/sequencer/epoch.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    seq_epoch_module.addImport("types.zig", seq_types_module);
+
+    // Sequencer main module
+    const sequencer_module = b.createModule(.{
+        .root_source_file = b.path("src/sequencer/sequencer.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sequencer_module.addImport("log.zig", log_module);
+    sequencer_module.addImport("raft.zig", raft_module);
+    sequencer_module.addImport("types.zig", seq_types_module);
+    sequencer_module.addImport("idempotency.zig", seq_idempotency_module);
+    sequencer_module.addImport("epoch.zig", seq_epoch_module);
+
+    // Wire sequencer into lib.zig now that it exists
+    lib_module.addImport("sequencer.zig", sequencer_module);
+
     // Gateway module
     const gateway_module = b.createModule(.{
         .root_source_file = b.path("src/gateway/gateway.zig"),
@@ -381,12 +418,58 @@ pub fn build(b: *std.Build) void {
     gateway_module.addImport("storage.zig", storage_module);
     gateway_module.addImport("executor.zig", executor_module);
     gateway_module.addImport("log.zig", log_module);
+    gateway_module.addImport("sequencer.zig", sequencer_module);
     gateway_module.addImport("registry.zig", sql_module);
     gateway_module.addImport("executor_bridge.zig", sql_module);
     gateway_module.addImport("schema.zig", sql_module);
     gateway_module.addImport("parser.zig", sql_module);
     gateway_module.addImport("ast.zig", sql_module);
     gateway_module.addImport("types.zig", executor_module);
+
+    // Sequencer epoch tests
+    const seq_epoch_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sequencer/epoch_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    seq_epoch_test_module.addImport("sequencer.zig", sequencer_module);
+    seq_epoch_test_module.addImport("log.zig", log_module);
+    seq_epoch_test_module.addImport("raft.zig", raft_module);
+    seq_epoch_test_module.addImport("types.zig", seq_types_module);
+    seq_epoch_test_module.addImport("idempotency.zig", seq_idempotency_module);
+    seq_epoch_test_module.addImport("epoch.zig", seq_epoch_module);
+    const seq_epoch_tests = b.addTest(.{ .root_module = seq_epoch_test_module });
+    const run_seq_epoch_tests = b.addRunArtifact(seq_epoch_tests);
+
+    // Sequencer idempotency tests
+    const seq_idem_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sequencer/idempotency_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    seq_idem_test_module.addImport("sequencer.zig", sequencer_module);
+    seq_idem_test_module.addImport("log.zig", log_module);
+    seq_idem_test_module.addImport("raft.zig", raft_module);
+    seq_idem_test_module.addImport("types.zig", seq_types_module);
+    seq_idem_test_module.addImport("idempotency.zig", seq_idempotency_module);
+    seq_idem_test_module.addImport("epoch.zig", seq_epoch_module);
+    const seq_idem_tests = b.addTest(.{ .root_module = seq_idem_test_module });
+    const run_seq_idem_tests = b.addRunArtifact(seq_idem_tests);
+
+    // Sequencer integration tests
+    const seq_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sequencer/sequencer_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    seq_test_module.addImport("sequencer.zig", sequencer_module);
+    seq_test_module.addImport("log.zig", log_module);
+    seq_test_module.addImport("raft.zig", raft_module);
+    seq_test_module.addImport("types.zig", seq_types_module);
+    seq_test_module.addImport("idempotency.zig", seq_idempotency_module);
+    seq_test_module.addImport("epoch.zig", seq_epoch_module);
+    const seq_tests = b.addTest(.{ .root_module = seq_test_module });
+    const run_seq_tests = b.addRunArtifact(seq_tests);
 
     // Gateway unit tests
     const gateway_test_module = b.createModule(.{
@@ -398,6 +481,7 @@ pub fn build(b: *std.Build) void {
     gateway_test_module.addImport("sql.zig", sql_module);
     gateway_test_module.addImport("storage.zig", storage_module);
     gateway_test_module.addImport("executor.zig", executor_module);
+    gateway_test_module.addImport("sequencer.zig", sequencer_module);
     const gateway_tests = b.addTest(.{ .root_module = gateway_test_module });
     const run_gateway_tests = b.addRunArtifact(gateway_tests);
 
@@ -409,6 +493,7 @@ pub fn build(b: *std.Build) void {
     });
     gateway_replay_test_module.addImport("gateway.zig", gateway_module);
     gateway_replay_test_module.addImport("storage.zig", storage_module);
+    gateway_replay_test_module.addImport("sequencer.zig", sequencer_module);
     const gateway_replay_tests = b.addTest(.{ .root_module = gateway_replay_test_module });
     const run_gateway_replay_tests = b.addRunArtifact(gateway_replay_tests);
 
@@ -435,6 +520,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_sql_planner_tests.step);
     test_step.dependOn(&run_sql_executor_expr_tests.step);
     test_step.dependOn(&run_gateway_tests.step);
+    test_step.dependOn(&run_seq_epoch_tests.step);
+    test_step.dependOn(&run_seq_idem_tests.step);
+    test_step.dependOn(&run_seq_tests.step);
 
     // Deterministic simulation tests
     const dst_step = b.step("dst-test", "Run deterministic simulation tests");

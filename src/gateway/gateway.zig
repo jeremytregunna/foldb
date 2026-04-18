@@ -1,17 +1,18 @@
-/// Foldb Gateway (M6): client-facing entry point for query registration and execution.
+/// Foldb Gateway (M7): client-facing entry point for query registration and execution.
 ///
 /// Handles:
 /// - Query registration (SQL → QueryHash with schema-version pinning)
-/// - Query execution (execute registered queries with params)
+/// - Query execution (execute registered queries with params, via Sequencer)
 /// - Historical reads (read at specific seq)
 ///
-/// For M6 (single partition), the execute path calls the executor directly
-/// without the Sequencer.
+/// For M7, execute() goes through the Sequencer → partition log → SqlExecutor.run().
 const std = @import("std");
 
 const sql_mod = @import("sql.zig");
 const storage_mod = @import("storage.zig");
 const executor_mod = @import("executor.zig");
+const sequencer_mod = @import("sequencer.zig");
+const log_mod = @import("log.zig");
 
 pub const QueryHash = sql_mod.QueryHash;
 pub const Seq = @import("types.zig").Seq;
@@ -39,6 +40,7 @@ pub const GatewayError = error{
     SchemaBreakingChange,
     ExecutionError,
     TableNotFound,
+    ConstraintViolation,
 };
 
 /// Nondeterminism resolver - computes values for NOW(), RANDOM(), UUID()
@@ -49,7 +51,6 @@ pub const NondetResolver = struct {
         return .{ .alloc = alloc };
     }
 
-    /// Resolve a nondeterministic value.
     pub fn resolveNow(self: NondetResolver) ResolvedValue {
         _ = self;
         var ts: std.os.linux.timespec = undefined;
@@ -58,7 +59,6 @@ pub const NondetResolver = struct {
         return .{ .now = micros };
     }
 
-    /// Resolve a random 128-bit value.
     pub fn resolveRandom(self: NondetResolver) ResolvedValue {
         _ = self;
         var ts: std.os.linux.timespec = undefined;
@@ -70,7 +70,6 @@ pub const NondetResolver = struct {
         return .{ .random = bytes };
     }
 
-    /// Resolve a UUID v7 (time-based).
     pub fn resolveUuidV7(self: NondetResolver) ResolvedValue {
         _ = self;
         var ts: std.os.linux.timespec = undefined;
@@ -80,12 +79,9 @@ pub const NondetResolver = struct {
         var uuid: [16]u8 = undefined;
         const ms: u64 = @intCast(@divTrunc(micros, 1_000));
         std.mem.writeInt(u64, &uuid[0..8].*, ms, .big);
-        // Version 7: bits 12-15 of byte 6
         uuid[6] = (uuid[6] & 0x0F) | 0x70;
-        // Randomize bytes 8-16 first, then apply variant bits
         var rand = std.Random.DefaultPrng.init(ms);
         rand.random().bytes(uuid[8..16]);
-        // Variant: bits 6-7 of byte 8 (must be set AFTER randomizing)
         uuid[8] = (uuid[8] & 0x3F) | 0x80;
 
         return .{ .uuid_v7 = uuid };
@@ -97,11 +93,15 @@ pub const NondetResolver = struct {
 pub const Gateway = struct {
     schema: sql_mod.SchemaRegistry,
     registry: sql_mod.SqlRegistry,
-    executor: sql_mod.SqlExecutor,
+    sql_exec: sql_mod.SqlExecutor,
     storage: storage_mod.Storage,
     /// Arena that owns storage-schema column slices allocated during DDL.
     storage_schema_arena: std.heap.ArenaAllocator,
     nondet_resolver: NondetResolver,
+    sequencer: sequencer_mod.Sequencer,
+    /// Per-gateway client identity for idempotency tracking.
+    client_id: u64,
+    client_seq: u64,
     alloc: std.mem.Allocator,
 
     /// Initialize and heap-allocate a Gateway. Caller owns the pointer; call `deinit` to free.
@@ -116,16 +116,35 @@ pub const Gateway = struct {
         gw.storage_schema_arena = std.heap.ArenaAllocator.init(alloc);
         gw.storage = try storage_mod.Storage.init(storage_dir, alloc);
         errdefer gw.storage.deinit();
+
         gw.schema = sql_mod.SchemaRegistry.init(alloc);
         gw.registry = sql_mod.SqlRegistry.init(alloc, &gw.schema);
-        gw.executor = sql_mod.SqlExecutor.init(&gw.storage, &gw.registry, &gw.schema, alloc);
+        gw.sql_exec = sql_mod.SqlExecutor.init(&gw.storage, &gw.registry, &gw.schema, alloc);
         gw.nondet_resolver = NondetResolver.init(alloc);
+
+        const seq_cfg = sequencer_mod.Config{
+            .partition_count = 1,
+            .node_id = 1,
+        };
+        gw.sequencer = try sequencer_mod.Sequencer.init(storage_dir, seq_cfg, alloc);
+        errdefer gw.sequencer.deinit();
+
+        // Derive a stable client_id from the storage path hash
+        gw.client_id = blk: {
+            var h: u64 = 0xcbf29ce484222325;
+            for (storage_dir) |b| {
+                h ^= b;
+                h *%= 0x100000001b3;
+            }
+            break :blk h;
+        };
+        gw.client_seq = 0;
 
         return gw;
     }
 
-    /// Clean up gateway resources and free the heap-allocated Gateway.
     pub fn deinit(self: *Gateway) void {
+        self.sequencer.deinit();
         self.registry.deinit();
         self.schema.deinit();
         self.storage.deinit();
@@ -144,34 +163,69 @@ pub const Gateway = struct {
     }
 
     /// Execute a registered DML query (INSERT/UPDATE/DELETE) with the given parameters.
-    /// For M6 (single partition), this calls the executor directly without a Sequencer.
+    /// Routes through the Sequencer → partition log → SqlExecutor.run().
     pub fn execute(
         self: *Gateway,
         hash: QueryHash,
         params: []const ColumnValue,
         nondet: []const ResolvedValue,
     ) !ExecResult {
-        const rq = self.registry.lookup(hash) orelse return error.QueryNotFound;
+        if (self.registry.lookup(hash) == null) return error.QueryNotFound;
 
-        const decoded_params = try decodeParams(params, rq.param_types, self.alloc);
-        defer self.alloc.free(decoded_params);
+        // Encode params to canonical bytes
+        const params_bytes = try sql_mod.executor_bridge.encodeParams(params, self.alloc);
+        defer self.alloc.free(params_bytes);
 
-        const seq = self.executor.committed_seq + 1;
-        const rows_affected = try self.executor.executePlanDirect(
-            rq.plan,
-            decoded_params,
+        // Serialize TxnIntent payload
+        self.client_seq += 1;
+        var intent_buf: std.ArrayList(u8) = .empty;
+        defer intent_buf.deinit(self.alloc);
+
+        try executor_mod.serializeTxnIntent(
+            &hash,
+            self.client_id,
+            self.client_seq,
+            &.{}, // read_set_hint: empty for M7
+            &.{}, // write_set_hint: empty for M7
+            params_bytes,
             nondet,
-            seq,
+            &intent_buf,
+            self.alloc,
         );
-        self.executor.committed_seq = seq;
 
-        return .{
-            .rows_affected = rows_affected,
-            .result_set = null,
+        // Submit to Sequencer — assigns global seq, appends to partition log
+        const result = try self.sequencer.submitBytes(
+            intent_buf.items,
+            self.client_id,
+            self.client_seq,
+        );
+
+        // Read committed entry from partition log
+        const partition_log = self.sequencer.partitionLog(result.partition);
+        const entries = try partition_log.read(result.seq, 1, self.alloc);
+        defer {
+            for (entries) |*e| e.deinit(self.alloc);
+            self.alloc.free(entries);
+        }
+        if (entries.len == 0 or entries[0].header.seq != result.seq) {
+            return error.ExecutionError;
+        }
+
+        // Execute via SqlExecutor (processes LogEntry through SQL plan)
+        const exec_result = try self.sql_exec.run(entries[0]);
+
+        return switch (exec_result) {
+            .ok => |ok| .{ .rows_affected = ok.rows_affected, .result_set = null },
+            .abort => |ab| switch (ab.code) {
+                .constraint_violation => error.ConstraintViolation,
+                .missing_query => error.QueryNotFound,
+                else => error.ExecutionError,
+            },
         };
     }
 
     /// Execute a SELECT query and return the result set.
+    /// Reads go directly to storage (no log routing needed for reads).
     pub fn querySelect(
         self: *Gateway,
         hash: QueryHash,
@@ -183,11 +237,11 @@ pub const Gateway = struct {
         const decoded_params = try decodeParams(params, rq.param_types, self.alloc);
         defer self.alloc.free(decoded_params);
 
-        var rows = try self.executor.querySelect(
+        var rows = try self.sql_exec.querySelect(
             rq.plan,
             decoded_params,
             nondet,
-            self.executor.committed_seq + 1,
+            self.sql_exec.committed_seq + 1,
             self.alloc,
         );
         const rows_slice = try rows.toOwnedSlice(self.alloc);
@@ -212,7 +266,7 @@ pub const Gateway = struct {
         const decoded_params = try decodeParams(params, rq.param_types, self.alloc);
         defer self.alloc.free(decoded_params);
 
-        var rows = try self.executor.querySelect(
+        var rows = try self.sql_exec.querySelect(
             rq.plan,
             decoded_params,
             &.{},
@@ -241,7 +295,6 @@ pub const Gateway = struct {
 
         try self.registry.applyDdl(stmt);
 
-        // Propagate CREATE TABLE to storage so mutations can find the LSM.
         switch (stmt) {
             .create_table => |ct| {
                 const tbl = self.schema.getTable(ct.name) orelse return error.TableNotFound;
@@ -253,7 +306,7 @@ pub const Gateway = struct {
 
     /// Get the current committed sequence number.
     pub fn currentSeq(self: *const Gateway) Seq {
-        return self.executor.committed_seq;
+        return self.sequencer.currentSeq();
     }
 
     /// Flush all storage to disk.
@@ -262,8 +315,6 @@ pub const Gateway = struct {
     }
 };
 
-/// Decode parameters from raw ColumnValue array using the registered param types.
-/// For now, we just pass through the values since they're already typed.
 fn decodeParams(
     params: []const ColumnValue,
     param_types: []const sql_mod.ast.SqlType,
@@ -273,7 +324,6 @@ fn decodeParams(
     return try alloc.dupe(ColumnValue, params);
 }
 
-/// Convert a SQL-layer TableSchema to the storage-layer TableSchema.
 fn sqlTableToStorage(
     tbl: *const sql_mod.schema.TableSchema,
     alloc: std.mem.Allocator,
@@ -306,11 +356,9 @@ fn sqlTypeToColumnType(t: sql_mod.ast.SqlType) storage_mod.ColumnType {
         .float64 => .float64,
         .string => .string,
         .bytes => .bytes,
-        // uuid, timestamp → int64 (stored as raw bytes / micros)
         .uuid => .bytes,
         .timestamp => .int64,
         .interval_months, .interval_micros => .int64,
-        // complex types → bytes (opaque)
         .decimal, .json, .vector, .array, .struct_type => .bytes,
         .null_type => .bytes,
     };

@@ -36,6 +36,7 @@ fn toNullPath(path: []const u8) ![:0]u8 {
 pub const Log = struct {
     path: []u8,
     node_id: NodeId,
+    partition_id: entry_mod.PartitionId,
     current_seq: Seq,
     current_term: entry_mod.Epoch, // Raft term for entries appended via append()
     current_segment: Segment,
@@ -44,7 +45,12 @@ pub const Log = struct {
     sealed: bool,
 
     /// Creates or opens a log at the given directory path.
+    /// partition_id identifies which data/ordering partition this log belongs to.
     pub fn init(path: []const u8, node_id: NodeId) !Log {
+        return initPartitioned(path, node_id, 0);
+    }
+
+    pub fn initPartitioned(path: []const u8, node_id: NodeId, partition_id: entry_mod.PartitionId) !Log {
         const null_path = try toNullPath(path);
         defer std.heap.page_allocator.free(null_path);
         _ = std.os.linux.mkdir(null_path.ptr, 0o755);
@@ -104,6 +110,7 @@ pub const Log = struct {
         return Log{
             .path = try std.heap.page_allocator.dupe(u8, path),
             .node_id = node_id,
+            .partition_id = partition_id,
             .current_seq = max_seq,
             .current_term = 0,
             .current_segment = current_segment,
@@ -149,7 +156,26 @@ pub const Log = struct {
         return seq;
     }
 
-    fn rotate(self: *Log) !void {
+    /// Append a TxnIntent at a pre-assigned global sequence number.
+    /// Accepts any seq > current_seq (no gap-freedom requirement).
+    /// Used by data partition logs where the Sequencer assigns global seqs.
+    pub fn appendAt(self: *Log, intent: TxnIntent, seq: Seq) !void {
+        if (self.sealed) return LogError.LogSealed;
+        if (seq <= self.current_seq) return LogError.SeqOutOfOrder;
+
+        const payload = try intent.serializeTo(std.heap.page_allocator);
+        errdefer std.heap.page_allocator.free(payload);
+
+        const entry = LogEntry.create(seq, self.current_term, .txn_intent, payload);
+        try self.current_segment.append(entry);
+        self.current_seq = seq;
+
+        if (self.current_segment.entry_count >= self.segment_max_entries) {
+            try self.rotate();
+        }
+    }
+
+    pub fn rotate(self: *Log) !void {
         try self.current_segment.seal();
 
         const new_base_seq = self.current_seq + 1;
@@ -264,6 +290,21 @@ pub const Log = struct {
     /// Called by Raft when the node's term changes.
     pub fn updateTerm(self: *Log, term: entry_mod.Epoch) void {
         self.current_term = term;
+    }
+
+    /// Append a pre-built LogEntry at a globally-assigned seq (any seq > current_seq).
+    /// Used by data partition logs driven by the Sequencer.
+    pub fn appendEntryAt(self: *Log, entry: LogEntry) !void {
+        if (self.sealed) return LogError.LogSealed;
+        if (entry.header.seq <= self.current_seq) return LogError.SeqOutOfOrder;
+
+        try self.current_segment.append(entry);
+        self.current_seq = entry.header.seq;
+        self.current_term = entry.header.epoch;
+
+        if (self.current_segment.entry_count >= self.segment_max_entries) {
+            try self.rotate();
+        }
     }
 
     /// Append a pre-sequenced entry (used by Raft followers).

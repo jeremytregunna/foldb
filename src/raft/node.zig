@@ -380,6 +380,12 @@ pub const RaftNode = struct {
                 .last_log_term = last_term,
             } } } });
         }
+
+        // Single-node cluster: self-vote already constitutes majority.
+        const majority = (self.peers.len + 1) / 2 + 1;
+        if (self.votes_for_me >= majority) {
+            try self.becomeLeader(log, out);
+        }
     }
 
     fn becomeLeader(self: *RaftNode, log: *Log, out: *std.ArrayList(Output)) !void {
@@ -410,6 +416,9 @@ pub const RaftNode = struct {
         for (self.peers) |*peer| {
             try self.emitSendEntries(log, peer, out);
         }
+        // For single-node clusters (0 peers), majority is already met by self alone.
+        // For multi-node clusters, this is a no-op until peer acks arrive.
+        try self.checkCommit(log, out);
     }
 
     fn emitSendEntries(self: *RaftNode, log: *Log, peer: *PeerState, out: *std.ArrayList(Output)) !void {

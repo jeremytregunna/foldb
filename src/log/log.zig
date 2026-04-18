@@ -24,6 +24,7 @@ pub const crc32c = crc_mod.crc32c;
 pub const Seq = entry.Seq;
 pub const Epoch = entry.Epoch;
 pub const NodeId = entry.NodeId;
+pub const PartitionId = entry.PartitionId;
 pub const EntryKind = entry.EntryKind;
 pub const TxnIntent = entry.TxnIntent;
 pub const LogEntryHeader = entry.LogEntryHeader;

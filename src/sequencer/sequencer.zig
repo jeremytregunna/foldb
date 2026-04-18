@@ -1,0 +1,224 @@
+/// Sequencer: assigns global seq numbers to TxnIntents and routes to partition logs.
+///
+/// Uses an internal RaftNode (single-node for M7) for durable ordering decisions.
+/// Batches intents into epochs; each epoch decision is replicated before forwarding
+/// intents to their assigned data partition logs.
+const std = @import("std");
+const log_mod = @import("log.zig");
+const raft_mod = @import("raft.zig");
+
+const types_mod = @import("types.zig");
+const idempotency_mod = @import("idempotency.zig");
+const epoch_mod = @import("epoch.zig");
+
+pub const Seq = log_mod.Seq;
+pub const PartitionId = log_mod.PartitionId;
+pub const NodeId = log_mod.NodeId;
+pub const EpochNum = types_mod.EpochNum;
+pub const EpochDecision = types_mod.EpochDecision;
+pub const OrderingEntry = types_mod.OrderingEntry;
+pub const SubmitResult = types_mod.SubmitResult;
+pub const IdempotencyCache = idempotency_mod.IdempotencyCache;
+pub const EpochBatcher = epoch_mod.EpochBatcher;
+
+pub const Log = log_mod.Log;
+pub const TxnIntent = log_mod.TxnIntent;
+pub const LogEntry = log_mod.LogEntry;
+pub const EntryKind = log_mod.EntryKind;
+
+/// Sequencer config.
+pub const Config = struct {
+    /// Number of data partition logs.
+    partition_count: u32 = 1,
+    /// Max intents per epoch before forcing a close.
+    max_epoch_size: usize = epoch_mod.DEFAULT_MAX_BATCH_SIZE,
+    /// Node ID for the Sequencer's Raft group.
+    node_id: NodeId = 1,
+    /// Raft election timeout (ticks).
+    election_timeout_min: u32 = 5,
+    election_timeout_max: u32 = 10,
+    /// Raft heartbeat interval (ticks).
+    heartbeat_interval: u32 = 2,
+};
+
+pub const SequencerError = error{
+    NotLeader,
+    PartitionError,
+    SerializeError,
+};
+
+/// The Sequencer: global ordering for TxnIntents across partition logs.
+pub const Sequencer = struct {
+    raft: raft_mod.RaftNode,
+    raft_log: Log,
+    raft_path: []u8,
+    batcher: EpochBatcher,
+    idempotency: IdempotencyCache,
+    /// Data partition logs, one per partition.
+    partition_logs: []Log,
+    next_seq: Seq,
+    next_epoch: EpochNum,
+    alloc: std.mem.Allocator,
+
+    /// Initialize a Sequencer at the given base path.
+    /// Creates:
+    ///   {base_path}/seq_raft/    — sequencer's ordering log
+    ///   {base_path}/log_p{n}/    — data partition logs (0..partition_count-1)
+    pub fn init(base_path: []const u8, cfg: Config, alloc: std.mem.Allocator) !Sequencer {
+        // Ensure base directory exists
+        const base_pathz = try std.heap.page_allocator.allocSentinel(u8, base_path.len, 0);
+        defer std.heap.page_allocator.free(base_pathz);
+        @memcpy(base_pathz[0..base_path.len], base_path);
+        _ = std.os.linux.mkdir(base_pathz.ptr, 0o755);
+
+        // Create ordering log
+        const raft_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/seq_raft", .{base_path});
+        errdefer std.heap.page_allocator.free(raft_path);
+
+        const seq_partition_id: PartitionId = std.math.maxInt(PartitionId);
+        var raft_log = try Log.initPartitioned(raft_path, cfg.node_id, seq_partition_id);
+        errdefer raft_log.deinit();
+
+        // Initialize RaftNode with 0 peers (single-node, immediately becomes leader)
+        const raft_cfg = raft_mod.Config{
+            .election_timeout_min = cfg.election_timeout_min,
+            .election_timeout_max = cfg.election_timeout_max,
+            .heartbeat_interval = cfg.heartbeat_interval,
+            .max_append_batch = 64,
+        };
+        var raft_node = try raft_mod.RaftNode.init(alloc, cfg.node_id, &.{}, raft_cfg, cfg.node_id);
+        errdefer raft_node.deinit();
+
+        // Tick enough times to elect self as leader (0 peers → immediate)
+        var outputs: std.ArrayList(raft_mod.Output) = .empty;
+        defer outputs.deinit(alloc);
+        for (0..cfg.election_timeout_max + 1) |_| {
+            try raft_node.tick(&raft_log, &outputs);
+            outputs.clearRetainingCapacity();
+            if (raft_node.role == .leader) break;
+        }
+
+        // Create data partition logs
+        const partition_logs = try alloc.alloc(Log, cfg.partition_count);
+        errdefer alloc.free(partition_logs);
+        var initialized: usize = 0;
+        errdefer for (partition_logs[0..initialized]) |*pl| pl.deinit();
+
+        for (0..cfg.partition_count) |i| {
+            const part_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/log_p{d}", .{ base_path, i });
+            defer std.heap.page_allocator.free(part_path);
+            partition_logs[i] = try Log.initPartitioned(part_path, cfg.node_id, @intCast(i));
+            initialized += 1;
+        }
+
+        var batcher = EpochBatcher.init(alloc);
+        batcher.max_batch_size = cfg.max_epoch_size;
+
+        return Sequencer{
+            .raft = raft_node,
+            .raft_log = raft_log,
+            .raft_path = raft_path,
+            .batcher = batcher,
+            .idempotency = IdempotencyCache.init(alloc),
+            .partition_logs = partition_logs,
+            .next_seq = 1,
+            .next_epoch = 1,
+            .alloc = alloc,
+        };
+    }
+
+    pub fn deinit(self: *Sequencer) void {
+        self.raft.deinit();
+        self.raft_log.deinit();
+        std.heap.page_allocator.free(self.raft_path);
+        for (self.partition_logs) |*pl| pl.deinit();
+        self.alloc.free(self.partition_logs);
+        self.batcher.deinit();
+        self.idempotency.deinit();
+    }
+
+    pub fn currentSeq(self: *const Sequencer) Seq {
+        return self.next_seq - 1;
+    }
+
+    pub fn partitionCount(self: *const Sequencer) u32 {
+        return @intCast(self.partition_logs.len);
+    }
+
+    /// Return a pointer to the log for the given partition (for reading committed entries).
+    pub fn partitionLog(self: *Sequencer, partition: PartitionId) *Log {
+        return &self.partition_logs[partition];
+    }
+
+    /// Submit a pre-serialized TxnIntent payload (bytes) for sequencing.
+    /// Idempotent on (client_id, client_seq). Returns the assigned global seq and partition.
+    pub fn submitBytes(
+        self: *Sequencer,
+        intent_payload: []const u8,
+        client_id: u64,
+        client_seq_num: u64,
+    ) !SubmitResult {
+        // Idempotency check
+        if (self.idempotency.lookup(client_id, client_seq_num)) |existing_seq| {
+            const partition: PartitionId = @intCast(existing_seq % @as(Seq, self.partition_logs.len));
+            return .{ .seq = existing_seq, .partition = partition };
+        }
+
+        // Single-entry epoch (M7 synchronous mode)
+        try self.batcher.submit(client_id, client_seq_num);
+
+        const decision = try self.batcher.closeEpoch(
+            self.next_epoch,
+            self.next_seq,
+            @intCast(self.partition_logs.len),
+            self.alloc,
+        );
+        defer self.alloc.free(decision.entries);
+
+        self.next_epoch += 1;
+        self.next_seq += @intCast(decision.entries.len);
+
+        // Replicate ordering decision via Raft
+        var payload_buf: std.ArrayList(u8) = .empty;
+        defer payload_buf.deinit(self.alloc);
+        try types_mod.serializeEpochDecision(decision, &payload_buf, self.alloc);
+
+        var outputs: std.ArrayList(raft_mod.Output) = .empty;
+        defer outputs.deinit(self.alloc);
+
+        const ordering_seq = try self.raft.propose(
+            &self.raft_log,
+            .epoch_decision,
+            payload_buf.items,
+            &outputs,
+        ) orelse return SequencerError.NotLeader;
+        _ = ordering_seq;
+
+        // With 0 peers, propose() + broadcastAppendEntries() + checkCommit() commits immediately.
+        // Process persist outputs to keep durable state current.
+        for (outputs.items) |output| {
+            switch (output) {
+                .persist => |p| {
+                    raft_mod.savePersistentState(
+                        self.raft_path,
+                        self.alloc,
+                        p.term,
+                        p.voted_for,
+                    ) catch {};
+                },
+                else => {},
+            }
+        }
+
+        // Append TxnIntent to assigned partition log at global seq
+        const entry = decision.entries[0]; // single-entry epoch
+        const partition_log = &self.partition_logs[entry.partition];
+        const log_entry = LogEntry.create(entry.seq, 0, .txn_intent, intent_payload);
+        try partition_log.appendEntryAt(log_entry);
+
+        // Record idempotency
+        try self.idempotency.record(client_id, client_seq_num, entry.seq);
+
+        return .{ .seq = entry.seq, .partition = entry.partition };
+    }
+};

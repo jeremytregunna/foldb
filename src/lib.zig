@@ -3,6 +3,8 @@ const testing = std.testing;
 
 pub const VERSION = "0.1.0";
 
+pub const sequencer = @import("sequencer.zig");
+
 /// Example function demonstrating foldb functionality
 pub fn exampleFunction(allocator: std.mem.Allocator) !void {
     // Placeholder for foldb core functionality

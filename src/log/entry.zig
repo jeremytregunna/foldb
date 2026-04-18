@@ -24,6 +24,7 @@ pub const EntryKind = enum(u8) {
     config_change = 3,
     noop = 4,
     snapshot_marker = 5,
+    epoch_decision = 6,
 
     pub fn fromByte(byte: u8) !EntryKind {
         return switch (byte) {
@@ -32,6 +33,7 @@ pub const EntryKind = enum(u8) {
             3 => .config_change,
             4 => .noop,
             5 => .snapshot_marker,
+            6 => .epoch_decision,
             else => error.InvalidEntryKind,
         };
     }
