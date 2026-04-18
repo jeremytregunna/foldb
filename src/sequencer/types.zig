@@ -27,14 +27,14 @@ pub const SubmitResult = struct {
     partition: PartitionId,
 };
 
-/// Handle returned by Sequencer.submit(). For M7 (single-node synchronous), the result is
-/// pre-computed at submit time and awaitCommit() returns immediately. Future milestones will
-/// make submit() non-blocking and awaitCommit() block on Raft durability.
+/// Handle returned by Sequencer.submitBytes(). submit() is infallible; errors surface on
+/// awaitCommit(). For M7 single-node, io.async executes synchronously so await returns
+/// immediately. Multi-node Raft will block here until the ordering decision is durable.
 pub const SubmitHandle = struct {
-    committed: SubmitResult,
+    future: std.Io.Future(anyerror!SubmitResult),
 
-    pub fn awaitCommit(self: SubmitHandle) SubmitResult {
-        return self.committed;
+    pub fn awaitCommit(self: *SubmitHandle, io: std.Io) !SubmitResult {
+        return self.future.await(io);
     }
 };
 

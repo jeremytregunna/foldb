@@ -55,7 +55,6 @@ fn removeDirRecursive(path: []const u8) void {
     _ = std.os.linux.rmdir(z.ptr);
 }
 
-// Minimal TxnIntent payload: just a 64-byte header with zeroed hash and no payload sections.
 fn minimalIntentPayload(alloc: std.mem.Allocator) ![]u8 {
     const buf = try alloc.alloc(u8, 64);
     @memset(buf, 0);
@@ -88,9 +87,19 @@ test "Sequencer: submit assigns dense increasing seqs" {
     const payload = try minimalIntentPayload(testing.allocator);
     defer testing.allocator.free(payload);
 
-    const r1 = try seq.submitBytes(payload, 1, 1);
-    const r2 = try seq.submitBytes(payload, 1, 2);
-    const r3 = try seq.submitBytes(payload, 1, 3);
+    const io = std.testing.io;
+
+    var h1 = seq.submitBytes(io, payload, 1, 1);
+    defer if (h1.future.cancel(io)) |_| {} else |_| {};
+    const r1 = try h1.awaitCommit(io);
+
+    var h2 = seq.submitBytes(io, payload, 1, 2);
+    defer if (h2.future.cancel(io)) |_| {} else |_| {};
+    const r2 = try h2.awaitCommit(io);
+
+    var h3 = seq.submitBytes(io, payload, 1, 3);
+    defer if (h3.future.cancel(io)) |_| {} else |_| {};
+    const r3 = try h3.awaitCommit(io);
 
     try testing.expectEqual(@as(u64, 1), r1.seq);
     try testing.expectEqual(@as(u64, 2), r2.seq);
@@ -111,12 +120,18 @@ test "Sequencer: idempotent submit returns same seq" {
     const payload = try minimalIntentPayload(testing.allocator);
     defer testing.allocator.free(payload);
 
-    const r1 = try seq.submitBytes(payload, 42, 7);
-    const r2 = try seq.submitBytes(payload, 42, 7); // same client_id + client_seq
+    const io = std.testing.io;
+
+    var h1 = seq.submitBytes(io, payload, 42, 7);
+    defer if (h1.future.cancel(io)) |_| {} else |_| {};
+    const r1 = try h1.awaitCommit(io);
+
+    var h2 = seq.submitBytes(io, payload, 42, 7);
+    defer if (h2.future.cancel(io)) |_| {} else |_| {};
+    const r2 = try h2.awaitCommit(io);
 
     try testing.expectEqual(r1.seq, r2.seq);
     try testing.expectEqual(r1.partition, r2.partition);
-    // Should not advance seq
     try testing.expectEqual(@as(u64, 1), seq.currentSeq());
 }
 
@@ -133,10 +148,23 @@ test "Sequencer: multi-partition routing distributes round-robin" {
     const payload = try minimalIntentPayload(testing.allocator);
     defer testing.allocator.free(payload);
 
-    const r1 = try seq.submitBytes(payload, 1, 1);
-    const r2 = try seq.submitBytes(payload, 1, 2);
-    const r3 = try seq.submitBytes(payload, 1, 3);
-    const r4 = try seq.submitBytes(payload, 1, 4);
+    const io = std.testing.io;
+
+    var h1 = seq.submitBytes(io, payload, 1, 1);
+    defer if (h1.future.cancel(io)) |_| {} else |_| {};
+    const r1 = try h1.awaitCommit(io);
+
+    var h2 = seq.submitBytes(io, payload, 1, 2);
+    defer if (h2.future.cancel(io)) |_| {} else |_| {};
+    const r2 = try h2.awaitCommit(io);
+
+    var h3 = seq.submitBytes(io, payload, 1, 3);
+    defer if (h3.future.cancel(io)) |_| {} else |_| {};
+    const r3 = try h3.awaitCommit(io);
+
+    var h4 = seq.submitBytes(io, payload, 1, 4);
+    defer if (h4.future.cancel(io)) |_| {} else |_| {};
+    const r4 = try h4.awaitCommit(io);
 
     // seq 1 → 1%2=1, seq 2 → 2%2=0, seq 3 → 3%2=1, seq 4 → 4%2=0
     try testing.expectEqual(@as(u32, 1), r1.partition);
@@ -158,7 +186,11 @@ test "Sequencer: committed entry readable from partition log" {
     const payload = try minimalIntentPayload(testing.allocator);
     defer testing.allocator.free(payload);
 
-    const result = try seq.submitBytes(payload, 1, 1);
+    const io = std.testing.io;
+
+    var handle = seq.submitBytes(io, payload, 1, 1);
+    defer if (handle.future.cancel(io)) |_| {} else |_| {};
+    const result = try handle.awaitCommit(io);
 
     const partition_log = seq.partitionLog(result.partition);
     const entries = try partition_log.read(result.seq, 1, testing.allocator);

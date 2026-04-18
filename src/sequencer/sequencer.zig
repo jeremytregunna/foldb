@@ -18,6 +18,7 @@ pub const EpochNum = types_mod.EpochNum;
 pub const EpochDecision = types_mod.EpochDecision;
 pub const OrderingEntry = types_mod.OrderingEntry;
 pub const SubmitResult = types_mod.SubmitResult;
+pub const SubmitHandle = types_mod.SubmitHandle;
 pub const IdempotencyCache = idempotency_mod.IdempotencyCache;
 pub const EpochBatcher = epoch_mod.EpochBatcher;
 
@@ -150,75 +151,86 @@ pub const Sequencer = struct {
         return &self.partition_logs[partition];
     }
 
-    /// Submit a pre-serialized TxnIntent payload (bytes) for sequencing.
-    /// Idempotent on (client_id, client_seq). Returns the assigned global seq and partition.
+    /// Submit a pre-serialized TxnIntent payload for sequencing.
+    /// Infallible — errors surface when the caller calls awaitCommit() on the returned handle.
+    /// Idempotent on (client_id, client_seq_num).
     pub fn submitBytes(
         self: *Sequencer,
+        io: std.Io,
         intent_payload: []const u8,
         client_id: u64,
         client_seq_num: u64,
-    ) !SubmitResult {
-        // Idempotency check
-        if (self.idempotency.lookup(client_id, client_seq_num)) |existing_seq| {
-            const partition: PartitionId = @intCast(existing_seq % @as(Seq, self.partition_logs.len));
-            return .{ .seq = existing_seq, .partition = partition };
-        }
-
-        // Single-entry epoch (M7 synchronous mode)
-        try self.batcher.submit(client_id, client_seq_num);
-
-        const decision = try self.batcher.closeEpoch(
-            self.next_epoch,
-            self.next_seq,
-            @intCast(self.partition_logs.len),
-            self.alloc,
-        );
-        defer self.alloc.free(decision.entries);
-
-        self.next_epoch += 1;
-        self.next_seq += @intCast(decision.entries.len);
-
-        // Replicate ordering decision via Raft
-        var payload_buf: std.ArrayList(u8) = .empty;
-        defer payload_buf.deinit(self.alloc);
-        try types_mod.serializeEpochDecision(decision, &payload_buf, self.alloc);
-
-        var outputs: std.ArrayList(raft_mod.Output) = .empty;
-        defer outputs.deinit(self.alloc);
-
-        const ordering_seq = try self.raft.propose(
-            &self.raft_log,
-            .epoch_decision,
-            payload_buf.items,
-            &outputs,
-        ) orelse return SequencerError.NotLeader;
-        _ = ordering_seq;
-
-        // With 0 peers, propose() + broadcastAppendEntries() + checkCommit() commits immediately.
-        // Process persist outputs to keep durable state current.
-        for (outputs.items) |output| {
-            switch (output) {
-                .persist => |p| {
-                    raft_mod.savePersistentState(
-                        self.raft_path,
-                        self.alloc,
-                        p.term,
-                        p.voted_for,
-                    ) catch {};
-                },
-                else => {},
-            }
-        }
-
-        // Append TxnIntent to assigned partition log at global seq
-        const entry = decision.entries[0]; // single-entry epoch
-        const partition_log = &self.partition_logs[entry.partition];
-        const log_entry = LogEntry.create(entry.seq, 0, .txn_intent, intent_payload);
-        try partition_log.appendEntryAt(log_entry);
-
-        // Record idempotency
-        try self.idempotency.record(client_id, client_seq_num, entry.seq);
-
-        return .{ .seq = entry.seq, .partition = entry.partition };
+    ) SubmitHandle {
+        return .{ .future = io.async(doCommit, .{ self, intent_payload, client_id, client_seq_num }) };
     }
 };
+
+/// Free function passed to io.async — contains all durable commit work.
+/// For M7 single-node io.async executes this synchronously; future milestones block here on
+/// multi-node Raft round-trips.
+fn doCommit(
+    sequencer: *Sequencer,
+    intent_payload: []const u8,
+    client_id: u64,
+    client_seq_num: u64,
+) anyerror!SubmitResult {
+    // Idempotency fast path
+    if (sequencer.idempotency.lookup(client_id, client_seq_num)) |existing_seq| {
+        const partition: PartitionId = @intCast(existing_seq % @as(Seq, sequencer.partition_logs.len));
+        return .{ .seq = existing_seq, .partition = partition };
+    }
+
+    // Single-entry epoch (M7 synchronous mode)
+    try sequencer.batcher.submit(client_id, client_seq_num);
+
+    const decision = try sequencer.batcher.closeEpoch(
+        sequencer.next_epoch,
+        sequencer.next_seq,
+        @intCast(sequencer.partition_logs.len),
+        sequencer.alloc,
+    );
+    defer sequencer.alloc.free(decision.entries);
+
+    sequencer.next_epoch += 1;
+    sequencer.next_seq += @intCast(decision.entries.len);
+
+    // Replicate ordering decision via Raft
+    var payload_buf: std.ArrayList(u8) = .empty;
+    defer payload_buf.deinit(sequencer.alloc);
+    try types_mod.serializeEpochDecision(decision, &payload_buf, sequencer.alloc);
+
+    var outputs: std.ArrayList(raft_mod.Output) = .empty;
+    defer outputs.deinit(sequencer.alloc);
+
+    const ordering_seq = try sequencer.raft.propose(
+        &sequencer.raft_log,
+        .epoch_decision,
+        payload_buf.items,
+        &outputs,
+    ) orelse return SequencerError.NotLeader;
+    _ = ordering_seq;
+
+    for (outputs.items) |output| {
+        switch (output) {
+            .persist => |p| {
+                raft_mod.savePersistentState(
+                    sequencer.raft_path,
+                    sequencer.alloc,
+                    p.term,
+                    p.voted_for,
+                ) catch {};
+            },
+            else => {},
+        }
+    }
+
+    // Append TxnIntent to assigned partition log at global seq
+    const entry = decision.entries[0]; // single-entry epoch
+    const partition_log = &sequencer.partition_logs[entry.partition];
+    const log_entry = LogEntry.create(entry.seq, 0, .txn_intent, intent_payload);
+    try partition_log.appendEntryAt(log_entry);
+
+    try sequencer.idempotency.record(client_id, client_seq_num, entry.seq);
+
+    return .{ .seq = entry.seq, .partition = entry.partition };
+}

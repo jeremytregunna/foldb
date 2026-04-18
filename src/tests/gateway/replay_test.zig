@@ -189,24 +189,24 @@ test "Gateway Replay: INSERT UPDATE DELETE produces byte-equal SSTables" {
     var i: i64 = 1;
     while (i <= 10) : (i += 1) {
         const params = [_]ColumnValue{ .{ .int64 = i }, .{ .int64 = i * 100 } };
-        _ = try gw_a.execute(insert_hash_a, &params, &.{});
-        _ = try gw_b.execute(insert_hash_b, &params, &.{});
+        _ = try gw_a.execute(std.testing.io, insert_hash_a, &params, &.{});
+        _ = try gw_b.execute(std.testing.io, insert_hash_b, &params, &.{});
     }
 
     // 5 UPDATEs (ids 1–5, new balance = id * 200)
     i = 1;
     while (i <= 5) : (i += 1) {
         const params = [_]ColumnValue{ .{ .int64 = i }, .{ .int64 = i * 200 } };
-        _ = try gw_a.execute(update_hash_a, &params, &.{});
-        _ = try gw_b.execute(update_hash_b, &params, &.{});
+        _ = try gw_a.execute(std.testing.io, update_hash_a, &params, &.{});
+        _ = try gw_b.execute(std.testing.io, update_hash_b, &params, &.{});
     }
 
     // 3 DELETEs (ids 8–10)
     i = 8;
     while (i <= 10) : (i += 1) {
         const params = [_]ColumnValue{.{ .int64 = i }};
-        _ = try gw_a.execute(delete_hash_a, &params, &.{});
-        _ = try gw_b.execute(delete_hash_b, &params, &.{});
+        _ = try gw_a.execute(std.testing.io, delete_hash_a, &params, &.{});
+        _ = try gw_b.execute(std.testing.io, delete_hash_b, &params, &.{});
     }
 
     try gw_a.flushAll();
@@ -261,32 +261,32 @@ test "Gateway Replay: multi-table workload produces byte-equal SSTables" {
     var i: i64 = 1;
     while (i <= 8) : (i += 1) {
         const p = [_]ColumnValue{ .{ .int64 = i }, .{ .int64 = i * 10 } };
-        _ = try gw_a.execute(ins_user_a, &p, &.{});
-        _ = try gw_b.execute(ins_user_b, &p, &.{});
+        _ = try gw_a.execute(std.testing.io, ins_user_a, &p, &.{});
+        _ = try gw_b.execute(std.testing.io, ins_user_b, &p, &.{});
     }
 
     // Insert 12 posts
     i = 1;
     while (i <= 12) : (i += 1) {
         const p = [_]ColumnValue{ .{ .int64 = i }, .{ .int64 = @mod(i - 1, 8) + 1 }, .{ .int64 = i * 5 } };
-        _ = try gw_a.execute(ins_post_a, &p, &.{});
-        _ = try gw_b.execute(ins_post_b, &p, &.{});
+        _ = try gw_a.execute(std.testing.io, ins_post_a, &p, &.{});
+        _ = try gw_b.execute(std.testing.io, ins_post_b, &p, &.{});
     }
 
     // Update scores for users 1–4
     i = 1;
     while (i <= 4) : (i += 1) {
         const p = [_]ColumnValue{ .{ .int64 = i }, .{ .int64 = i * 100 } };
-        _ = try gw_a.execute(upd_score_a, &p, &.{});
-        _ = try gw_b.execute(upd_score_b, &p, &.{});
+        _ = try gw_a.execute(std.testing.io, upd_score_a, &p, &.{});
+        _ = try gw_b.execute(std.testing.io, upd_score_b, &p, &.{});
     }
 
     // Delete posts 9–12
     i = 9;
     while (i <= 12) : (i += 1) {
         const p = [_]ColumnValue{.{ .int64 = i }};
-        _ = try gw_a.execute(del_post_a, &p, &.{});
-        _ = try gw_b.execute(del_post_b, &p, &.{});
+        _ = try gw_a.execute(std.testing.io, del_post_a, &p, &.{});
+        _ = try gw_b.execute(std.testing.io, del_post_b, &p, &.{});
     }
 
     try gw_a.flushAll();
@@ -340,8 +340,8 @@ test "Gateway Replay: compaction-triggering load produces byte-equal SSTables" {
         while (j < 8) : (j += 1) {
             const id = round * 8 + j + 1;
             const p = [_]ColumnValue{ .{ .int64 = id }, .{ .int64 = id * 3 } };
-            _ = try gw_a.execute(ins_a, &p, &.{});
-            _ = try gw_b.execute(ins_b, &p, &.{});
+            _ = try gw_a.execute(std.testing.io, ins_a, &p, &.{});
+            _ = try gw_b.execute(std.testing.io, ins_b, &p, &.{});
         }
         try gw_a.flushAll();
         try gw_b.flushAll();
@@ -351,16 +351,16 @@ test "Gateway Replay: compaction-triggering load produces byte-equal SSTables" {
     var j: i64 = 1;
     while (j <= 4) : (j += 1) {
         const p = [_]ColumnValue{ .{ .int64 = j }, .{ .int64 = j * 1000 } };
-        _ = try gw_a.execute(upd_a, &p, &.{});
-        _ = try gw_b.execute(upd_b, &p, &.{});
+        _ = try gw_a.execute(std.testing.io, upd_a, &p, &.{});
+        _ = try gw_b.execute(std.testing.io, upd_b, &p, &.{});
     }
 
     // Delete round-1 entries
     j = 9;
     while (j <= 11) : (j += 1) {
         const p = [_]ColumnValue{.{ .int64 = j }};
-        _ = try gw_a.execute(del_a, &p, &.{});
-        _ = try gw_b.execute(del_b, &p, &.{});
+        _ = try gw_a.execute(std.testing.io, del_a, &p, &.{});
+        _ = try gw_b.execute(std.testing.io, del_b, &p, &.{});
     }
 
     try gw_a.flushAll();

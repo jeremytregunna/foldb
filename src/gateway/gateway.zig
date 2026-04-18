@@ -166,6 +166,7 @@ pub const Gateway = struct {
     /// Routes through the Sequencer → partition log → SqlExecutor.run().
     pub fn execute(
         self: *Gateway,
+        io: std.Io,
         hash: QueryHash,
         params: []const ColumnValue,
         nondet: []const ResolvedValue,
@@ -185,20 +186,18 @@ pub const Gateway = struct {
             &hash,
             self.client_id,
             self.client_seq,
-            &.{}, // read_set_hint: empty for M7
-            &.{}, // write_set_hint: empty for M7
+            &.{},
+            &.{},
             params_bytes,
             nondet,
             &intent_buf,
             self.alloc,
         );
 
-        // Submit to Sequencer — assigns global seq, appends to partition log
-        const result = try self.sequencer.submitBytes(
-            intent_buf.items,
-            self.client_id,
-            self.client_seq,
-        );
+        // Submit to Sequencer — infallible; blocks on awaitCommit
+        var handle = self.sequencer.submitBytes(io, intent_buf.items, self.client_id, self.client_seq);
+        defer if (handle.future.cancel(io)) |_| {} else |_| {};
+        const result = try handle.awaitCommit(io);
 
         // Read committed entry from partition log
         const partition_log = self.sequencer.partitionLog(result.partition);
