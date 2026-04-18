@@ -83,7 +83,7 @@ test "Durability: data survives deinit and re-init" {
 
     var expected_seq: Seq = 0;
     for (payloads) |payload| {
-        const seq = try log_instance.append(TxnIntent.init(payload));
+        const seq = try log_instance.append(TxnIntent.initTest(payload, 1, 1));
         expected_seq = seq;
     }
 
@@ -107,7 +107,9 @@ test "Durability: data survives deinit and re-init" {
     try testing.expectEqual(@as(usize, 5), entries.len);
     for (entries, 0..) |entry, i| {
         try testing.expectEqual(@as(Seq, @intCast(i + 1)), entry.header.seq);
-        try testing.expectEqualSlices(u8, payloads[i], entry.payload);
+        const intent = try TxnIntent.deserializeFrom(entry.payload, testing.allocator);
+        defer intent.deinit(testing.allocator);
+        try testing.expectEqualSlices(u8, payloads[i], intent.params);
         try testing.expect(entry.verifyCrc());
     }
 }
@@ -120,15 +122,15 @@ test "Durability: data survives multiple deinit/init cycles" {
     }
 
     var log_instance = try Log.init(temp_path, 1);
-    _ = try log_instance.append(TxnIntent.init("cycle1_data"));
+    _ = try log_instance.append(TxnIntent.initTest("cycle1_data", 1, 1));
     log_instance.deinit();
 
     log_instance = try Log.init(temp_path, 1);
-    _ = try log_instance.append(TxnIntent.init("cycle2_data"));
+    _ = try log_instance.append(TxnIntent.initTest("cycle2_data", 1, 2));
     log_instance.deinit();
 
     log_instance = try Log.init(temp_path, 1);
-    _ = try log_instance.append(TxnIntent.init("cycle3_data"));
+    _ = try log_instance.append(TxnIntent.initTest("cycle3_data", 1, 3));
     log_instance.deinit();
 
     log_instance = try Log.init(temp_path, 1);
@@ -141,9 +143,21 @@ test "Durability: data survives multiple deinit/init cycles" {
     }
 
     try testing.expectEqual(@as(usize, 3), entries.len);
-    try testing.expectEqualSlices(u8, "cycle1_data", entries[0].payload);
-    try testing.expectEqualSlices(u8, "cycle2_data", entries[1].payload);
-    try testing.expectEqualSlices(u8, "cycle3_data", entries[2].payload);
+    {
+        const intent0 = try TxnIntent.deserializeFrom(entries[0].payload, testing.allocator);
+        defer intent0.deinit(testing.allocator);
+        try testing.expectEqualSlices(u8, "cycle1_data", intent0.params);
+    }
+    {
+        const intent1 = try TxnIntent.deserializeFrom(entries[1].payload, testing.allocator);
+        defer intent1.deinit(testing.allocator);
+        try testing.expectEqualSlices(u8, "cycle2_data", intent1.params);
+    }
+    {
+        const intent2 = try TxnIntent.deserializeFrom(entries[2].payload, testing.allocator);
+        defer intent2.deinit(testing.allocator);
+        try testing.expectEqualSlices(u8, "cycle3_data", intent2.params);
+    }
 }
 
 test "Durability: sealed segments persist correctly" {
@@ -158,7 +172,7 @@ test "Durability: sealed segments persist correctly" {
 
     var i: usize = 0;
     while (i < 6) : (i += 1) {
-        _ = try log_instance.append(TxnIntent.init("data"));
+        _ = try log_instance.append(TxnIntent.initTest("data", 1, 1));
     }
 
     try testing.expectEqual(@as(usize, 3), log_instance.sealed_segments.items.len);
@@ -193,7 +207,7 @@ test "Durability: CRC verification on re-read" {
     };
 
     for (payloads) |payload| {
-        _ = try log_instance.append(TxnIntent.init(payload));
+        _ = try log_instance.append(TxnIntent.initTest(payload, 1, 1));
     }
 
     log_instance.deinit();
@@ -221,7 +235,7 @@ test "Durability: partial writes detected on reopen" {
     }
 
     var log_instance = try Log.init(temp_path, 1);
-    _ = try log_instance.append(TxnIntent.init("valid_entry"));
+    _ = try log_instance.append(TxnIntent.initTest("valid_entry", 1, 1));
     try log_instance.seal();
     log_instance.deinit();
 
@@ -257,7 +271,7 @@ test "Durability: header CRC protects against corruption" {
     }
 
     var log_instance = try Log.init(temp_path, 1);
-    _ = try log_instance.append(TxnIntent.init("entry"));
+    _ = try log_instance.append(TxnIntent.initTest("entry", 1, 1));
     try log_instance.seal();
     log_instance.deinit();
 
@@ -303,7 +317,7 @@ test "Durability: large payloads survive round-trip" {
     }
 
     var log_instance = try Log.init(temp_path, 1);
-    const seq = try log_instance.append(TxnIntent.init(large_payload));
+    const seq = try log_instance.append(TxnIntent.initTest(large_payload, 1, 1));
     log_instance.deinit();
 
     log_instance = try Log.init(temp_path, 1);
@@ -316,7 +330,9 @@ test "Durability: large payloads survive round-trip" {
     }
 
     try testing.expectEqual(@as(usize, 1), entries.len);
-    try testing.expectEqualSlices(u8, large_payload, entries[0].payload);
+    const intent = try TxnIntent.deserializeFrom(entries[0].payload, testing.allocator);
+    defer intent.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, large_payload, intent.params);
     try testing.expect(entries[0].verifyCrc());
 }
 
@@ -336,7 +352,7 @@ test "Durability: empty log survives deinit/init" {
     const h = try log_instance.head();
     try testing.expectEqual(@as(Seq, 0), h);
 
-    const seq = try log_instance.append(TxnIntent.init("first"));
+    const seq = try log_instance.append(TxnIntent.initTest("first", 1, 1));
     try testing.expectEqual(@as(Seq, 1), seq);
 }
 
@@ -350,7 +366,7 @@ test "Durability: node_id preserved across restarts" {
     const node_id: NodeId = 42;
 
     var log_instance = try Log.init(temp_path, node_id);
-    _ = try log_instance.append(TxnIntent.init("entry"));
+    _ = try log_instance.append(TxnIntent.initTest("entry", 1, 1));
     log_instance.deinit();
 
     log_instance = try Log.init(temp_path, node_id);

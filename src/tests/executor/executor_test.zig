@@ -248,7 +248,7 @@ fn makeEntry(
 ) !LogEntry {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(alloc);
-    try serializeTxnIntent(hash, 0, seq, params, nondet, &payload, alloc);
+    try serializeTxnIntent(hash, 0, seq, &.{}, &.{}, params, nondet, &payload, alloc);
     const payload_copy = try alloc.dupe(u8, payload.items);
     return LogEntry.create(seq, 1, .txn_intent, payload_copy);
 }
@@ -669,7 +669,7 @@ test "txn_intent round-trip preserves all fields" {
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(alloc);
-    try serializeTxnIntent(&hash, 42, 7, params, &nondet, &buf, alloc);
+    try serializeTxnIntent(&hash, 42, 7, &.{}, &.{}, params, &nondet, &buf, alloc);
 
     var decoded = try deserializeTxnIntent(buf.items, alloc);
     defer decoded.deinit();

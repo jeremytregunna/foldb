@@ -10,26 +10,24 @@ const NodeId = entry_mod.NodeId;
 
 pub const MAGIC: [4]u8 = .{ 'F', 'L', 'O', 'G' };
 pub const VERSION: u32 = 1;
-pub const HEADER_SIZE: usize = 80;
+pub const HEADER_SIZE: usize = 64;
 pub const FOOTER_SIZE: usize = 64;
 
-/// Segment header - 80 bytes on disk (extern struct for deterministic layout):
-/// magic(4) version(4) part_id(4) _pad(4) base_seq(8) node_id(8)
-/// created_at(8) reserved(32) header_crc(4) _end_pad(4)
+/// Segment header - 64 bytes on disk (extern struct for deterministic layout):
+/// base_seq(8) node_id(8) created_at(8) magic(4) version(4) part_id(4) reserved(24) header_crc(4)
 pub const SegmentHeader = extern struct {
-    magic: [4]u8,
-    version: u32,
-    part_id: u32,
-    _pad: u32,
     base_seq: Seq,
     node_id: NodeId,
     created_at: i64,
-    reserved: [32]u8,
+    magic: [4]u8,
+    version: u32,
+    part_id: u32,
+    reserved: [24]u8,
     header_crc: u32,
 
     comptime {
-        // Verify layout matches HEADER_SIZE (80 bytes, last 4 are end padding).
-        std.debug.assert(@offsetOf(SegmentHeader, "header_crc") == 72);
+        // Verify layout matches HEADER_SIZE (64 bytes).
+        std.debug.assert(@offsetOf(SegmentHeader, "header_crc") == 60);
         std.debug.assert(@sizeOf(SegmentHeader) == HEADER_SIZE);
     }
 
@@ -38,14 +36,13 @@ pub const SegmentHeader = extern struct {
         _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
 
         var header = SegmentHeader{
-            .magic = MAGIC,
-            .version = VERSION,
-            .part_id = 0,
-            ._pad = 0,
             .base_seq = base_seq,
             .node_id = node_id,
             .created_at = ts.sec,
-            .reserved = [_]u8{0} ** 32,
+            .magic = MAGIC,
+            .version = VERSION,
+            .part_id = 0,
+            .reserved = [_]u8{0} ** 24,
             .header_crc = 0,
         };
         header.header_crc = computeHeaderCrc(&header);

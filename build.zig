@@ -361,6 +361,36 @@ pub fn build(b: *std.Build) void {
     const sql_planner_tests = b.addTest(.{ .root_module = sql_planner_test_module });
     const run_sql_planner_tests = b.addRunArtifact(sql_planner_tests);
 
+    // Gateway module
+    const gateway_module = b.createModule(.{
+        .root_source_file = b.path("src/gateway/gateway.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gateway_module.addImport("sql.zig", sql_module);
+    gateway_module.addImport("storage.zig", storage_module);
+    gateway_module.addImport("executor.zig", executor_module);
+    gateway_module.addImport("log.zig", log_module);
+    gateway_module.addImport("registry.zig", sql_module);
+    gateway_module.addImport("executor_bridge.zig", sql_module);
+    gateway_module.addImport("schema.zig", sql_module);
+    gateway_module.addImport("parser.zig", sql_module);
+    gateway_module.addImport("ast.zig", sql_module);
+    gateway_module.addImport("types.zig", executor_module);
+
+    // Gateway unit tests
+    const gateway_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/gateway/gateway_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gateway_test_module.addImport("gateway.zig", gateway_module);
+    gateway_test_module.addImport("sql.zig", sql_module);
+    gateway_test_module.addImport("storage.zig", storage_module);
+    gateway_test_module.addImport("executor.zig", executor_module);
+    const gateway_tests = b.addTest(.{ .root_module = gateway_test_module });
+    const run_gateway_tests = b.addRunArtifact(gateway_tests);
+
     // Unit tests: pure logic, no simulation harness
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
@@ -383,6 +413,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_sql_schema_tests.step);
     test_step.dependOn(&run_sql_planner_tests.step);
     test_step.dependOn(&run_sql_executor_expr_tests.step);
+    test_step.dependOn(&run_gateway_tests.step);
 
     // Deterministic simulation tests
     const dst_step = b.step("dst-test", "Run deterministic simulation tests");

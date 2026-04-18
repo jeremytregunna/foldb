@@ -15,3 +15,4 @@ pub const RegisteredQuery = registry.RegisteredQuery;
 pub const QueryHash = registry.QueryHash;
 pub const SqlExecutor = executor_bridge.SqlExecutor;
 pub const SchemaRegistry = schema.SchemaRegistry;
+pub const ResultSet = executor_bridge.ResultSet;

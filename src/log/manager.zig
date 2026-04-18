@@ -37,6 +37,7 @@ pub const Log = struct {
     path: []u8,
     node_id: NodeId,
     current_seq: Seq,
+    current_term: entry_mod.Epoch, // Raft term for entries appended via append()
     current_segment: Segment,
     segment_max_entries: u32,
     sealed_segments: std.ArrayList(Segment),
@@ -104,6 +105,7 @@ pub const Log = struct {
             .path = try std.heap.page_allocator.dupe(u8, path),
             .node_id = node_id,
             .current_seq = max_seq,
+            .current_term = 0,
             .current_segment = current_segment,
             .segment_max_entries = DEFAULT_SEGMENT_MAX_ENTRIES,
             .sealed_segments = segments,
@@ -134,7 +136,10 @@ pub const Log = struct {
         self.current_seq += 1;
         const seq = self.current_seq;
 
-        const entry = LogEntry.create(seq, 0, .txn_intent, intent.payload);
+        const payload = try intent.serializeTo(std.heap.page_allocator);
+        errdefer std.heap.page_allocator.free(payload);
+
+        const entry = LogEntry.create(seq, self.current_term, .txn_intent, payload);
         try self.current_segment.append(entry);
 
         if (self.current_segment.entry_count >= self.segment_max_entries) {
@@ -255,6 +260,12 @@ pub const Log = struct {
         }
     }
 
+    /// Updates the current term (epoch) for new entries.
+    /// Called by Raft when the node's term changes.
+    pub fn updateTerm(self: *Log, term: entry_mod.Epoch) void {
+        self.current_term = term;
+    }
+
     /// Append a pre-sequenced entry (used by Raft followers).
     /// The entry's seq must equal current_seq + 1.
     pub fn appendEntry(self: *Log, entry: LogEntry) !void {
@@ -263,6 +274,7 @@ pub const Log = struct {
 
         try self.current_segment.append(entry);
         self.current_seq = entry.header.seq;
+        self.current_term = entry.header.epoch; // Update term to match appended entry
 
         if (self.current_segment.entry_count >= self.segment_max_entries) {
             try self.rotate();

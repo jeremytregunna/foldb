@@ -1,14 +1,13 @@
 /// Foldb Write-Ahead Log module.
 ///
 /// Provides core types and utilities for the log implementation.
-
 const crc = @import("crc.zig");
 const entry = @import("entry.zig");
 const segment = @import("segment.zig");
 const manager = @import("manager.zig");
 
 // Re-export CRC utilities
-pub usingnamespace crc;
+pub const crc32c = crc.crc32c;
 
 // Re-export entry types
 pub const Seq = entry.Seq;

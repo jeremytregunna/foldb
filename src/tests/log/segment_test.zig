@@ -108,9 +108,9 @@ test "Segment: EntryKind fromByte" {
 
 test "Segment: TxnIntent" {
     const payload = "transaction payload";
-    const intent = TxnIntent.init(payload);
+    const intent = TxnIntent.initTest(payload, 1, 1);
 
-    try testing.expectEqualSlices(u8, payload, intent.payload);
+    try testing.expectEqualSlices(u8, payload, intent.params);
 }
 
 test "Segment: IndexEntry size" {
@@ -118,7 +118,7 @@ test "Segment: IndexEntry size" {
 }
 
 test "Segment: header size constant" {
-    try testing.expectEqual(@as(usize, 80), HEADER_SIZE);
+    try testing.expectEqual(@as(usize, 64), HEADER_SIZE);
 }
 
 test "Segment: footer size constant" {

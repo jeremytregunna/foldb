@@ -812,7 +812,10 @@ pub const SqlExecutor = struct {
                     if (prev_order_vals) |pv| {
                         var same = true;
                         for (cur, pv) |cv, pval| {
-                            if (!cv.eql(pval)) { same = false; break; }
+                            if (!cv.eql(pval)) {
+                                same = false;
+                                break;
+                            }
                         }
                         if (!same) {
                             rank = count;
@@ -839,7 +842,10 @@ pub const SqlExecutor = struct {
                     if (prev_order_vals) |pv| {
                         var same = true;
                         for (cur, pv) |cv, pval| {
-                            if (!cv.eql(pval)) { same = false; break; }
+                            if (!cv.eql(pval)) {
+                                same = false;
+                                break;
+                            }
                         }
                         if (!same) {
                             rank += 1;
@@ -939,8 +945,7 @@ pub const SqlExecutor = struct {
                                 errdefer ctx.alloc.free(new_vals);
                                 for (tbl.columns, 0..) |col, ci| {
                                     new_vals[ci] = if (ci < td.vals.len)
-                                        if (td.vals[ci]) |cv| cv.dupe(ctx.alloc) catch defaultValue(col.typ)
-                                        else defaultValue(col.typ)
+                                        if (td.vals[ci]) |cv| cv.dupe(ctx.alloc) catch defaultValue(col.typ) else defaultValue(col.typ)
                                     else
                                         defaultValue(col.typ);
                                 }
