@@ -245,6 +245,27 @@ pub fn build(b: *std.Build) void {
     executor_module.addImport("storage.zig", storage_module);
     executor_module.addImport("log.zig", log_module);
 
+    // PartitionSet module (separate from executor to avoid circular imports)
+    const partition_set_module = b.createModule(.{
+        .root_source_file = b.path("src/executor/partition_set.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    partition_set_module.addImport("executor.zig", executor_module);
+
+    // Cross-partition tests (M8)
+    const cross_partition_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/executor/cross_partition_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cross_partition_test_module.addImport("executor.zig", executor_module);
+    cross_partition_test_module.addImport("partition_set.zig", partition_set_module);
+    cross_partition_test_module.addImport("storage.zig", storage_module);
+    cross_partition_test_module.addImport("log.zig", log_module);
+    const cross_partition_tests = b.addTest(.{ .root_module = cross_partition_test_module });
+    const run_cross_partition_tests = b.addRunArtifact(cross_partition_tests);
+
     // Executor unit tests
     const executor_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/executor/executor_test.zig"),
@@ -511,6 +532,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_storage_sstable_tests.step);
     test_step.dependOn(&run_storage_lsm_tests.step);
     test_step.dependOn(&run_executor_tests.step);
+    test_step.dependOn(&run_cross_partition_tests.step);
     test_step.dependOn(&run_sql_lexer_tests.step);
     test_step.dependOn(&run_sql_parser_tests.step);
     test_step.dependOn(&run_sql_registry_tests.step);
@@ -533,4 +555,5 @@ pub fn build(b: *std.Build) void {
     dst_step.dependOn(&run_sql_replay_tests.step);
     dst_step.dependOn(&run_log_replay_tests.step);
     dst_step.dependOn(&run_gateway_replay_tests.step);
+    dst_step.dependOn(&run_cross_partition_tests.step);
 }

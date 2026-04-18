@@ -4,6 +4,13 @@ const types_mod = @import("types.zig");
 const registry_mod = @import("registry.zig");
 const log_mod = @import("log.zig");
 const storage_mod = @import("storage.zig");
+const exchange_mod = @import("exchange.zig");
+const determinism_mod = @import("determinism.zig");
+
+// Verify determinism invariants at compile time.
+comptime {
+    determinism_mod.verifyExecutorModule();
+}
 
 pub const QueryHash = types_mod.QueryHash;
 pub const ResolvedValue = types_mod.ResolvedValue;
@@ -14,21 +21,31 @@ pub const TxnIntentDecoded = types_mod.TxnIntentDecoded;
 pub const TxnIntentHeader = types_mod.TxnIntentHeader;
 pub const serializeTxnIntent = types_mod.serializeTxnIntent;
 pub const deserializeTxnIntent = types_mod.deserializeTxnIntent;
+pub const PartitionId = types_mod.PartitionId;
 
 pub const QueryContext = registry_mod.QueryContext;
 pub const QueryHandler = registry_mod.QueryHandler;
+pub const CrossPartitionQueryHandler = registry_mod.CrossPartitionQueryHandler;
+pub const RegisteredHandler = registry_mod.RegisteredHandler;
 pub const QueryRegistry = registry_mod.QueryRegistry;
+pub const ForeignReadRequest = exchange_mod.ForeignReadRequest;
+pub const ForeignRow = exchange_mod.ForeignRow;
 
 pub const LogEntry = log_mod.LogEntry;
 pub const EntryKind = log_mod.EntryKind;
 
 pub const Storage = storage_mod.Storage;
 pub const Mutation = storage_mod.Mutation;
+pub const ColumnValue = storage_mod.ColumnValue;
+pub const Row = storage_mod.Row;
 pub const Seq = types_mod.Seq;
 
 pub const ExecutorError = error{
     ConstraintViolation,
 };
+
+// Note: PartitionSet is in partition_set.zig (separate module to avoid circular imports).
+// Import it via build.zig's partition_set_module, not through executor.zig.
 
 pub const Executor = struct {
     storage: *Storage,
@@ -53,6 +70,10 @@ pub const Executor = struct {
         try self.registry.register(hash, handler);
     }
 
+    pub fn registerCross(self: *Executor, hash: [32]u8, handler: CrossPartitionQueryHandler) !void {
+        try self.registry.registerCross(hash, handler);
+    }
+
     pub fn currentSeq(self: *const Executor) Seq {
         return self.committed_seq;
     }
@@ -74,8 +95,16 @@ pub const Executor = struct {
         };
         defer decoded.deinit();
 
-        const handler = self.registry.lookup(decoded.query_hash.*) orelse {
+        const registered = self.registry.lookup(decoded.query_hash.*) orelse {
             return .{ .abort = .{ .code = .missing_query, .detail = "unknown query hash" } };
+        };
+
+        // Single-partition handlers only. Cross-partition txns must go through PartitionSet.
+        const handler = switch (registered) {
+            .single => |h| h,
+            .cross => {
+                return .{ .abort = .{ .code = .missing_query, .detail = "cross-partition txn requires PartitionSet" } };
+            },
         };
 
         const ctx = QueryContext{
@@ -110,3 +139,4 @@ pub const Executor = struct {
         return .{ .ok = .{ .rows_affected = rows } };
     }
 };
+
