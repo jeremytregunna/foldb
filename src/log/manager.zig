@@ -279,8 +279,7 @@ pub const Log = struct {
     }
 
     pub fn truncate_prefix(self: *Log, before_seq: Seq) !void {
-        const safe_seq = if (self.last_snapshot_seq == 0) before_seq
-                         else @min(before_seq, self.last_snapshot_seq);
+        const safe_seq = if (self.last_snapshot_seq == 0) before_seq else @min(before_seq, self.last_snapshot_seq);
         var removed: usize = 0;
         for (self.sealed_segments.items) |*seg| {
             if (seg.last_seq < safe_seq) {

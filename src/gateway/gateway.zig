@@ -314,6 +314,33 @@ pub const Gateway = struct {
                 const tbl = self.schema.getTable(ct.name) orelse return error.TableNotFound;
                 try self.storage.registerTable(try sqlTableToStorage(tbl, self.storage_schema_arena.allocator()));
             },
+            .create_index => |ci| {
+                const tbl = self.schema.getTable(ci.table) orelse return error.TableNotFound;
+                if (tbl.indexes.len == 0) return;
+                const idx = tbl.indexes[tbl.indexes.len - 1];
+                const kind: storage_mod.IndexKind = switch (idx.kind) {
+                    .vector => .vector,
+                    .json_path => .json_path,
+                    else => return, // ordered/hash indexes not specialty — no storage structure
+                };
+                const column_idx: u32 = if (idx.columns.len > 0) idx.columns[0] else 0;
+                const json_paths: []const []const u8 = switch (idx.extra) {
+                    .json_paths => |p| p,
+                    else => &.{},
+                };
+                const vector_dim: u32 = switch (idx.extra) {
+                    .vector_dim => |d| d,
+                    else => 0,
+                };
+                try self.storage.registerIndex(.{
+                    .id = idx.id,
+                    .table_id = tbl.id,
+                    .column_idx = column_idx,
+                    .kind = kind,
+                    .json_paths = json_paths,
+                    .vector_dim = vector_dim,
+                });
+            },
             else => {},
         }
     }

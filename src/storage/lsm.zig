@@ -174,6 +174,113 @@ pub const LSM = struct {
         return local_path;
     }
 
+    /// Full multi-level scan: merges memtable + all local SSTable levels.
+    /// Returns all live rows in range at at_seq, sorted by key ASC.
+    pub fn scan(self: *LSM, range: KeyRange, at_seq: Seq, alloc: std.mem.Allocator) ![]Row {
+        var all_entries: std.ArrayList(MergeEntry) = .empty;
+        defer {
+            for (all_entries.items) |*e| {
+                alloc.free(e.key);
+                if (e.values) |vs| {
+                    for (vs) |v| v.freeIfOwned(alloc);
+                    alloc.free(vs);
+                }
+            }
+            all_entries.deinit(alloc);
+        }
+
+        // 1. Memtable (sorted key ASC, seq DESC; break on past-end)
+        for (self.memtable.entries.items) |entry| {
+            if (entry.seq > at_seq) continue;
+            if (range.end) |e| {
+                if (std.mem.order(u8, entry.key, e) != .lt) break;
+            }
+            if (!range.contains(entry.key)) continue;
+            const key_copy = try alloc.dupe(u8, entry.key);
+            errdefer alloc.free(key_copy);
+            var vals: ?[]ColumnValue = null;
+            if (!entry.is_tombstone) {
+                if (entry.values) |vs| {
+                    const vc = try alloc.alloc(ColumnValue, vs.len);
+                    errdefer alloc.free(vc);
+                    for (vs, 0..) |v, i| vc[i] = try v.dupe(alloc);
+                    vals = vc;
+                }
+            }
+            try all_entries.append(alloc, .{
+                .key = key_copy,
+                .seq = entry.seq,
+                .values = vals,
+                .is_tombstone = entry.is_tombstone,
+            });
+        }
+
+        // 2. All SSTable levels (skip remote-only L3 files)
+        for (&self.levels) |*level| {
+            for (level.files.items) |*meta| {
+                if (!fileExists(meta.path)) continue;
+                try self.collectRangeFromFile(meta, range, at_seq, &all_entries, alloc);
+            }
+        }
+
+        // 3. Sort: key ASC, seq DESC
+        std.sort.pdq(MergeEntry, all_entries.items, {}, mergeEntryCmp);
+
+        // 4. Deduplicate: first (most-recent) entry per key; skip tombstones
+        var rows: std.ArrayListUnmanaged(Row) = .empty;
+        errdefer {
+            for (rows.items) |*r| r.deinit(alloc);
+            rows.deinit(alloc);
+        }
+        var last_key: ?[]const u8 = null;
+        for (all_entries.items) |e| {
+            if (last_key) |lk| {
+                if (std.mem.eql(u8, lk, e.key)) continue;
+            }
+            last_key = e.key;
+            if (e.is_tombstone) continue;
+            const vals = e.values orelse &.{};
+            const key_copy = try alloc.dupe(u8, e.key);
+            errdefer alloc.free(key_copy);
+            const vals_copy = try alloc.alloc(ColumnValue, vals.len);
+            errdefer alloc.free(vals_copy);
+            for (vals, 0..) |v, i| vals_copy[i] = try v.dupe(alloc);
+            try rows.append(alloc, Row{ .key = key_copy, .seq = e.seq, .values = vals_copy });
+        }
+        return rows.toOwnedSlice(alloc);
+    }
+
+    fn collectRangeFromFile(self: *LSM, meta: *const SSTableMeta, range: KeyRange, at_seq: Seq, out: *std.ArrayList(MergeEntry), alloc: std.mem.Allocator) !void {
+        var reader = try SSTableReader.open(meta.path, self.schema, alloc);
+        defer reader.deinit();
+
+        for (0..reader.header.block_count) |bi| {
+            const blk = try reader.readBlock(bi);
+            defer alloc.free(blk);
+            const block_reader = try @import("block.zig").BlockReader.init(blk, self.schema);
+            for (0..block_reader.row_count) |ri| {
+                const kv = try block_reader.readKey(@intCast(ri));
+                if (kv.seq > at_seq) continue;
+                if (range.end) |e| {
+                    if (std.mem.order(u8, kv.key, e) != .lt) return;
+                }
+                if (!range.contains(kv.key)) continue;
+                const key_copy = try alloc.dupe(u8, kv.key);
+                errdefer alloc.free(key_copy);
+                var vals: ?[]ColumnValue = null;
+                if (!kv.is_tombstone) {
+                    vals = try block_reader.readRowValues(@intCast(ri), alloc);
+                }
+                try out.append(alloc, .{
+                    .key = key_copy,
+                    .seq = kv.seq,
+                    .values = vals,
+                    .is_tombstone = kv.is_tombstone,
+                });
+            }
+        }
+    }
+
     pub fn flushMemtable(self: *LSM) !void {
         if (self.memtable.isEmpty()) return;
         const path = try self.nextFilePath(0);

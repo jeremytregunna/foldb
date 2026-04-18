@@ -262,3 +262,99 @@ test "INSERT plan maps column names to IDs" {
     try std.testing.expect(row[1].* == .param);
     try std.testing.expectEqual(@as(u32, 1), row[1].param);
 }
+
+test "planner sets index_hint when table has vector index" {
+    const alloc = std.testing.allocator;
+    var sr = schema_mod.SchemaRegistry.init(alloc);
+    defer sr.deinit();
+
+    _ = try sr.createTable(.{
+        .name = "vecs",
+        .columns = &[_]ast_mod.ColumnDef{
+            .{ .name = "id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
+            .{ .name = "emb", .typ = .bytes, .nullable = .not_null, .span = zero_span },
+        },
+        .primary_key = .{ .columns = &.{"id"} },
+    });
+    try sr.createIndex(.{
+        .name = "emb_vec",
+        .unique = false,
+        .kind = .{ .vector = 4 },
+        .table = "vecs",
+        .columns = &.{"emb"},
+    });
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const parsed = try parser_mod.parse("SELECT id FROM vecs", arena_alloc);
+    var planner = plan_mod.Planner.init(arena_alloc, &sr);
+    const ep = try planner.planStmt(parsed.stmts[0], &.{});
+
+    const select = ep.stmts[0].select;
+    try std.testing.expect(select.* == .project);
+    const scan_node = select.project.input;
+    try std.testing.expect(scan_node.* == .scan);
+    try std.testing.expect(scan_node.scan.index_hint != null);
+}
+
+test "planner sets index_hint when table has json_path index" {
+    const alloc = std.testing.allocator;
+    var sr = schema_mod.SchemaRegistry.init(alloc);
+    defer sr.deinit();
+
+    _ = try sr.createTable(.{
+        .name = "docs",
+        .columns = &[_]ast_mod.ColumnDef{
+            .{ .name = "id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
+            .{ .name = "body", .typ = .bytes, .nullable = .not_null, .span = zero_span },
+        },
+        .primary_key = .{ .columns = &.{"id"} },
+    });
+    // Allocate paths with sr's allocator so deinit() can free them correctly
+    const declared_paths = try alloc.alloc([]const u8, 1);
+    declared_paths[0] = "$.status";
+    try sr.createIndex(.{
+        .name = "body_json",
+        .unique = false,
+        .kind = .{ .json_path = declared_paths },
+        .table = "docs",
+        .columns = &.{"body"},
+    });
+    // declared_paths is now owned by sr; sr.deinit() will free it
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const parsed = try parser_mod.parse("SELECT id FROM docs", arena_alloc);
+    var planner = plan_mod.Planner.init(arena_alloc, &sr);
+    const ep = try planner.planStmt(parsed.stmts[0], &.{});
+
+    const select = ep.stmts[0].select;
+    try std.testing.expect(select.* == .project);
+    const scan_node = select.project.input;
+    try std.testing.expect(scan_node.* == .scan);
+    try std.testing.expect(scan_node.scan.index_hint != null);
+}
+
+test "planner no index_hint without specialty index" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const parsed = try parser_mod.parse("SELECT id FROM users", arena_alloc);
+    var planner = plan_mod.Planner.init(arena_alloc, &sr);
+    const ep = try planner.planStmt(parsed.stmts[0], &.{});
+
+    const select = ep.stmts[0].select;
+    try std.testing.expect(select.* == .project);
+    const scan_node = select.project.input;
+    try std.testing.expect(scan_node.* == .scan);
+    try std.testing.expectEqual(@as(?schema_mod.IndexId, null), scan_node.scan.index_hint);
+}

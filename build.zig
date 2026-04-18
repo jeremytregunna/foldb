@@ -246,6 +246,46 @@ pub fn build(b: *std.Build) void {
     const storage_snapshot_tests = b.addTest(.{ .root_module = storage_snapshot_test_module });
     const run_storage_snapshot_tests = b.addRunArtifact(storage_snapshot_tests);
 
+    // Vector codec tests
+    const vector_codec_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/storage/vector_codec_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    vector_codec_test_module.addImport("storage.zig", storage_module);
+    const vector_codec_tests = b.addTest(.{ .root_module = vector_codec_test_module });
+    const run_vector_codec_tests = b.addRunArtifact(vector_codec_tests);
+
+    // JSON path tests
+    const json_path_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/storage/json_path_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    json_path_test_module.addImport("storage.zig", storage_module);
+    const json_path_tests = b.addTest(.{ .root_module = json_path_test_module });
+    const run_json_path_tests = b.addRunArtifact(json_path_tests);
+
+    // JSON index tests
+    const json_index_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/storage/json_index_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    json_index_test_module.addImport("storage.zig", storage_module);
+    const json_index_tests = b.addTest(.{ .root_module = json_index_test_module });
+    const run_json_index_tests = b.addRunArtifact(json_index_tests);
+
+    // HNSW tests
+    const hnsw_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/storage/hnsw_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    hnsw_test_module.addImport("storage.zig", storage_module);
+    const hnsw_tests = b.addTest(.{ .root_module = hnsw_test_module });
+    const run_hnsw_tests = b.addRunArtifact(hnsw_tests);
+
     // Storage replay (DST) tests
     const storage_replay_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/storage/replay_test.zig"),
@@ -612,6 +652,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_storage_lsm_tests.step);
     test_step.dependOn(&run_storage_tiered_tests.step);
     test_step.dependOn(&run_storage_snapshot_tests.step);
+    test_step.dependOn(&run_vector_codec_tests.step);
+    test_step.dependOn(&run_json_path_tests.step);
+    test_step.dependOn(&run_json_index_tests.step);
+    test_step.dependOn(&run_hnsw_tests.step);
     test_step.dependOn(&run_executor_tests.step);
     test_step.dependOn(&run_driver_tests.step);
     test_step.dependOn(&run_recovery_tests.step);

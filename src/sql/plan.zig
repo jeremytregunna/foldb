@@ -110,6 +110,7 @@ const PostAggCol = struct {
 pub const ScanNode = struct {
     table_id: schema_mod.TableId,
     columns: []const schema_mod.ColumnId, // which columns to project
+    index_hint: ?schema_mod.IndexId = null, // set when a specialty index is applicable
 };
 
 pub const PkLookupNode = struct {
@@ -692,9 +693,17 @@ pub const Planner = struct {
                     });
                 }
                 const node = try self.arena.create(PlanNode);
+                var index_hint: ?schema_mod.IndexId = null;
+                for (tbl.indexes) |idx| {
+                    if (idx.kind == .vector or idx.kind == .json_path) {
+                        index_hint = idx.id;
+                        break;
+                    }
+                }
                 node.* = .{ .scan = .{
                     .table_id = tbl.id,
                     .columns = try col_ids.toOwnedSlice(self.arena),
+                    .index_hint = index_hint,
                 } };
                 return node;
             },

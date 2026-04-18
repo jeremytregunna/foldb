@@ -451,9 +451,15 @@ test "CDC: cross-partition transaction emits events on both partitions" {
 
     // Two storage directories for two partitions.
     const dir0 = try makeTempDir();
-    defer { removeDirRecursive(dir0); testing.allocator.free(dir0); }
+    defer {
+        removeDirRecursive(dir0);
+        testing.allocator.free(dir0);
+    }
     const dir1 = try makeTempDir();
-    defer { removeDirRecursive(dir1); testing.allocator.free(dir1); }
+    defer {
+        removeDirRecursive(dir1);
+        testing.allocator.free(dir1);
+    }
 
     var s0 = try Storage.init(dir0, testing.allocator);
     defer s0.deinit();
@@ -544,7 +550,10 @@ test "CDC: event.kind is txn_intent" {
     defer mgr.deinit();
 
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     var storage = try Storage.init(dir, testing.allocator);
     defer storage.deinit();
     try storage.registerTable(makeSchema());
@@ -568,7 +577,10 @@ test "CDC: multiple effects in one transaction" {
     defer mgr.deinit();
 
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     var storage = try Storage.init(dir, testing.allocator);
     defer storage.deinit();
     try storage.registerTable(makeSchema());
@@ -597,7 +609,10 @@ test "CDC: table_filter passes matching table" {
     defer mgr.deinit();
 
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     var storage = try Storage.init(dir, testing.allocator);
     defer storage.deinit();
     try storage.registerTable(makeSchema());
@@ -621,7 +636,10 @@ test "CDC: unsubscribe stops delivery" {
     defer mgr.deinit();
 
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     var storage = try Storage.init(dir, testing.allocator);
     defer storage.deinit();
     try storage.registerTable(makeSchema());
@@ -655,7 +673,10 @@ test "CDC: next with partial buffer drains incrementally" {
     defer mgr.deinit();
 
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     var storage = try Storage.init(dir, testing.allocator);
     defer storage.deinit();
     try storage.registerTable(makeSchema());
@@ -693,7 +714,10 @@ test "CDC: update on nonexistent row has null before" {
     defer mgr.deinit();
 
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     var storage = try Storage.init(dir, testing.allocator);
     defer storage.deinit();
     try storage.registerTable(makeSchema());
@@ -719,7 +743,10 @@ test "CDC: delete on nonexistent row has null before" {
     defer mgr.deinit();
 
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     var storage = try Storage.init(dir, testing.allocator);
     defer storage.deinit();
     try storage.registerTable(makeSchema());
@@ -744,7 +771,10 @@ test "CDC: aborted transaction produces no events" {
     defer mgr.deinit();
 
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     var storage = try Storage.init(dir, testing.allocator);
     defer storage.deinit();
     try storage.registerTable(makeSchema());
@@ -775,7 +805,10 @@ test "CDC: non-txn log entry produces no events" {
     defer mgr.deinit();
 
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     var storage = try Storage.init(dir, testing.allocator);
     defer storage.deinit();
 

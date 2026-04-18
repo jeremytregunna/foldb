@@ -314,7 +314,12 @@ test "cross-partition transfer: happy path" {
 
     const dir0 = try makeTempDir(alloc, "xp0");
     const dir1 = try makeTempDir(alloc, "xp1");
-    defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
+    defer {
+        removeDir(dir0);
+        removeDir(dir1);
+        alloc.free(dir0);
+        alloc.free(dir1);
+    }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
     defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
@@ -377,7 +382,12 @@ test "cross-partition transfer: insufficient funds aborts all partitions" {
 
     const dir0 = try makeTempDir(alloc, "xpa0");
     const dir1 = try makeTempDir(alloc, "xpa1");
-    defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
+    defer {
+        removeDir(dir0);
+        removeDir(dir1);
+        alloc.free(dir0);
+        alloc.free(dir1);
+    }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
     defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
@@ -433,7 +443,12 @@ test "PartitionSet: single-partition fast path" {
 
     const dir0 = try makeTempDir(alloc, "xps0");
     const dir1 = try makeTempDir(alloc, "xps1");
-    defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
+    defer {
+        removeDir(dir0);
+        removeDir(dir1);
+        alloc.free(dir0);
+        alloc.free(dir1);
+    }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
     defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
@@ -468,7 +483,12 @@ test "PartitionSet: missing cross-partition handler returns abort" {
 
     const dir0 = try makeTempDir(alloc, "xpm0");
     const dir1 = try makeTempDir(alloc, "xpm1");
-    defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
+    defer {
+        removeDir(dir0);
+        removeDir(dir1);
+        alloc.free(dir0);
+        alloc.free(dir1);
+    }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
     defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
@@ -503,8 +523,14 @@ test "cross-partition replay equivalence" {
         try makeTempDir(alloc, "xpreB1"),
     };
     defer {
-        for (dirsA) |d| { removeDir(d); alloc.free(d); }
-        for (dirsB) |d| { removeDir(d); alloc.free(d); }
+        for (dirsA) |d| {
+            removeDir(d);
+            alloc.free(d);
+        }
+        for (dirsB) |d| {
+            removeDir(d);
+            alloc.free(d);
+        }
     }
 
     var setupA = try setupPartitionSet(alloc, &dirsA);
@@ -568,7 +594,12 @@ test "PartitionSet: crc mismatch returns bad_params abort" {
     const alloc = std.testing.allocator;
     const dir0 = try makeTempDir(alloc, "xpcrc0");
     const dir1 = try makeTempDir(alloc, "xpcrc1");
-    defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
+    defer {
+        removeDir(dir0);
+        removeDir(dir1);
+        alloc.free(dir0);
+        alloc.free(dir1);
+    }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
     defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
@@ -591,7 +622,12 @@ test "PartitionSet: invalid payload returns bad_params abort" {
     const alloc = std.testing.allocator;
     const dir0 = try makeTempDir(alloc, "xpbad0");
     const dir1 = try makeTempDir(alloc, "xpbad1");
-    defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
+    defer {
+        removeDir(dir0);
+        removeDir(dir1);
+        alloc.free(dir0);
+        alloc.free(dir1);
+    }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
     defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
@@ -612,7 +648,12 @@ test "PartitionSet: single-partition write_set_hint out of range" {
     const alloc = std.testing.allocator;
     const dir0 = try makeTempDir(alloc, "xpoor0");
     const dir1 = try makeTempDir(alloc, "xpoor1");
-    defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
+    defer {
+        removeDir(dir0);
+        removeDir(dir1);
+        alloc.free(dir0);
+        alloc.free(dir1);
+    }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
     defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
@@ -634,7 +675,12 @@ test "PartitionSet: cross-partition write_set_hint partition out of range" {
     const alloc = std.testing.allocator;
     const dir0 = try makeTempDir(alloc, "xpxor0");
     const dir1 = try makeTempDir(alloc, "xpxor1");
-    defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
+    defer {
+        removeDir(dir0);
+        removeDir(dir1);
+        alloc.free(dir0);
+        alloc.free(dir1);
+    }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
     defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
@@ -659,7 +705,12 @@ test "PartitionSet: non-ConstraintViolation error in Phase C propagates" {
     const alloc = std.testing.allocator;
     const dir0 = try makeTempDir(alloc, "xperr0");
     const dir1 = try makeTempDir(alloc, "xperr1");
-    defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
+    defer {
+        removeDir(dir0);
+        removeDir(dir1);
+        alloc.free(dir0);
+        alloc.free(dir1);
+    }
 
     const storages = try alloc.alloc(*Storage, 2);
     for (&[_][]const u8{ dir0, dir1 }, 0..) |dir, i| {
@@ -695,7 +746,12 @@ test "PartitionSet: non-txn entry advances committed_seq on all executors" {
     const alloc = std.testing.allocator;
     const dir0 = try makeTempDir(alloc, "xpntx0");
     const dir1 = try makeTempDir(alloc, "xpntx1");
-    defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
+    defer {
+        removeDir(dir0);
+        removeDir(dir1);
+        alloc.free(dir0);
+        alloc.free(dir1);
+    }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
     defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
@@ -717,7 +773,12 @@ test "PartitionSet: write_set_hint empty defaults to partition 0" {
     const alloc = std.testing.allocator;
     const dir0 = try makeTempDir(alloc, "xpwsh0");
     const dir1 = try makeTempDir(alloc, "xpwsh1");
-    defer { removeDir(dir0); removeDir(dir1); alloc.free(dir0); alloc.free(dir1); }
+    defer {
+        removeDir(dir0);
+        removeDir(dir1);
+        alloc.free(dir0);
+        alloc.free(dir1);
+    }
 
     var setup = try setupPartitionSet(alloc, &.{ dir0, dir1 });
     defer teardownPartitionSet(&setup.ps, setup.storages, setup.obj_store, alloc);
@@ -782,13 +843,20 @@ fn transfer3Execute(
         var found = false;
         for (foreign) |fr| {
             if (fr.from_partition == 0 and std.mem.eql(u8, fr.key, p.sender_key)) {
-                if (fr.row) |fr_row| { sender_balance = fr_row.values[1].int64; found = true; }
+                if (fr.row) |fr_row| {
+                    sender_balance = fr_row.values[1].int64;
+                    found = true;
+                }
             }
         }
         if (!found or sender_balance < p.amount) return error.ConstraintViolation;
         const recv_row = try storage.get(ACCOUNTS_TABLE, p.receiver_key, ctx.seq - 1);
         var current: i64 = 0;
-        if (recv_row) |rr| { var rrr = rr; defer rrr.deinit(ctx.alloc); current = rrr.values[1].int64; }
+        if (recv_row) |rr| {
+            var rrr = rr;
+            defer rrr.deinit(ctx.alloc);
+            current = rrr.values[1].int64;
+        }
         const key_copy = try ctx.alloc.dupe(u8, p.receiver_key);
         errdefer ctx.alloc.free(key_copy);
         const vals = try ctx.alloc.alloc(ColumnValue, 2);
@@ -811,7 +879,14 @@ test "PartitionSet: three-partition transfer" {
     const dir0 = try makeTempDir(alloc, "xp3a");
     const dir1 = try makeTempDir(alloc, "xp3b");
     const dir2 = try makeTempDir(alloc, "xp3c");
-    defer { removeDir(dir0); removeDir(dir1); removeDir(dir2); alloc.free(dir0); alloc.free(dir1); alloc.free(dir2); }
+    defer {
+        removeDir(dir0);
+        removeDir(dir1);
+        removeDir(dir2);
+        alloc.free(dir0);
+        alloc.free(dir1);
+        alloc.free(dir2);
+    }
 
     const storages = try alloc.alloc(*Storage, 3);
     for (&[_][]const u8{ dir0, dir1, dir2 }, 0..) |dir, i| {

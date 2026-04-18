@@ -269,3 +269,142 @@ test "LSM: multiple tables are isolated" {
         try testing.expectEqual(@as(i64, 222), r.values[1].int64);
     } else return error.Table2Missing;
 }
+
+test "Storage: scan returns all memtable rows" {
+    const alloc = testing.allocator;
+    const dir = try makeTempDir(alloc);
+    defer alloc.free(dir);
+    defer removeDir(dir);
+
+    var store = try Storage.init(dir, alloc);
+    defer store.deinit();
+    try store.registerTable(makeSchema(1));
+
+    const v1 = [_]ColumnValue{ .{ .string = "a" }, .{ .int64 = 1 } };
+    const v2 = [_]ColumnValue{ .{ .string = "b" }, .{ .int64 = 2 } };
+    const v3 = [_]ColumnValue{ .{ .string = "c" }, .{ .int64 = 3 } };
+    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "k1", .values = &v1 }}, 1);
+    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "k2", .values = &v2 }}, 2);
+    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "k3", .values = &v3 }}, 3);
+
+    var iter = try store.scan(1, storage.KeyRange.all(), 10, alloc);
+    defer iter.deinit();
+
+    var count: usize = 0;
+    while (try iter.next()) |_| count += 1;
+    try testing.expectEqual(@as(usize, 3), count);
+}
+
+test "Storage: scan reads rows from SSTable after flush" {
+    const alloc = testing.allocator;
+    const dir = try makeTempDir(alloc);
+    defer alloc.free(dir);
+    defer removeDir(dir);
+
+    var store = try Storage.init(dir, alloc);
+    defer store.deinit();
+    try store.registerTable(makeSchema(1));
+
+    const v = [_]ColumnValue{ .{ .string = "x" }, .{ .int64 = 42 } };
+    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "k", .values = &v }}, 1);
+    try store.flushAll();
+
+    var iter = try store.scan(1, storage.KeyRange.all(), 10, alloc);
+    defer iter.deinit();
+
+    var count: usize = 0;
+    while (try iter.next()) |row| {
+        try testing.expectEqualStrings("k", row.key);
+        try testing.expectEqual(@as(i64, 42), row.values[1].int64);
+        count += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), count);
+}
+
+test "Storage: scan excludes tombstoned rows across levels" {
+    const alloc = testing.allocator;
+    const dir = try makeTempDir(alloc);
+    defer alloc.free(dir);
+    defer removeDir(dir);
+
+    var store = try Storage.init(dir, alloc);
+    defer store.deinit();
+    try store.registerTable(makeSchema(1));
+
+    const v = [_]ColumnValue{ .{ .string = "x" }, .{ .int64 = 1 } };
+    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "gone", .values = &v }}, 1);
+    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "keep", .values = &v }}, 2);
+    try store.flushAll();
+    try store.apply(&.{.{ .kind = .delete, .table_id = 1, .key = "gone", .values = null }}, 3);
+
+    var iter = try store.scan(1, storage.KeyRange.all(), 10, alloc);
+    defer iter.deinit();
+
+    var found_keep = false;
+    while (try iter.next()) |row| {
+        try testing.expect(!std.mem.eql(u8, "gone", row.key));
+        if (std.mem.eql(u8, "keep", row.key)) found_keep = true;
+    }
+    try testing.expect(found_keep);
+}
+
+test "Storage: scan MVCC returns version at seq" {
+    const alloc = testing.allocator;
+    const dir = try makeTempDir(alloc);
+    defer alloc.free(dir);
+    defer removeDir(dir);
+
+    var store = try Storage.init(dir, alloc);
+    defer store.deinit();
+    try store.registerTable(makeSchema(1));
+
+    const v1 = [_]ColumnValue{ .{ .string = "old" }, .{ .int64 = 1 } };
+    const v2 = [_]ColumnValue{ .{ .string = "new" }, .{ .int64 = 2 } };
+    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "k", .values = &v1 }}, 5);
+    try store.flushAll();
+    try store.apply(&.{.{ .kind = .update, .table_id = 1, .key = "k", .values = &v2 }}, 10);
+
+    {
+        var iter = try store.scan(1, storage.KeyRange.all(), 5, alloc);
+        defer iter.deinit();
+        const row = (try iter.next()) orelse return error.MissingAtSeq5;
+        try testing.expectEqual(@as(i64, 1), row.values[1].int64);
+    }
+    {
+        var iter = try store.scan(1, storage.KeyRange.all(), 10, alloc);
+        defer iter.deinit();
+        const row = (try iter.next()) orelse return error.MissingAtSeq10;
+        try testing.expectEqual(@as(i64, 2), row.values[1].int64);
+    }
+}
+
+test "Storage: scan range limits returned rows" {
+    const alloc = testing.allocator;
+    const dir = try makeTempDir(alloc);
+    defer alloc.free(dir);
+    defer removeDir(dir);
+
+    var store = try Storage.init(dir, alloc);
+    defer store.deinit();
+    try store.registerTable(makeSchema(1));
+
+    const v = [_]ColumnValue{ .{ .string = "x" }, .{ .int64 = 0 } };
+    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "a", .values = &v }}, 1);
+    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "b", .values = &v }}, 2);
+    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "c", .values = &v }}, 3);
+    try store.flushAll();
+    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "d", .values = &v }}, 4);
+
+    // Range ["b", "d") spans SSTable ("a","b","c") and memtable ("d")
+    const range = storage.KeyRange{ .start = "b", .end = "d", .start_inclusive = true };
+    var iter = try store.scan(1, range, 10, alloc);
+    defer iter.deinit();
+
+    var count: usize = 0;
+    while (try iter.next()) |row| {
+        try testing.expect(std.mem.order(u8, row.key, "b") != .lt);
+        try testing.expect(std.mem.order(u8, row.key, "d") == .lt);
+        count += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), count); // "b" and "c" only
+}

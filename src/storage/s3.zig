@@ -54,9 +54,7 @@ pub const S3ObjectStore = struct {
         const auth = try buildAuth(alloc, self.config, "PUT", path, host, &ts_buf, &date_buf, &body_hash, data.len);
         defer alloc.free(auth);
 
-        const request = try std.fmt.allocPrint(alloc,
-            "PUT {s} HTTP/1.1\r\nHost: {s}\r\nContent-Length: {d}\r\nContent-Type: application/octet-stream\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\n\r\n",
-            .{ path, host, data.len, &body_hash, &ts_buf, auth });
+        const request = try std.fmt.allocPrint(alloc, "PUT {s} HTTP/1.1\r\nHost: {s}\r\nContent-Length: {d}\r\nContent-Type: application/octet-stream\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\n\r\n", .{ path, host, data.len, &body_hash, &ts_buf, auth });
         defer alloc.free(request);
 
         const fd = try connect(self.config.endpoint_ip, self.config.endpoint_port);
@@ -91,9 +89,7 @@ pub const S3ObjectStore = struct {
         const auth = try buildAuth(cfg_alloc, self.config, "GET", path, host, &ts_buf, &date_buf, empty_hash[0..64], 0);
         defer cfg_alloc.free(auth);
 
-        const request = try std.fmt.allocPrint(cfg_alloc,
-            "GET {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n",
-            .{ path, host, empty_hash, &ts_buf, auth });
+        const request = try std.fmt.allocPrint(cfg_alloc, "GET {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ path, host, empty_hash, &ts_buf, auth });
         defer cfg_alloc.free(request);
 
         const fd = try connect(self.config.endpoint_ip, self.config.endpoint_port);
@@ -131,9 +127,7 @@ pub const S3ObjectStore = struct {
         const auth = try buildAuth(alloc, self.config, "DELETE", path, host, &ts_buf, &date_buf, empty_hash[0..64], 0);
         defer alloc.free(auth);
 
-        const request = try std.fmt.allocPrint(alloc,
-            "DELETE {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n",
-            .{ path, host, empty_hash, &ts_buf, auth });
+        const request = try std.fmt.allocPrint(alloc, "DELETE {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ path, host, empty_hash, &ts_buf, auth });
         defer alloc.free(request);
 
         const fd = try connect(self.config.endpoint_ip, self.config.endpoint_port);
@@ -167,9 +161,7 @@ pub const S3ObjectStore = struct {
         const auth = try buildAuth(alloc, self.config, "HEAD", path, host, &ts_buf, &date_buf, empty_hash[0..64], 0);
         defer alloc.free(auth);
 
-        const request = try std.fmt.allocPrint(alloc,
-            "HEAD {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n",
-            .{ path, host, empty_hash, &ts_buf, auth });
+        const request = try std.fmt.allocPrint(alloc, "HEAD {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ path, host, empty_hash, &ts_buf, auth });
         defer alloc.free(request);
 
         const fd = try connect(self.config.endpoint_ip, self.config.endpoint_port);
@@ -207,9 +199,7 @@ pub const S3ObjectStore = struct {
         const auth = try buildAuth(cfg_alloc, self.config, "GET", sign_path, host, &ts_buf, &date_buf, empty_hash[0..64], 0);
         defer cfg_alloc.free(auth);
 
-        const request = try std.fmt.allocPrint(cfg_alloc,
-            "GET {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n",
-            .{ path, host, empty_hash, &ts_buf, auth });
+        const request = try std.fmt.allocPrint(cfg_alloc, "GET {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ path, host, empty_hash, &ts_buf, auth });
         defer cfg_alloc.free(request);
 
         const fd = try connect(self.config.endpoint_ip, self.config.endpoint_port);
@@ -392,17 +382,13 @@ fn buildAuth(
     _ = body_len;
 
     // Canonical headers (sorted)
-    const canonical_headers = try std.fmt.allocPrint(alloc,
-        "host:{s}\nx-amz-content-sha256:{s}\nx-amz-date:{s}\n",
-        .{ host, body_hash, timestamp });
+    const canonical_headers = try std.fmt.allocPrint(alloc, "host:{s}\nx-amz-content-sha256:{s}\nx-amz-date:{s}\n", .{ host, body_hash, timestamp });
     defer alloc.free(canonical_headers);
 
     const signed_headers = "host;x-amz-content-sha256;x-amz-date";
 
     // Canonical request
-    const canonical_request = try std.fmt.allocPrint(alloc,
-        "{s}\n{s}\n\n{s}\n{s}\n{s}",
-        .{ method, path, canonical_headers, signed_headers, body_hash });
+    const canonical_request = try std.fmt.allocPrint(alloc, "{s}\n{s}\n\n{s}\n{s}\n{s}", .{ method, path, canonical_headers, signed_headers, body_hash });
     defer alloc.free(canonical_request);
 
     var cr_hash: [64]u8 = undefined;
@@ -413,9 +399,7 @@ fn buildAuth(
     defer alloc.free(scope);
 
     // String to sign
-    const string_to_sign = try std.fmt.allocPrint(alloc,
-        "AWS4-HMAC-SHA256\n{s}\n{s}\n{s}",
-        .{ timestamp, scope, &cr_hash });
+    const string_to_sign = try std.fmt.allocPrint(alloc, "AWS4-HMAC-SHA256\n{s}\n{s}\n{s}", .{ timestamp, scope, &cr_hash });
     defer alloc.free(string_to_sign);
 
     // Signing key
@@ -441,7 +425,5 @@ fn buildAuth(
     const credential = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ config.access_key, scope });
     defer alloc.free(credential);
 
-    return std.fmt.allocPrint(alloc,
-        "AWS4-HMAC-SHA256 Credential={s}, SignedHeaders={s}, Signature={s}",
-        .{ credential, signed_headers, &sig_hex });
+    return std.fmt.allocPrint(alloc, "AWS4-HMAC-SHA256 Credential={s}, SignedHeaders={s}, Signature={s}", .{ credential, signed_headers, &sig_hex });
 }

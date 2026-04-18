@@ -7,6 +7,10 @@ const block_mod = @import("block.zig");
 const sstable_mod = @import("sstable.zig");
 const object_store_mod = @import("object_store.zig");
 const snapshot_mod = @import("snapshot.zig");
+const json_index_mod = @import("json_index.zig");
+const hnsw_mod = @import("hnsw.zig");
+pub const vector_codec = @import("vector_codec.zig");
+pub const json_path = @import("json_path.zig");
 
 pub const SnapshotLogWriter = snapshot_mod.SnapshotLogWriter;
 
@@ -42,6 +46,23 @@ pub const Mutation = types.Mutation;
 pub const MutationKind = types.MutationKind;
 pub const KeyRange = types.KeyRange;
 pub const SnapshotHandle = types.SnapshotHandle;
+
+// Index types
+pub const IndexId = u32;
+pub const PkList = json_index_mod.PkList;
+pub const Match = hnsw_mod.Match;
+
+pub const IndexKind = enum { json_path, vector };
+
+/// Descriptor passed from gateway to storage when registering a specialty index.
+pub const IndexDesc = struct {
+    id: IndexId,
+    table_id: TableId,
+    column_idx: u32,
+    kind: IndexKind,
+    json_paths: []const []const u8,
+    vector_dim: u32,
+};
 
 // Codec
 pub const CodecId = codec_mod.CodecId;
@@ -93,8 +114,28 @@ pub const ScanIterator = struct {
     }
 };
 
+const IndexEntry = union(enum) {
+    json: json_index_mod.JsonPathIndex,
+    vector: hnsw_mod.HnswIndex,
+
+    fn tableId(self: *const IndexEntry) TableId {
+        return switch (self.*) {
+            .json => |*j| j.table_id,
+            .vector => |*v| v.table_id,
+        };
+    }
+
+    fn deinit(self: *IndexEntry) void {
+        switch (self.*) {
+            .json => |*j| j.deinit(),
+            .vector => |*v| v.deinit(),
+        }
+    }
+};
+
 pub const Storage = struct {
     tables: std.AutoHashMap(TableId, lsm_mod.LSM),
+    indexes: std.AutoHashMap(IndexId, IndexEntry),
     dir: []const u8,
     alloc: std.mem.Allocator,
     object_store: ?object_store_mod.ObjectStore = null,
@@ -105,6 +146,7 @@ pub const Storage = struct {
         mkdirAll(dir);
         return .{
             .tables = std.AutoHashMap(TableId, lsm_mod.LSM).init(alloc),
+            .indexes = std.AutoHashMap(IndexId, IndexEntry).init(alloc),
             .dir = dir,
             .alloc = alloc,
         };
@@ -114,6 +156,9 @@ pub const Storage = struct {
         var it = self.tables.valueIterator();
         while (it.next()) |lsm| lsm.deinit();
         self.tables.deinit();
+        var idx_it = self.indexes.valueIterator();
+        while (idx_it.next()) |e| e.deinit();
+        self.indexes.deinit();
         if (self.cache_dir) |cd| self.alloc.free(cd);
     }
 
@@ -138,13 +183,79 @@ pub const Storage = struct {
         try self.tables.put(schema.table_id, lsm);
     }
 
+    /// Register a specialty index (JSON path or vector). Backfills from existing rows.
+    pub fn registerIndex(self: *Storage, desc: IndexDesc) !void {
+        if (self.indexes.contains(desc.id)) return;
+
+        const idx_dir = try std.fmt.allocPrint(self.alloc, "{s}/idx{d}", .{ self.dir, desc.id });
+        defer self.alloc.free(idx_dir);
+
+        const entry: IndexEntry = switch (desc.kind) {
+            .json_path => blk: {
+                const idx = try json_index_mod.JsonPathIndex.init(
+                    desc.id,
+                    desc.table_id,
+                    desc.column_idx,
+                    desc.json_paths,
+                    idx_dir,
+                    self.alloc,
+                );
+                break :blk .{ .json = idx };
+            },
+            .vector => blk: {
+                const idx = hnsw_mod.HnswIndex.init(
+                    desc.vector_dim,
+                    desc.table_id,
+                    desc.column_idx,
+                    self.alloc,
+                );
+                break :blk .{ .vector = idx };
+            },
+        };
+        try self.indexes.put(desc.id, entry);
+
+        // Backfill: scan base table and index existing rows
+        try self.backfillIndex(desc.id, desc.table_id);
+    }
+
+    /// Backfill an index from existing base table rows (all LSM levels).
+    fn backfillIndex(self: *Storage, index_id: IndexId, table_id: TableId) !void {
+        const entry = self.indexes.getPtr(index_id) orelse return;
+        const lsm = self.tables.getPtr(table_id) orelse return;
+        const rows = try lsm.scan(KeyRange.all(), std.math.maxInt(Seq), self.alloc);
+        defer {
+            for (rows) |*r| r.deinit(self.alloc);
+            self.alloc.free(rows);
+        }
+        for (rows) |row| {
+            try maintainEntry(entry, row.key, row.values, null, row.seq, self.alloc);
+        }
+    }
+
     pub fn get(self: *Storage, table_id: TableId, key: []const u8, at_seq: Seq) !?Row {
         const lsm = self.tables.getPtr(table_id) orelse return error.TableNotFound;
         return lsm.get(key, at_seq);
     }
 
     pub fn apply(self: *Storage, mutations: []const Mutation, at_seq: Seq) !void {
-        var table_ids: std.ArrayList(TableId) = .empty;
+        // Collect pre-images for UPDATE/DELETE mutations in indexed tables
+        // (must be read before base-table mutations are applied)
+        var pre_images: []?Row = &.{};
+        defer {
+            for (pre_images) |*r| if (r.*) |*row| row.deinit(self.alloc);
+            if (pre_images.len > 0) self.alloc.free(pre_images);
+        }
+        if (self.indexes.count() > 0) {
+            pre_images = try self.alloc.alloc(?Row, mutations.len);
+            for (pre_images) |*r| r.* = null;
+            for (mutations, 0..) |m, i| {
+                if (m.kind == .insert) continue;
+                if (!self.tableHasIndexes(m.table_id)) continue;
+                pre_images[i] = try self.get(m.table_id, m.key, at_seq);
+            }
+        }
+
+        var table_ids: std.ArrayListUnmanaged(TableId) = .empty;
         defer table_ids.deinit(self.alloc);
 
         for (mutations) |m| {
@@ -160,7 +271,34 @@ pub const Storage = struct {
 
         for (table_ids.items) |tid| {
             const lsm = self.tables.getPtr(tid) orelse return error.TableNotFound;
+            const l0_before = lsm.levels[0].files.items.len;
             try lsm.apply(mutations, at_seq);
+            const l0_after = lsm.levels[0].files.items.len;
+            if (l0_before > 0 and l0_after < l0_before) {
+                // Compaction fired; prune tombstoned HNSW nodes for this table
+                var idx_it = self.indexes.iterator();
+                while (idx_it.next()) |kv| {
+                    switch (kv.value_ptr.*) {
+                        .vector => |*v| if (v.table_id == tid) try v.pruneDeleted(),
+                        .json => {},
+                    }
+                }
+            }
+        }
+
+        // Maintain specialty indexes
+        if (self.indexes.count() > 0) {
+            for (mutations, 0..) |m, i| {
+                var idx_it = self.indexes.iterator();
+                while (idx_it.next()) |kv| {
+                    const entry = kv.value_ptr;
+                    if (entry.tableId() != m.table_id) continue;
+                    const old_row: ?Row = if (pre_images.len > i) pre_images[i] else null;
+                    const old_vals: ?[]const ColumnValue = if (old_row) |r| r.values else null;
+                    const new_vals: ?[]const ColumnValue = m.values;
+                    try maintainEntry(entry, m.key, new_vals, old_vals, at_seq, self.alloc);
+                }
+            }
         }
 
         if (self.snapshot_policy) |*policy| {
@@ -186,23 +324,8 @@ pub const Storage = struct {
 
     pub fn scan(self: *Storage, table_id: TableId, range: KeyRange, at_seq: Seq, alloc: std.mem.Allocator) !ScanIterator {
         const lsm = self.tables.getPtr(table_id) orelse return error.TableNotFound;
-        var it = lsm.memtable.rangeEntries(range, at_seq);
-        var rows: std.ArrayListUnmanaged(Row) = .empty;
-        errdefer {
-            for (rows.items) |*r| r.deinit(alloc);
-            rows.deinit(alloc);
-        }
-        while (it.next()) |entry| {
-            if (entry.is_tombstone) continue;
-            const vals = entry.values orelse continue;
-            const key_copy = try alloc.dupe(u8, entry.key);
-            errdefer alloc.free(key_copy);
-            const vals_copy = try alloc.alloc(ColumnValue, vals.len);
-            errdefer alloc.free(vals_copy);
-            for (vals, 0..) |v, i| vals_copy[i] = try v.dupe(alloc);
-            try rows.append(alloc, Row{ .key = key_copy, .seq = entry.seq, .values = vals_copy });
-        }
-        return ScanIterator{ .rows = try rows.toOwnedSlice(alloc), .pos = 0, .alloc = alloc };
+        const rows = try lsm.scan(range, at_seq, alloc);
+        return ScanIterator{ .rows = rows, .pos = 0, .alloc = alloc };
     }
 
     pub fn snapshot(self: *Storage, at_seq: Seq) !SnapshotHandle {
@@ -214,7 +337,117 @@ pub const Storage = struct {
         var it = self.tables.valueIterator();
         while (it.next()) |lsm| try lsm.flushMemtable();
     }
+
+    /// Flush all specialty index LSMs to SSTables.
+    pub fn flushIndexes(self: *Storage) !void {
+        var it = self.indexes.valueIterator();
+        while (it.next()) |e| {
+            switch (e.*) {
+                .json => |*j| try j.lsm.flushMemtable(),
+                .vector => {},
+            }
+        }
+    }
+
+    /// Force pruning of tombstoned nodes from all HNSW indexes.
+    /// Called automatically after compaction; exposed for testing.
+    pub fn pruneVectorIndexes(self: *Storage) !void {
+        var it = self.indexes.valueIterator();
+        while (it.next()) |e| {
+            switch (e.*) {
+                .vector => |*v| try v.pruneDeleted(),
+                .json => {},
+            }
+        }
+    }
+
+    /// Look up primary keys where json path=value in a JSON path index.
+    pub fn indexLookup(
+        self: *Storage,
+        index_id: IndexId,
+        path: []const u8,
+        value: []const u8,
+        at_seq: Seq,
+        alloc: std.mem.Allocator,
+    ) !PkList {
+        const entry = self.indexes.getPtr(index_id) orelse return error.IndexNotFound;
+        switch (entry.*) {
+            .json => |*j| return j.lookup(path, value, at_seq, alloc),
+            else => return error.WrongIndexType,
+        }
+    }
+
+    /// ANN search against a vector index.
+    pub fn vectorSearch(
+        self: *Storage,
+        index_id: IndexId,
+        query: []const f32,
+        k: u32,
+        at_seq: Seq,
+        alloc: std.mem.Allocator,
+    ) ![]Match {
+        const entry = self.indexes.getPtr(index_id) orelse return error.IndexNotFound;
+        switch (entry.*) {
+            .vector => |*v| return v.search(query, k, 64, at_seq, alloc),
+            else => return error.WrongIndexType,
+        }
+    }
+
+    fn tableHasIndexes(self: *const Storage, table_id: TableId) bool {
+        var it = self.indexes.valueIterator();
+        while (it.next()) |e| {
+            if (e.tableId() == table_id) return true;
+        }
+        return false;
+    }
 };
+
+/// Dispatch index maintenance for a single row mutation.
+fn maintainEntry(
+    entry: *IndexEntry,
+    row_key: []const u8,
+    new_vals: ?[]const ColumnValue,
+    old_vals: ?[]const ColumnValue,
+    at_seq: Seq,
+    alloc: std.mem.Allocator,
+) !void {
+    switch (entry.*) {
+        .json => |*jidx| {
+            const new_json = jsonBytes(new_vals, jidx.column_idx);
+            const old_json = jsonBytes(old_vals, jidx.column_idx);
+            try jidx.maintain(row_key, new_json, old_json, at_seq);
+        },
+        .vector => |*vidx| {
+            // Remove old vector if present
+            if (old_vals != null) {
+                _ = vidx.markDeleted(row_key);
+            }
+            // Insert new vector if present
+            if (new_vals) |nv| {
+                if (vidx.column_idx < nv.len) {
+                    const raw = switch (nv[vidx.column_idx]) {
+                        .bytes => |b| b,
+                        .string => |s| s,
+                        else => return,
+                    };
+                    const vec = try vector_codec.decode(raw, alloc);
+                    defer alloc.free(vec);
+                    try vidx.insert(vec, row_key, at_seq);
+                }
+            }
+        },
+    }
+}
+
+fn jsonBytes(vals: ?[]const ColumnValue, col_idx: u32) ?[]const u8 {
+    const v = vals orelse return null;
+    if (col_idx >= v.len) return null;
+    return switch (v[col_idx]) {
+        .bytes => |b| b,
+        .string => |s| s,
+        else => null,
+    };
+}
 
 fn mkdirAll(path: []const u8) void {
     const null_path = std.heap.page_allocator.allocSentinel(u8, path.len, 0) catch return;
