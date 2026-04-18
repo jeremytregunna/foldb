@@ -256,6 +256,14 @@ pub fn build(b: *std.Build) void {
     const storage_replay_tests = b.addTest(.{ .root_module = storage_replay_test_module });
     const run_storage_replay_tests = b.addRunArtifact(storage_replay_tests);
 
+    // CDC module
+    const cdc_module = b.createModule(.{
+        .root_source_file = b.path("src/cdc/cdc.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cdc_module.addImport("storage.zig", storage_module);
+
     // Executor module
     const executor_module = b.createModule(.{
         .root_source_file = b.path("src/executor/executor.zig"),
@@ -264,6 +272,7 @@ pub fn build(b: *std.Build) void {
     });
     executor_module.addImport("storage.zig", storage_module);
     executor_module.addImport("log.zig", log_module);
+    executor_module.addImport("cdc.zig", cdc_module);
 
     // Recovery module
     const recovery_module = b.createModule(.{
@@ -547,6 +556,19 @@ pub fn build(b: *std.Build) void {
     const seq_tests = b.addTest(.{ .root_module = seq_test_module });
     const run_seq_tests = b.addRunArtifact(seq_tests);
 
+    // CDC unit tests
+    const cdc_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/cdc/cdc_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cdc_test_module.addImport("cdc.zig", cdc_module);
+    cdc_test_module.addImport("storage.zig", storage_module);
+    cdc_test_module.addImport("executor.zig", executor_module);
+    cdc_test_module.addImport("log.zig", log_module);
+    const cdc_tests = b.addTest(.{ .root_module = cdc_test_module });
+    const run_cdc_tests = b.addRunArtifact(cdc_tests);
+
     // Gateway unit tests
     const gateway_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/gateway/gateway_test.zig"),
@@ -600,6 +622,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_sql_schema_tests.step);
     test_step.dependOn(&run_sql_planner_tests.step);
     test_step.dependOn(&run_sql_executor_expr_tests.step);
+    test_step.dependOn(&run_cdc_tests.step);
     test_step.dependOn(&run_gateway_tests.step);
     test_step.dependOn(&run_seq_epoch_tests.step);
     test_step.dependOn(&run_seq_idem_tests.step);

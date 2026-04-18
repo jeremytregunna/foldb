@@ -6,6 +6,7 @@ const log_mod = @import("log.zig");
 const storage_mod = @import("storage.zig");
 const exchange_mod = @import("exchange.zig");
 const determinism_mod = @import("determinism.zig");
+const cdc_mod = @import("cdc.zig");
 
 // Verify determinism invariants at compile time.
 comptime {
@@ -48,6 +49,11 @@ pub const ExecutorError = error{
 // Import it via build.zig's partition_set_module, not through executor.zig.
 
 pub const Log = log_mod.Log;
+pub const CdcManager = cdc_mod.CdcManager;
+pub const CdcSubscription = cdc_mod.CdcSubscription;
+pub const CdcEvent = cdc_mod.CdcEvent;
+pub const CdcEffect = cdc_mod.CdcEffect;
+pub const CdcOperation = cdc_mod.CdcOperation;
 
 pub const Executor = struct {
     storage: *Storage,
@@ -56,6 +62,8 @@ pub const Executor = struct {
     alloc: std.mem.Allocator,
     /// Optional log reference for notifying snapshot advancement.
     log: ?*Log = null,
+    /// Optional CDC manager for change-data-capture event dispatch.
+    cdc: ?*CdcManager = null,
 
     pub fn init(storage: *Storage, alloc: std.mem.Allocator) Executor {
         return .{
@@ -69,6 +77,11 @@ pub const Executor = struct {
     /// Wire a log for snapshot_marker notification.
     pub fn withLog(self: *Executor, l: *Log) void {
         self.log = l;
+    }
+
+    /// Wire a CDC manager to receive change events from each committed transaction.
+    pub fn withCdc(self: *Executor, manager: *CdcManager) void {
+        self.cdc = manager;
     }
 
     pub fn deinit(self: *Executor) void {
@@ -151,7 +164,22 @@ pub const Executor = struct {
             return err;
         };
 
+        // CDC: capture before-images before mutations are applied to storage.
+        var before_images: ?cdc_mod.BeforeImages = null;
+        defer if (before_images) |*bi| bi.deinit();
+        if (self.cdc) |mgr| {
+            const pre_seq: Seq = if (entry.header.seq > 0) entry.header.seq - 1 else 0;
+            before_images = try mgr.captureBeforeImages(mutations.items, self.storage, pre_seq, self.alloc);
+        }
+
         try self.storage.apply(mutations.items, entry.header.seq);
+
+        // CDC: dispatch events after successful apply.
+        if (self.cdc) |mgr| {
+            if (before_images) |bi| {
+                try mgr.dispatch(entry.header.seq, entry.header.epoch, mutations.items, bi, self.alloc);
+            }
+        }
 
         const rows: u64 = @intCast(mutations.items.len);
         return .{ .ok = .{ .rows_affected = rows } };
