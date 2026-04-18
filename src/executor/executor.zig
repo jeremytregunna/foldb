@@ -47,11 +47,15 @@ pub const ExecutorError = error{
 // Note: PartitionSet is in partition_set.zig (separate module to avoid circular imports).
 // Import it via build.zig's partition_set_module, not through executor.zig.
 
+pub const Log = log_mod.Log;
+
 pub const Executor = struct {
     storage: *Storage,
     registry: QueryRegistry,
     committed_seq: Seq,
     alloc: std.mem.Allocator,
+    /// Optional log reference for notifying snapshot advancement.
+    log: ?*Log = null,
 
     pub fn init(storage: *Storage, alloc: std.mem.Allocator) Executor {
         return .{
@@ -60,6 +64,11 @@ pub const Executor = struct {
             .committed_seq = 0,
             .alloc = alloc,
         };
+    }
+
+    /// Wire a log for snapshot_marker notification.
+    pub fn withLog(self: *Executor, l: *Log) void {
+        self.log = l;
     }
 
     pub fn deinit(self: *Executor) void {
@@ -81,8 +90,17 @@ pub const Executor = struct {
     pub fn run(self: *Executor, entry: LogEntry) !ExecResult {
         defer self.committed_seq = entry.header.seq;
 
-        // Non-txn entries advance seq with no side effects.
+        // Non-txn entries advance seq; snapshot_marker additionally notifies the log.
         if (entry.header.kind != .txn_intent) {
+            if (entry.header.kind == .snapshot_marker) {
+                const marker = storage_mod.SnapshotMarkerPayload.deserialize(entry.payload, self.alloc) catch
+                    return .{ .ok = .{ .rows_affected = 0 } };
+                defer {
+                    var m = marker;
+                    m.deinit(self.alloc);
+                }
+                if (self.log) |l| l.notifySnapshot(marker.seq);
+            }
             return .{ .ok = .{ .rows_affected = 0 } };
         }
 
@@ -137,6 +155,38 @@ pub const Executor = struct {
 
         const rows: u64 = @intCast(mutations.items.len);
         return .{ .ok = .{ .rows_affected = rows } };
+    }
+};
+
+/// Drains committed log entries into an Executor. Decouples the log from the executor
+/// so the executor only processes what's been committed rather than polling blindly.
+pub const ExecutorDriver = struct {
+    log: *Log,
+    executor: *Executor,
+    alloc: std.mem.Allocator,
+
+    /// Process up to 256 log entries starting at executor.committed_seq+1.
+    /// Returns the number of entries processed.
+    pub fn drainOnce(self: *ExecutorDriver) !usize {
+        const from_seq = self.executor.committed_seq + 1;
+        const entries = try self.log.read(from_seq, 256, self.alloc);
+        defer {
+            for (entries) |*e| e.deinit(self.alloc);
+            self.alloc.free(entries);
+        }
+        for (entries) |entry| {
+            _ = try self.executor.run(entry);
+        }
+        return entries.len;
+    }
+
+    /// Drain until the log head is reached (no new entries). Used in tests and
+    /// single-threaded operation.
+    pub fn drainAll(self: *ExecutorDriver) !void {
+        while (true) {
+            const n = try self.drainOnce();
+            if (n == 0) break;
+        }
     }
 };
 

@@ -238,6 +238,40 @@ pub const PartitionSet = struct {
     }
 };
 
+/// Drains committed log entries into a PartitionSet. Feeds each entry to runEntry()
+/// starting at the minimum committed_seq across all partitions.
+pub const PartitionDriver = struct {
+    log: *executor_mod.Log,
+    partition_set: *PartitionSet,
+    alloc: std.mem.Allocator,
+
+    pub fn drainOnce(self: *PartitionDriver) !usize {
+        // Drive from the minimum committed_seq across executors.
+        var min_seq: Seq = std.math.maxInt(Seq);
+        for (self.partition_set.executors) |e| {
+            if (e.committed_seq < min_seq) min_seq = e.committed_seq;
+        }
+        const from_seq = min_seq + 1;
+        const entries = try self.log.read(from_seq, 256, self.alloc);
+        defer {
+            for (entries) |*e| e.deinit(self.alloc);
+            self.alloc.free(entries);
+        }
+        for (entries) |entry| {
+            const results = try self.partition_set.runEntry(entry);
+            self.alloc.free(results);
+        }
+        return entries.len;
+    }
+
+    pub fn drainAll(self: *PartitionDriver) !void {
+        while (true) {
+            const n = try self.drainOnce();
+            if (n == 0) break;
+        }
+    }
+};
+
 fn freeMutations(items: []Mutation, alloc: std.mem.Allocator) void {
     for (items) |m| {
         alloc.free(m.key);

@@ -10,12 +10,24 @@ const snapshot_mod = @import("snapshot.zig");
 
 pub const SnapshotLogWriter = snapshot_mod.SnapshotLogWriter;
 
+/// Called after each successful snapshot with the snapshot seq.
+/// Allows callers to trigger log truncation and idempotency cache eviction.
+pub const PostSnapshotHook = struct {
+    ptr: *anyopaque,
+    hookFn: *const fn (*anyopaque, seq: Seq) void,
+
+    pub fn call(self: PostSnapshotHook, seq: Seq) void {
+        self.hookFn(self.ptr, seq);
+    }
+};
+
 pub const SnapshotPolicy = struct {
     interval: u64,
     counter: u64 = 0,
     store: object_store_mod.ObjectStore,
     log_writer: ?snapshot_mod.SnapshotLogWriter = null,
     partition_id: u32 = 0,
+    post_snapshot: ?PostSnapshotHook = null,
 };
 
 // Core types
@@ -167,6 +179,7 @@ pub const Storage = struct {
                     );
                     manifest.deinit();
                 }
+                if (policy.post_snapshot) |hook| hook.call(at_seq);
             }
         }
     }

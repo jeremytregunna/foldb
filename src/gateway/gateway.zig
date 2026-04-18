@@ -171,56 +171,71 @@ pub const Gateway = struct {
         params: []const ColumnValue,
         nondet: []const ResolvedValue,
     ) !ExecResult {
-        if (self.registry.lookup(hash) == null) return error.QueryNotFound;
+        const rq = self.registry.lookup(hash) orelse return error.QueryNotFound;
+
+        // Assign a stable client_seq for this logical operation ONCE, before any retry.
+        self.client_seq += 1;
+        const op_seq = self.client_seq;
 
         // Encode params to canonical bytes
         const params_bytes = try sql_mod.executor_bridge.encodeParams(params, self.alloc);
         defer self.alloc.free(params_bytes);
 
-        // Serialize TxnIntent payload
-        self.client_seq += 1;
-        var intent_buf: std.ArrayList(u8) = .empty;
-        defer intent_buf.deinit(self.alloc);
+        // Resolve nondeterministic functions in the SQL text (NOW(), RANDOM(), UUID()).
+        const resolved = try resolveNondet(rq.sql_text, &self.nondet_resolver, self.alloc);
+        defer self.alloc.free(resolved);
 
-        try executor_mod.serializeTxnIntent(
-            &hash,
-            self.client_id,
-            self.client_seq,
-            &.{},
-            &.{},
-            params_bytes,
-            nondet,
-            &intent_buf,
-            self.alloc,
-        );
+        // Merge caller-supplied nondet with gateway-resolved values.
+        const all_nondet = if (nondet.len > 0) nondet else resolved;
 
-        // Submit to Sequencer — infallible; blocks on awaitCommit
-        var handle = self.sequencer.submitBytes(io, intent_buf.items, self.client_id, self.client_seq);
-        defer if (handle.future.cancel(io)) |_| {} else |_| {};
-        const result = try handle.awaitCommit(io);
+        const max_retries: usize = 3;
+        var attempt: usize = 0;
+        while (attempt < max_retries) : (attempt += 1) {
+            // Serialize TxnIntent payload — client_seq stays constant across retries.
+            var intent_buf: std.ArrayList(u8) = .empty;
+            defer intent_buf.deinit(self.alloc);
 
-        // Read committed entry from partition log
-        const partition_log = self.sequencer.partitionLog(result.partition);
-        const entries = try partition_log.read(result.seq, 1, self.alloc);
-        defer {
-            for (entries) |*e| e.deinit(self.alloc);
-            self.alloc.free(entries);
+            try executor_mod.serializeTxnIntent(
+                &hash,
+                self.client_id,
+                op_seq,
+                &.{},
+                &.{},
+                params_bytes,
+                all_nondet,
+                &intent_buf,
+                self.alloc,
+            );
+
+            // Submit to Sequencer — infallible; blocks on awaitCommit
+            var handle = self.sequencer.submitBytes(io, intent_buf.items, self.client_id, op_seq);
+            defer if (handle.future.cancel(io)) |_| {} else |_| {};
+            const result = try handle.awaitCommit(io);
+
+            // Read committed entry from partition log
+            const partition_log = self.sequencer.partitionLog(result.partition);
+            const entries = try partition_log.read(result.seq, 1, self.alloc);
+            defer {
+                for (entries) |*e| e.deinit(self.alloc);
+                self.alloc.free(entries);
+            }
+            if (entries.len == 0 or entries[0].header.seq != result.seq) {
+                return error.ExecutionError;
+            }
+
+            // Execute via SqlExecutor (processes LogEntry through SQL plan)
+            const exec_result = try self.sql_exec.run(entries[0]);
+
+            return switch (exec_result) {
+                .ok => |ok| .{ .rows_affected = ok.rows_affected, .result_set = null },
+                .abort => |ab| switch (ab.code) {
+                    .constraint_violation => error.ConstraintViolation,
+                    .missing_query => error.QueryNotFound,
+                    else => error.ExecutionError,
+                },
+            };
         }
-        if (entries.len == 0 or entries[0].header.seq != result.seq) {
-            return error.ExecutionError;
-        }
-
-        // Execute via SqlExecutor (processes LogEntry through SQL plan)
-        const exec_result = try self.sql_exec.run(entries[0]);
-
-        return switch (exec_result) {
-            .ok => |ok| .{ .rows_affected = ok.rows_affected, .result_set = null },
-            .abort => |ab| switch (ab.code) {
-                .constraint_violation => error.ConstraintViolation,
-                .missing_query => error.QueryNotFound,
-                else => error.ExecutionError,
-            },
-        };
+        return error.ExecutionError;
     }
 
     /// Execute a SELECT query and return the result set.
@@ -313,6 +328,41 @@ pub const Gateway = struct {
         try self.storage.flushAll();
     }
 };
+
+/// Scan sql_text for NOW(), RANDOM(), UUID() calls (case-insensitive) and resolve each.
+fn resolveNondet(sql_text: []const u8, resolver: *const NondetResolver, alloc: std.mem.Allocator) ![]ResolvedValue {
+    var results: std.ArrayList(ResolvedValue) = .empty;
+    errdefer results.deinit(alloc);
+
+    var i: usize = 0;
+    while (i < sql_text.len) {
+        // Try to match NOW(), RANDOM(), UUID() at position i (case-insensitive).
+        if (matchToken(sql_text, i, "now(")) {
+            try results.append(alloc, resolver.resolveNow());
+            i += 4;
+        } else if (matchToken(sql_text, i, "random(")) {
+            try results.append(alloc, resolver.resolveRandom());
+            i += 7;
+        } else if (matchToken(sql_text, i, "uuid(")) {
+            try results.append(alloc, resolver.resolveUuidV7());
+            i += 5;
+        } else {
+            i += 1;
+        }
+    }
+
+    return results.toOwnedSlice(alloc);
+}
+
+fn matchToken(haystack: []const u8, pos: usize, needle: []const u8) bool {
+    if (pos + needle.len > haystack.len) return false;
+    for (needle, 0..) |c, j| {
+        const h = haystack[pos + j];
+        const hc = if (h >= 'A' and h <= 'Z') h + 32 else h;
+        if (hc != c) return false;
+    }
+    return true;
+}
 
 fn decodeParams(
     params: []const ColumnValue,

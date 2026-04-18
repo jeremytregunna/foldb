@@ -321,6 +321,18 @@ pub fn build(b: *std.Build) void {
     const executor_tests = b.addTest(.{ .root_module = executor_test_module });
     const run_executor_tests = b.addRunArtifact(executor_tests);
 
+    // ExecutorDriver tests
+    const driver_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/executor/driver_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    driver_test_module.addImport("executor.zig", executor_module);
+    driver_test_module.addImport("storage.zig", storage_module);
+    driver_test_module.addImport("log.zig", log_module);
+    const driver_tests = b.addTest(.{ .root_module = driver_test_module });
+    const run_driver_tests = b.addRunArtifact(driver_tests);
+
     // Executor replay (DST)
     const executor_replay_module = b.createModule(.{
         .root_source_file = b.path("src/tests/executor/replay_test.zig"),
@@ -577,6 +589,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_storage_tiered_tests.step);
     test_step.dependOn(&run_storage_snapshot_tests.step);
     test_step.dependOn(&run_executor_tests.step);
+    test_step.dependOn(&run_driver_tests.step);
     test_step.dependOn(&run_recovery_tests.step);
     test_step.dependOn(&run_cross_partition_tests.step);
     test_step.dependOn(&run_sql_lexer_tests.step);

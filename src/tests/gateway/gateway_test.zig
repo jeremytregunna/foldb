@@ -565,3 +565,100 @@ test "Gateway: readAt intermediate state shows partial history" {
     defer rs3.deinit();
     try testing.expectEqual(@as(usize, 3), rs3.rows.len);
 }
+
+// --- PostSnapshotHook test (Gaps 3+11) ---
+
+const HookState = struct {
+    called: bool = false,
+    last_seq: storage_mod.Seq = 0,
+};
+
+fn postSnapshotHookFn(ptr: *anyopaque, seq: storage_mod.Seq) void {
+    const state: *HookState = @ptrCast(@alignCast(ptr));
+    state.called = true;
+    state.last_seq = seq;
+}
+
+test "PostSnapshotHook: called after snapshot threshold reached" {
+    const temp_path = try makeTempDir();
+    defer {
+        removeDirRecursive(temp_path);
+        testing.allocator.free(temp_path);
+    }
+
+    var state = HookState{};
+    const hook = storage_mod.PostSnapshotHook{
+        .ptr = &state,
+        .hookFn = postSnapshotHookFn,
+    };
+
+    var mem_store = storage_mod.MemoryObjectStore.init(testing.allocator);
+    defer mem_store.deinit();
+
+    // Interval of 2 so we trigger after 2 mutations.
+    const policy = storage_mod.SnapshotPolicy{
+        .interval = 2,
+        .store = mem_store.objectStore(),
+        .post_snapshot = hook,
+    };
+
+    var storage = try storage_mod.Storage.init(temp_path, testing.allocator);
+    defer storage.deinit();
+
+    const schema = storage_mod.TableSchema{
+        .table_id = 42,
+        .columns = &.{
+            .{ .col_type = .string, .nullable = false },
+            .{ .col_type = .int64, .nullable = false },
+        },
+    };
+    try storage.registerTable(schema);
+    storage.setSnapshotPolicy(policy);
+
+    // Apply 2 mutations — should trigger the snapshot and call the hook.
+    const m1 = storage_mod.Mutation{
+        .kind = .insert,
+        .table_id = 42,
+        .key = try testing.allocator.dupe(u8, "k1"),
+        .values = blk: {
+            const v = try testing.allocator.alloc(storage_mod.ColumnValue, 2);
+            v[0] = .{ .string = try testing.allocator.dupe(u8, "k1") };
+            v[1] = .{ .int64 = 1 };
+            break :blk v;
+        },
+    };
+    defer {
+        testing.allocator.free(m1.key);
+        if (m1.values) |vs| {
+            vs[0].freeIfOwned(testing.allocator);
+            vs[1].freeIfOwned(testing.allocator);
+            testing.allocator.free(vs);
+        }
+    }
+
+    const m2 = storage_mod.Mutation{
+        .kind = .insert,
+        .table_id = 42,
+        .key = try testing.allocator.dupe(u8, "k2"),
+        .values = blk: {
+            const v = try testing.allocator.alloc(storage_mod.ColumnValue, 2);
+            v[0] = .{ .string = try testing.allocator.dupe(u8, "k2") };
+            v[1] = .{ .int64 = 2 };
+            break :blk v;
+        },
+    };
+    defer {
+        testing.allocator.free(m2.key);
+        if (m2.values) |vs| {
+            vs[0].freeIfOwned(testing.allocator);
+            vs[1].freeIfOwned(testing.allocator);
+            testing.allocator.free(vs);
+        }
+    }
+
+    try storage.apply(&.{m1}, 1);
+    try storage.apply(&.{m2}, 2);
+
+    try testing.expect(state.called);
+    try testing.expectEqual(@as(storage_mod.Seq, 2), state.last_seq);
+}
