@@ -54,6 +54,7 @@ pub const CdcSubscription = cdc_mod.CdcSubscription;
 pub const CdcEvent = cdc_mod.CdcEvent;
 pub const CdcEffect = cdc_mod.CdcEffect;
 pub const CdcOperation = cdc_mod.CdcOperation;
+pub const BeforeImages = cdc_mod.BeforeImages;
 
 pub const Executor = struct {
     storage: *Storage,
@@ -177,7 +178,7 @@ pub const Executor = struct {
         // CDC: dispatch events after successful apply.
         if (self.cdc) |mgr| {
             if (before_images) |bi| {
-                try mgr.dispatch(entry.header.seq, entry.header.epoch, mutations.items, bi, self.alloc);
+                try mgr.dispatch(entry.header.seq, entry.header.epoch, entry.header.kind, mutations.items, bi, self.alloc);
             }
         }
 

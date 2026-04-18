@@ -4,6 +4,7 @@
 /// Delivery is at-least-once in-process; consumers must ack to advance their cursor.
 const std = @import("std");
 const storage_mod = @import("storage.zig");
+const log_mod = @import("log.zig");
 
 pub const TableId = storage_mod.TableId;
 pub const Seq = storage_mod.Seq;
@@ -11,6 +12,7 @@ pub const ColumnValue = storage_mod.ColumnValue;
 pub const MutationKind = storage_mod.MutationKind;
 pub const Mutation = storage_mod.Mutation;
 pub const Storage = storage_mod.Storage;
+pub const EntryKind = log_mod.EntryKind;
 
 pub const CdcOperation = enum { insert, update, delete };
 
@@ -41,6 +43,7 @@ pub const CdcEffect = struct {
 pub const CdcEvent = struct {
     seq: Seq,
     epoch: u64,
+    kind: EntryKind,
     effects: []CdcEffect,
     alloc: std.mem.Allocator,
 
@@ -202,6 +205,7 @@ pub const CdcManager = struct {
         self: *CdcManager,
         seq: Seq,
         epoch: u64,
+        kind: EntryKind,
         mutations: []const Mutation,
         before: BeforeImages,
         alloc: std.mem.Allocator,
@@ -233,6 +237,7 @@ pub const CdcManager = struct {
             const ev = CdcEvent{
                 .seq = seq,
                 .epoch = epoch,
+                .kind = kind,
                 .effects = try effects.toOwnedSlice(alloc),
                 .alloc = alloc,
             };

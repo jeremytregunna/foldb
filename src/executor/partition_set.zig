@@ -59,6 +59,11 @@ pub const PartitionSet = struct {
         self.alloc.free(self.executors);
     }
 
+    /// Wire a CDC manager on all partition executors.
+    pub fn withCdc(self: *PartitionSet, manager: *executor_mod.CdcManager) void {
+        for (self.executors) |*e| e.withCdc(manager);
+    }
+
     /// Register a single-partition handler on all partitions.
     pub fn registerAll(self: *PartitionSet, hash: [32]u8, handler: executor_mod.QueryHandler) !void {
         for (self.executors) |*e| try e.register(hash, handler);
@@ -206,11 +211,27 @@ pub const PartitionSet = struct {
             return self.abortPartitions(partitions, abort_code, abort_detail);
         }
 
-        // --- Phase D: apply all local mutations (only reached if all partitions succeeded) ---
+        // --- Phase D: apply mutations and emit CDC events per partition ---
         for (partitions, 0..) |p, idx| {
             const pi: usize = @intCast(p);
-            try self.executors[pi].storage.apply(mut_arrays[idx].items, seq);
-            self.executors[pi].committed_seq = seq;
+            const exec = &self.executors[pi];
+            const mutations = mut_arrays[idx].items;
+
+            var bi: ?executor_mod.BeforeImages = null;
+            defer if (bi) |*b| b.deinit();
+            if (exec.cdc) |mgr| {
+                const pre_seq: Seq = if (seq > 0) seq - 1 else 0;
+                bi = try mgr.captureBeforeImages(mutations, exec.storage, pre_seq, alloc);
+            }
+
+            try exec.storage.apply(mutations, seq);
+            exec.committed_seq = seq;
+
+            if (exec.cdc) |mgr| {
+                if (bi) |b| {
+                    try mgr.dispatch(seq, entry.header.epoch, entry.header.kind, mutations, b, alloc);
+                }
+            }
         }
 
         const results = try alloc.alloc(PartitionExecResult, partitions.len);

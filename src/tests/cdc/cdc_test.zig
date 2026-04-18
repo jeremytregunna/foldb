@@ -4,6 +4,7 @@ const testing = std.testing;
 const cdc_mod = @import("cdc.zig");
 const storage_mod = @import("storage.zig");
 const executor_mod = @import("executor.zig");
+const partition_set_mod = @import("partition_set.zig");
 const log_mod = @import("log.zig");
 
 const CdcManager = cdc_mod.CdcManager;
@@ -132,7 +133,7 @@ fn applyWithCdc(
     var bi = try mgr.captureBeforeImages(mutations, storage, pre_seq, alloc);
     defer bi.deinit();
     try storage.apply(mutations, seq);
-    try mgr.dispatch(seq, epoch, mutations, bi, alloc);
+    try mgr.dispatch(seq, epoch, log_mod.EntryKind.txn_intent, mutations, bi, alloc);
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -442,6 +443,378 @@ fn testInsertHandler(
         .key = key,
         .values = values,
     });
+}
+
+test "CDC: cross-partition transaction emits events on both partitions" {
+    var mgr = CdcManager.init(testing.allocator);
+    defer mgr.deinit();
+
+    // Two storage directories for two partitions.
+    const dir0 = try makeTempDir();
+    defer { removeDirRecursive(dir0); testing.allocator.free(dir0); }
+    const dir1 = try makeTempDir();
+    defer { removeDirRecursive(dir1); testing.allocator.free(dir1); }
+
+    var s0 = try Storage.init(dir0, testing.allocator);
+    defer s0.deinit();
+    var s1 = try Storage.init(dir1, testing.allocator);
+    defer s1.deinit();
+    try s0.registerTable(makeSchema());
+    try s1.registerTable(makeSchema());
+
+    var storages = [_]*Storage{ &s0, &s1 };
+    var ps = try partition_set_mod.PartitionSet.init(&storages, testing.allocator);
+    defer ps.deinit();
+
+    ps.withCdc(&mgr);
+
+    // Register a cross-partition handler that inserts one row per partition.
+    const HASH_CROSS: [32]u8 = [_]u8{0xCC} ** 32;
+    try ps.registerCrossAll(HASH_CROSS, .{
+        .declareReads = crossNoDeclare,
+        .execute = crossInsertExecute,
+    });
+
+    const sub = try mgr.subscribe(null, 0);
+
+    // Build a TxnIntent with write_set_hint = [0, 1] (touches both partitions).
+    const intent = log_mod.TxnIntent{
+        .query_hash = HASH_CROSS,
+        .params = &.{},
+        .read_set_hint = &.{},
+        .write_set_hint = &.{ 0, 1 },
+        .resolved_nondet = &.{},
+        .client_id = 1,
+        .client_seq = 1,
+    };
+    const payload = try intent.serializeTo(testing.allocator);
+    defer testing.allocator.free(payload);
+
+    const header = log_mod.LogEntryHeader.init(1, 0, .txn_intent, payload);
+    const entry = log_mod.LogEntry{ .header = header, .payload = payload };
+    const results = try ps.runEntry(entry);
+    defer testing.allocator.free(results);
+
+    for (results) |r| try testing.expect(r.result == .ok);
+
+    // Both partitions should have emitted a CDC event.
+    var buf: [2]CdcEvent = undefined;
+    const n = try sub.next(&buf);
+    defer for (buf[0..n]) |*e| e.deinit();
+    try testing.expectEqual(@as(usize, 2), n);
+
+    // Each event should have exactly one insert effect.
+    for (buf[0..n]) |ev| {
+        try testing.expectEqual(@as(usize, 1), ev.effects.len);
+        try testing.expectEqual(CdcOperation.insert, ev.effects[0].op);
+        try testing.expect(ev.effects[0].before == null);
+        try testing.expect(ev.effects[0].after != null);
+    }
+}
+
+fn crossNoDeclare(
+    _: executor_mod.QueryContext,
+    _: u32,
+    _: *std.ArrayList(executor_mod.ForeignReadRequest),
+) anyerror!void {}
+
+fn crossInsertExecute(
+    ctx: executor_mod.QueryContext,
+    local_partition: u32,
+    _: *Storage,
+    _: []const executor_mod.ForeignRow,
+    mutations: *std.ArrayList(Mutation),
+) anyerror!void {
+    const key = try std.fmt.allocPrint(ctx.alloc, "p{d}_key", .{local_partition});
+    errdefer ctx.alloc.free(key);
+    const vals = try ctx.alloc.alloc(ColumnValue, 2);
+    errdefer ctx.alloc.free(vals);
+    vals[0] = .{ .int64 = @intCast(local_partition) };
+    vals[1] = .{ .int64 = 77 };
+    try mutations.append(ctx.alloc, .{
+        .kind = .insert,
+        .table_id = TABLE_ID,
+        .key = key,
+        .values = vals,
+    });
+}
+
+test "CDC: event.kind is txn_intent" {
+    var mgr = CdcManager.init(testing.allocator);
+    defer mgr.deinit();
+
+    const dir = try makeTempDir();
+    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    var storage = try Storage.init(dir, testing.allocator);
+    defer storage.deinit();
+    try storage.registerTable(makeSchema());
+
+    const sub = try mgr.subscribe(null, 0);
+
+    const m = try makeInsertMutation(1, 1, testing.allocator);
+    defer freeMutation(m, testing.allocator);
+    try applyWithCdc(&mgr, &storage, &.{m}, 1, 7, testing.allocator);
+
+    var buf: [1]CdcEvent = undefined;
+    const n = try sub.next(&buf);
+    defer buf[0].deinit();
+    try testing.expectEqual(@as(usize, 1), n);
+    try testing.expectEqual(log_mod.EntryKind.txn_intent, buf[0].kind);
+    try testing.expectEqual(@as(u64, 7), buf[0].epoch);
+}
+
+test "CDC: multiple effects in one transaction" {
+    var mgr = CdcManager.init(testing.allocator);
+    defer mgr.deinit();
+
+    const dir = try makeTempDir();
+    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    var storage = try Storage.init(dir, testing.allocator);
+    defer storage.deinit();
+    try storage.registerTable(makeSchema());
+
+    const sub = try mgr.subscribe(null, 0);
+
+    // Insert two rows in a single transaction.
+    const m1 = try makeInsertMutation(1, 10, testing.allocator);
+    defer freeMutation(m1, testing.allocator);
+    const m2 = try makeInsertMutation(2, 20, testing.allocator);
+    defer freeMutation(m2, testing.allocator);
+    try applyWithCdc(&mgr, &storage, &.{ m1, m2 }, 1, 0, testing.allocator);
+
+    var buf: [1]CdcEvent = undefined;
+    const n = try sub.next(&buf);
+    defer buf[0].deinit();
+    try testing.expectEqual(@as(usize, 1), n);
+    // One event, two effects.
+    try testing.expectEqual(@as(usize, 2), buf[0].effects.len);
+    try testing.expectEqual(CdcOperation.insert, buf[0].effects[0].op);
+    try testing.expectEqual(CdcOperation.insert, buf[0].effects[1].op);
+}
+
+test "CDC: table_filter passes matching table" {
+    var mgr = CdcManager.init(testing.allocator);
+    defer mgr.deinit();
+
+    const dir = try makeTempDir();
+    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    var storage = try Storage.init(dir, testing.allocator);
+    defer storage.deinit();
+    try storage.registerTable(makeSchema());
+
+    // Subscribe specifically to TABLE_ID.
+    const sub = try mgr.subscribe(TABLE_ID, 0);
+
+    const m = try makeInsertMutation(1, 5, testing.allocator);
+    defer freeMutation(m, testing.allocator);
+    try applyWithCdc(&mgr, &storage, &.{m}, 1, 0, testing.allocator);
+
+    var buf: [1]CdcEvent = undefined;
+    const n = try sub.next(&buf);
+    defer buf[0].deinit();
+    try testing.expectEqual(@as(usize, 1), n);
+    try testing.expectEqual(@as(u32, TABLE_ID), buf[0].effects[0].table_id);
+}
+
+test "CDC: unsubscribe stops delivery" {
+    var mgr = CdcManager.init(testing.allocator);
+    defer mgr.deinit();
+
+    const dir = try makeTempDir();
+    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    var storage = try Storage.init(dir, testing.allocator);
+    defer storage.deinit();
+    try storage.registerTable(makeSchema());
+
+    // Subscribe, deliver one event, then unsubscribe and confirm no more events.
+    const sub = try mgr.subscribe(null, 0);
+    const sub_id = sub.id;
+
+    const m1 = try makeInsertMutation(1, 1, testing.allocator);
+    defer freeMutation(m1, testing.allocator);
+    try applyWithCdc(&mgr, &storage, &.{m1}, 1, 0, testing.allocator);
+
+    var buf1: [1]CdcEvent = undefined;
+    const n1 = try sub.next(&buf1);
+    // sub pointer is still valid here (manager still owns it until unsubscribe)
+    try testing.expectEqual(@as(usize, 1), n1);
+    buf1[0].deinit();
+
+    mgr.unsubscribe(sub_id);
+
+    // After unsubscribe, no further events should be pushed.
+    const m2 = try makeInsertMutation(2, 2, testing.allocator);
+    defer freeMutation(m2, testing.allocator);
+    try applyWithCdc(&mgr, &storage, &.{m2}, 2, 0, testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), mgr.subscriptions.items.len);
+}
+
+test "CDC: next with partial buffer drains incrementally" {
+    var mgr = CdcManager.init(testing.allocator);
+    defer mgr.deinit();
+
+    const dir = try makeTempDir();
+    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    var storage = try Storage.init(dir, testing.allocator);
+    defer storage.deinit();
+    try storage.registerTable(makeSchema());
+
+    const sub = try mgr.subscribe(null, 0);
+
+    const m1 = try makeInsertMutation(1, 1, testing.allocator);
+    defer freeMutation(m1, testing.allocator);
+    const m2 = try makeInsertMutation(2, 2, testing.allocator);
+    defer freeMutation(m2, testing.allocator);
+    const m3 = try makeInsertMutation(3, 3, testing.allocator);
+    defer freeMutation(m3, testing.allocator);
+    try applyWithCdc(&mgr, &storage, &.{m1}, 1, 0, testing.allocator);
+    try applyWithCdc(&mgr, &storage, &.{m2}, 2, 0, testing.allocator);
+    try applyWithCdc(&mgr, &storage, &.{m3}, 3, 0, testing.allocator);
+
+    // Read two at a time.
+    var buf: [2]CdcEvent = undefined;
+    const n1 = try sub.next(&buf);
+    try testing.expectEqual(@as(usize, 2), n1);
+    try testing.expectEqual(@as(Seq, 1), buf[0].seq);
+    try testing.expectEqual(@as(Seq, 2), buf[1].seq);
+    buf[0].deinit();
+    buf[1].deinit();
+
+    // One remains.
+    const n2 = try sub.next(&buf);
+    defer buf[0].deinit();
+    try testing.expectEqual(@as(usize, 1), n2);
+    try testing.expectEqual(@as(Seq, 3), buf[0].seq);
+}
+
+test "CDC: update on nonexistent row has null before" {
+    var mgr = CdcManager.init(testing.allocator);
+    defer mgr.deinit();
+
+    const dir = try makeTempDir();
+    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    var storage = try Storage.init(dir, testing.allocator);
+    defer storage.deinit();
+    try storage.registerTable(makeSchema());
+
+    const sub = try mgr.subscribe(null, 0);
+
+    // Update a key that was never inserted.
+    const m = try makeUpdateMutation(99, 55, testing.allocator);
+    defer freeMutation(m, testing.allocator);
+    try applyWithCdc(&mgr, &storage, &.{m}, 1, 0, testing.allocator);
+
+    var buf: [1]CdcEvent = undefined;
+    const n = try sub.next(&buf);
+    defer buf[0].deinit();
+    try testing.expectEqual(@as(usize, 1), n);
+    try testing.expectEqual(CdcOperation.update, buf[0].effects[0].op);
+    try testing.expect(buf[0].effects[0].before == null);
+    try testing.expect(buf[0].effects[0].after != null);
+}
+
+test "CDC: delete on nonexistent row has null before" {
+    var mgr = CdcManager.init(testing.allocator);
+    defer mgr.deinit();
+
+    const dir = try makeTempDir();
+    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    var storage = try Storage.init(dir, testing.allocator);
+    defer storage.deinit();
+    try storage.registerTable(makeSchema());
+
+    const sub = try mgr.subscribe(null, 0);
+
+    const m = try makeDeleteMutation(99, testing.allocator);
+    defer freeMutation(m, testing.allocator);
+    try applyWithCdc(&mgr, &storage, &.{m}, 1, 0, testing.allocator);
+
+    var buf: [1]CdcEvent = undefined;
+    const n = try sub.next(&buf);
+    defer buf[0].deinit();
+    try testing.expectEqual(@as(usize, 1), n);
+    try testing.expectEqual(CdcOperation.delete, buf[0].effects[0].op);
+    try testing.expect(buf[0].effects[0].before == null);
+    try testing.expect(buf[0].effects[0].after == null);
+}
+
+test "CDC: aborted transaction produces no events" {
+    var mgr = CdcManager.init(testing.allocator);
+    defer mgr.deinit();
+
+    const dir = try makeTempDir();
+    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    var storage = try Storage.init(dir, testing.allocator);
+    defer storage.deinit();
+    try storage.registerTable(makeSchema());
+
+    var executor = Executor.init(&storage, testing.allocator);
+    defer executor.deinit();
+    executor.withCdc(&mgr);
+
+    const sub = try mgr.subscribe(null, 0);
+
+    const hash: [32]u8 = [_]u8{0xBB} ** 32;
+    try executor.register(hash, testAbortingHandler);
+
+    const payload = try buildTestPayloadWithHash(hash, testing.allocator);
+    defer testing.allocator.free(payload);
+
+    const entry = LogEntry.create(1, 0, .txn_intent, payload);
+    const result = try executor.run(entry);
+    try testing.expect(result == .abort);
+
+    var buf: [1]CdcEvent = undefined;
+    const n = try sub.next(&buf);
+    try testing.expectEqual(@as(usize, 0), n);
+}
+
+test "CDC: non-txn log entry produces no events" {
+    var mgr = CdcManager.init(testing.allocator);
+    defer mgr.deinit();
+
+    const dir = try makeTempDir();
+    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    var storage = try Storage.init(dir, testing.allocator);
+    defer storage.deinit();
+
+    var executor = Executor.init(&storage, testing.allocator);
+    defer executor.deinit();
+    executor.withCdc(&mgr);
+
+    const sub = try mgr.subscribe(null, 0);
+
+    // A noop entry should not emit any CDC event.
+    const noop_entry = LogEntry.create(1, 0, .noop, &.{});
+    _ = try executor.run(noop_entry);
+
+    var buf: [1]CdcEvent = undefined;
+    const n = try sub.next(&buf);
+    try testing.expectEqual(@as(usize, 0), n);
+}
+
+fn testAbortingHandler(
+    _: executor_mod.QueryContext,
+    _: *Storage,
+    _: *std.ArrayListUnmanaged(Mutation),
+) anyerror!void {
+    return error.ConstraintViolation;
+}
+
+fn buildTestPayloadWithHash(hash: [32]u8, alloc: std.mem.Allocator) ![]u8 {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    errdefer buf.deinit(alloc);
+    const zero8: [8]u8 = std.mem.zeroes([8]u8);
+    const zero4: [4]u8 = std.mem.zeroes([4]u8);
+    try buf.appendSlice(alloc, &hash);
+    try buf.appendSlice(alloc, &zero8);
+    try buf.appendSlice(alloc, &zero8);
+    try buf.appendSlice(alloc, &zero4);
+    try buf.appendSlice(alloc, &zero4);
+    try buf.appendSlice(alloc, &zero4);
+    try buf.appendSlice(alloc, &zero4);
+    return buf.toOwnedSlice(alloc);
 }
 
 fn buildTestPayload(id: i64, val: i64, alloc: std.mem.Allocator) ![]u8 {

@@ -263,6 +263,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     cdc_module.addImport("storage.zig", storage_module);
+    cdc_module.addImport("log.zig", log_module);
 
     // Executor module
     const executor_module = b.createModule(.{
@@ -565,6 +566,7 @@ pub fn build(b: *std.Build) void {
     cdc_test_module.addImport("cdc.zig", cdc_module);
     cdc_test_module.addImport("storage.zig", storage_module);
     cdc_test_module.addImport("executor.zig", executor_module);
+    cdc_test_module.addImport("partition_set.zig", partition_set_module);
     cdc_test_module.addImport("log.zig", log_module);
     const cdc_tests = b.addTest(.{ .root_module = cdc_test_module });
     const run_cdc_tests = b.addRunArtifact(cdc_tests);
