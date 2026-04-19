@@ -20,6 +20,7 @@ pub const ResolvedKind = types_mod.ResolvedKind;
 pub const AbortCode = types_mod.AbortCode;
 pub const ExecResult = types_mod.ExecResult;
 pub const TxnIntentDecoded = types_mod.TxnIntentDecoded;
+pub const ValidatedTxnEntry = types_mod.ValidatedTxnEntry;
 pub const TxnIntentHeader = types_mod.TxnIntentHeader;
 pub const serializeTxnIntent = types_mod.serializeTxnIntent;
 pub const deserializeTxnIntent = types_mod.deserializeTxnIntent;
@@ -45,6 +46,16 @@ pub const Seq = types_mod.Seq;
 pub const ExecutorError = error{
     ConstraintViolation,
 };
+
+/// Domain boundary — CRC-verifies and decodes a txn_intent LogEntry.
+/// Returns error for corrupt or malformed entries; never returns partial state.
+/// Call this before handing the entry to the Executor core.
+pub fn validateTxnEntry(entry: LogEntry, alloc: std.mem.Allocator) !ValidatedTxnEntry {
+    std.debug.assert(entry.header.kind == .txn_intent);
+    if (!entry.verifyCrc()) return error.CrcMismatch;
+    const decoded = try deserializeTxnIntent(entry.payload, alloc);
+    return .{ .seq = entry.header.seq, .epoch = entry.header.epoch, .decoded = decoded };
+}
 
 pub const ExecutorMetrics = obs.ExecutorMetrics;
 
@@ -126,16 +137,21 @@ pub const Executor = struct {
             return .{ .ok = .{ .rows_affected = 0 } };
         }
 
-        if (!entry.verifyCrc()) {
+        // This is the domain boundary — all data past this point is validated.
+        var validated = validateTxnEntry(entry, self.alloc) catch |e| {
             self.metrics.txns_aborted.inc();
-            return .{ .abort = .{ .code = .bad_params, .detail = "crc mismatch" } };
-        }
-
-        var decoded = deserializeTxnIntent(entry.payload, self.alloc) catch {
-            self.metrics.txns_aborted.inc();
-            return .{ .abort = .{ .code = .bad_params, .detail = "invalid payload" } };
+            return switch (e) {
+                error.CrcMismatch => .{ .abort = .{ .code = .bad_params, .detail = "crc mismatch" } },
+                else => .{ .abort = .{ .code = .bad_params, .detail = "invalid payload" } },
+            };
         };
-        defer decoded.deinit();
+        defer validated.decoded.deinit();
+
+        return self.runValidated(validated);
+    }
+
+    fn runValidated(self: *Executor, entry: ValidatedTxnEntry) !ExecResult {
+        const decoded = entry.decoded;
 
         const registered = self.registry.lookup(decoded.query_hash.*) orelse {
             self.metrics.txns_missing_query.inc();
@@ -145,15 +161,13 @@ pub const Executor = struct {
         // Single-partition handlers only. Cross-partition txns must go through PartitionSet.
         const handler = switch (registered) {
             .single => |h| h,
-            .cross => {
-                return .{ .abort = .{ .code = .missing_query, .detail = "cross-partition txn requires PartitionSet" } };
-            },
+            .cross => return .{ .abort = .{ .code = .missing_query, .detail = "cross-partition txn requires PartitionSet" } },
         };
 
         const ctx = QueryContext{
             .params = decoded.params,
             .resolved = decoded.nondet,
-            .seq = entry.header.seq,
+            .seq = entry.seq,
             .alloc = self.alloc,
         };
 
@@ -181,16 +195,16 @@ pub const Executor = struct {
         var before_images: ?cdc_mod.BeforeImages = null;
         defer if (before_images) |*bi| bi.deinit();
         if (self.cdc) |mgr| {
-            const pre_seq: Seq = if (entry.header.seq > 0) entry.header.seq - 1 else 0;
+            const pre_seq: Seq = if (entry.seq > 0) entry.seq - 1 else 0;
             before_images = try mgr.captureBeforeImages(mutations.items, self.storage, pre_seq, self.alloc);
         }
 
-        try self.storage.apply(mutations.items, entry.header.seq);
+        try self.storage.apply(mutations.items, entry.seq);
 
         // CDC: dispatch events after successful apply.
         if (self.cdc) |mgr| {
             if (before_images) |bi| {
-                try mgr.dispatch(entry.header.seq, entry.header.epoch, entry.header.kind, mutations.items, bi, self.alloc);
+                try mgr.dispatch(entry.seq, entry.epoch, .txn_intent, mutations.items, bi, self.alloc);
             }
         }
 

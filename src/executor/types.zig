@@ -62,6 +62,16 @@ pub const TxnIntentHeader = extern struct {
 
 pub const RESOLVED_RECORD_SIZE: usize = 17; // tag(1) + data(16)
 
+/// A txn_intent LogEntry that has passed CRC verification and payload decoding at the domain
+/// boundary. The Executor core accepts only this type — never raw bytes for txn_intent entries.
+/// Lifetime: query_hash and params are slices into the source LogEntry payload; the source
+/// entry must remain alive for the duration of this struct's use.
+pub const ValidatedTxnEntry = struct {
+    seq: Seq,
+    epoch: u64,
+    decoded: TxnIntentDecoded,
+};
+
 pub const TxnIntentDecoded = struct {
     query_hash: *const [32]u8, // points into original payload
     client_id: u64,

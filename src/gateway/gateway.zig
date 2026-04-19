@@ -197,6 +197,7 @@ pub const Gateway = struct {
 
     /// Execute a registered DML query (INSERT/UPDATE/DELETE) with the given parameters.
     /// Routes through the Sequencer → partition log → SqlExecutor.run().
+    // This is the domain boundary — all data past this point is validated.
     pub fn execute(
         self: *Gateway,
         io: std.Io,
@@ -291,6 +292,7 @@ pub const Gateway = struct {
 
     /// Execute a SELECT query and return the result set.
     /// Reads go directly to storage (no log routing needed for reads).
+    // This is the domain boundary — all data past this point is validated.
     pub fn querySelect(
         self: *Gateway,
         hash: QueryHash,
@@ -323,6 +325,7 @@ pub const Gateway = struct {
     }
 
     /// Read data at a specific sequence number (historical read).
+    // This is the domain boundary — all data past this point is validated.
     pub fn readAt(
         self: *Gateway,
         hash: QueryHash,
@@ -570,7 +573,9 @@ fn decodeParams(
     param_types: []const sql_mod.ast.SqlType,
     alloc: std.mem.Allocator,
 ) ![]const ColumnValue {
-    _ = param_types;
+    // param_types is only populated for TRANSACTION blocks; plain SELECT param types are not
+    // yet extracted by extractParamTypes. Enforce the count only when types are known.
+    if (param_types.len > 0 and params.len != param_types.len) return error.ParamDecodeError;
     return try alloc.dupe(ColumnValue, params);
 }
 
