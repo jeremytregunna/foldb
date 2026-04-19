@@ -107,7 +107,7 @@ pub const CdcSubscription = struct {
     }
 
     /// Record that all events up to and including `seq` have been processed.
-    pub fn ack(self: *CdcSubscription, seq: Seq) !void {
+    pub fn ack(self: *CdcSubscription, seq: Seq) void {
         if (seq > self.cursor) self.cursor = seq;
     }
 
@@ -189,7 +189,7 @@ pub const CdcManager = struct {
                 images[committed] = null;
                 continue;
             }
-            const row_opt = storage.get(m.table_id, m.key, at_seq) catch null;
+            const row_opt = try storage.get(m.table_id, m.key, at_seq);
             if (row_opt) |row| {
                 var r = row;
                 defer r.deinit(storage.alloc);

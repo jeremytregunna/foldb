@@ -531,6 +531,11 @@ pub const Gateway = struct {
         const tbl = self.schema.getTable(name) orelse return null;
         return tbl.id;
     }
+
+    /// Returns true if a table with this numeric ID exists in the schema.
+    pub fn tableIdExists(self: *Gateway, id: u32) bool {
+        return self.schema.getTableById(id) != null;
+    }
 };
 
 /// Scan sql_text for NOW(), RANDOM(), UUID() calls (case-insensitive) and resolve each.

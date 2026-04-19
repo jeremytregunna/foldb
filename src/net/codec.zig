@@ -421,7 +421,18 @@ pub fn encode(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, v: Typ
 
 // ---- TypedValue decode ----
 
+/// Maximum nesting depth for array/struct/map values from the wire.
+const MAX_DECODE_DEPTH: u8 = 16;
+/// Maximum element count for array/map containers from the wire.
+const MAX_CONTAINER_COUNT: u32 = 65535;
+
+// This is the domain boundary — all wire data entering via decode() is validated
+// for structure (depth, counts, tags) before reaching the domain core.
 pub fn decode(cur: *Cursor, alloc: std.mem.Allocator) !TypedValue {
+    return decodeInner(cur, alloc, 0);
+}
+
+fn decodeInner(cur: *Cursor, alloc: std.mem.Allocator, depth: u8) !TypedValue {
     const tag = try cur.readU8();
     return switch (tag) {
         TAG_NULL => .null_val,
@@ -463,7 +474,9 @@ pub fn decode(cur: *Cursor, alloc: std.mem.Allocator) !TypedValue {
             break :blk .{ .vector = .{ .element_type = et, .dim = dim, .data = data } };
         },
         TAG_ARRAY => blk: {
+            if (depth >= MAX_DECODE_DEPTH) return error.ProtocolError;
             const count = try cur.readU32Le();
+            if (count > MAX_CONTAINER_COUNT) return error.ProtocolError;
             const arr = try alloc.alloc(TypedValue, count);
             var decoded: u32 = 0;
             errdefer {
@@ -471,11 +484,12 @@ pub fn decode(cur: *Cursor, alloc: std.mem.Allocator) !TypedValue {
                 alloc.free(arr);
             }
             while (decoded < count) : (decoded += 1) {
-                arr[decoded] = try decode(cur, alloc);
+                arr[decoded] = try decodeInner(cur, alloc, depth + 1);
             }
             break :blk .{ .array = arr };
         },
         TAG_STRUCT => blk: {
+            if (depth >= MAX_DECODE_DEPTH) return error.ProtocolError;
             const count = try cur.readU16Le();
             const fields = try alloc.alloc(StructField, count);
             var decoded: u16 = 0;
@@ -489,13 +503,15 @@ pub fn decode(cur: *Cursor, alloc: std.mem.Allocator) !TypedValue {
             while (decoded < count) : (decoded += 1) {
                 const name = try cur.readU8LenPrefixedAlloc(alloc);
                 errdefer alloc.free(name);
-                const value = try decode(cur, alloc);
+                const value = try decodeInner(cur, alloc, depth + 1);
                 fields[decoded] = .{ .name = name, .value = value };
             }
             break :blk .{ .struct_val = fields };
         },
         TAG_MAP => blk: {
+            if (depth >= MAX_DECODE_DEPTH) return error.ProtocolError;
             const count = try cur.readU32Le();
+            if (count > MAX_CONTAINER_COUNT) return error.ProtocolError;
             const entries = try alloc.alloc(MapEntry, count);
             var decoded: u32 = 0;
             errdefer {
@@ -506,10 +522,10 @@ pub fn decode(cur: *Cursor, alloc: std.mem.Allocator) !TypedValue {
                 alloc.free(entries);
             }
             while (decoded < count) : (decoded += 1) {
-                const key = try decode(cur, alloc);
+                const key = try decodeInner(cur, alloc, depth + 1);
                 if (key == .null_val) return error.ProtocolError;
                 errdefer key.deinit(alloc);
-                const value = try decode(cur, alloc);
+                const value = try decodeInner(cur, alloc, depth + 1);
                 entries[decoded] = .{ .key = key, .value = value };
             }
             break :blk .{ .map = entries };

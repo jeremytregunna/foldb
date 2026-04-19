@@ -465,10 +465,16 @@ pub const Conn = struct {
             resolved.deinit(self.alloc);
         }
 
+        // This is the domain boundary — all Subscribe filter data is validated here
+        // before being passed to the CDC subscription core.
         var table_filter: ?u32 = null;
         for (sub_req.filters) |f| {
             switch (f) {
                 .by_id => |id| {
+                    if (!self.gw.tableIdExists(id)) {
+                        self.sendStreamError(stream_id, .query_not_found, "unknown table id");
+                        return;
+                    }
                     table_filter = id;
                 },
                 .by_name => |name| {
@@ -573,9 +579,14 @@ pub const Conn = struct {
 
             switch (client_kind) {
                 .ack_cdc => {
+                    // This is the domain boundary — AckCdc payload is validated before
+                    // advancing the subscription cursor or granting credits.
                     var ccur = Cursor.init(client_payload);
-                    const ack = msg.decodeAckCdc(&ccur) catch continue;
-                    sub.ack(ack.acked_seq) catch {};
+                    const ack = msg.decodeAckCdc(&ccur) catch {
+                        self.sendStreamError(stream_id, .protocol_error, "malformed AckCdc");
+                        return;
+                    };
+                    sub.ack(ack.acked_seq);
                     const new_credits: u64 = @min(
                         std.math.maxInt(u64) - state.credits,
                         ack.add_credits,
@@ -682,12 +693,20 @@ pub const Conn = struct {
     // ---- AckCdc (outside subscription drain — shouldn't arrive here normally) ----
 
     fn handleAckCdc(self: *Conn, stream_id: u64, cur: *Cursor) !void {
-        const ack = msg.decodeAckCdc(cur) catch return;
+        // This is the domain boundary — AckCdc payload is validated before use.
+        const ack = msg.decodeAckCdc(cur) catch {
+            self.sendStreamError(stream_id, .protocol_error, "malformed AckCdc");
+            return;
+        };
         const state = self.streams.getPtr(stream_id) orelse return;
         if (state.kind != .subscription) return;
         const sub = self.gw.getCdcSub(state.sub_id) orelse return;
-        sub.ack(ack.acked_seq) catch {};
-        state.credits +|= ack.add_credits;
+        sub.ack(ack.acked_seq);
+        const new_credits: u64 = @min(
+            std.math.maxInt(u64) - state.credits,
+            ack.add_credits,
+        );
+        state.credits +|= new_credits;
     }
 
     // ---- Unsubscribe ----

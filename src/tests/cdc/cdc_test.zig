@@ -360,7 +360,7 @@ test "CDC: ack advances cursor" {
     buf[0].deinit();
     buf[1].deinit();
 
-    try sub.ack(2);
+    sub.ack(2);
     try testing.expectEqual(@as(Seq, 2), sub.cursor);
 }
 
