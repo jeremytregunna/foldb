@@ -12,7 +12,7 @@ const RaftNode = raft.RaftNode;
 const Config = raft.Config;
 const Output = raft.Output;
 const Log = log_mod.Log;
-const TxnIntent = log_mod.TxnIntent;
+const LogEntry = log_mod.LogEntry;
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -279,8 +279,8 @@ test "Node: log conflict resolved by truncation" {
     defer log.deinit();
 
     // Pre-populate log with stale entries (term 1).
-    _ = try log.append(TxnIntent.initTest("stale1", 1, 1));
-    _ = try log.append(TxnIntent.initTest("stale2", 1, 2));
+    try log.appendEntryAt(LogEntry.create(1, 1, .txn_intent, "stale1"));
+    try log.appendEntryAt(LogEntry.create(2, 1, .txn_intent, "stale2"));
     try testing.expectEqual(@as(u64, 2), try log.head());
 
     var node = try RaftNode.init(testing.allocator, 1, &.{ 2, 3 }, TEST_CFG, 3);

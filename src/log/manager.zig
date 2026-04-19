@@ -5,7 +5,6 @@ const segment = @import("segment.zig");
 const obs = @import("observability.zig");
 
 const LogEntry = entry_mod.LogEntry;
-const TxnIntent = entry_mod.TxnIntent;
 const Seq = entry_mod.Seq;
 const NodeId = entry_mod.NodeId;
 const Segment = segment.Segment;
@@ -138,48 +137,6 @@ pub const Log = struct {
         self.sealed_segments.deinit(std.heap.page_allocator);
 
         std.heap.page_allocator.free(self.path);
-    }
-
-    pub fn append(self: *Log, intent: TxnIntent) !Seq {
-        if (self.sealed) return LogError.LogSealed;
-
-        self.current_seq += 1;
-        const seq = self.current_seq;
-
-        const payload = try intent.serializeTo(std.heap.page_allocator);
-        errdefer std.heap.page_allocator.free(payload);
-
-        const entry = LogEntry.create(seq, self.current_term, .txn_intent, payload);
-        try self.current_segment.append(entry);
-
-        self.metrics.entries_appended.inc();
-        self.metrics.bytes_appended.add(@intCast(payload.len));
-        self.metrics.current_seq.set(@intCast(seq));
-
-        if (self.current_segment.entry_count >= self.segment_max_entries) {
-            try self.rotate();
-        }
-
-        return seq;
-    }
-
-    /// Append a TxnIntent at a pre-assigned global sequence number.
-    /// Accepts any seq > current_seq (no gap-freedom requirement).
-    /// Used by data partition logs where the Sequencer assigns global seqs.
-    pub fn appendAt(self: *Log, intent: TxnIntent, seq: Seq) !void {
-        if (self.sealed) return LogError.LogSealed;
-        if (seq <= self.current_seq) return LogError.SeqOutOfOrder;
-
-        const payload = try intent.serializeTo(std.heap.page_allocator);
-        errdefer std.heap.page_allocator.free(payload);
-
-        const entry = LogEntry.create(seq, self.current_term, .txn_intent, payload);
-        try self.current_segment.append(entry);
-        self.current_seq = seq;
-
-        if (self.current_segment.entry_count >= self.segment_max_entries) {
-            try self.rotate();
-        }
     }
 
     pub fn rotate(self: *Log) !void {
@@ -325,6 +282,7 @@ pub const Log = struct {
 
     /// Append a pre-built LogEntry at a globally-assigned seq (any seq > current_seq).
     /// Used by data partition logs driven by the Sequencer.
+    // This is the domain boundary — callers must serialize and validate payloads before calling.
     pub fn appendEntryAt(self: *Log, entry: LogEntry) !void {
         if (self.sealed) return LogError.LogSealed;
         if (entry.header.seq <= self.current_seq) return LogError.SeqOutOfOrder;
@@ -344,6 +302,7 @@ pub const Log = struct {
 
     /// Append a pre-sequenced entry (used by Raft followers).
     /// The entry's seq must equal current_seq + 1.
+    // This is the domain boundary — callers must serialize and validate payloads before calling.
     pub fn appendEntry(self: *Log, entry: LogEntry) !void {
         if (self.sealed) return LogError.LogSealed;
         if (entry.header.seq != self.current_seq + 1) return LogError.SeqOutOfOrder;

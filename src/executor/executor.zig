@@ -57,6 +57,19 @@ pub fn validateTxnEntry(entry: LogEntry, alloc: std.mem.Allocator) !ValidatedTxn
     return .{ .seq = entry.header.seq, .epoch = entry.header.epoch, .decoded = decoded };
 }
 
+/// Domain boundary — decodes a snapshot_marker LogEntry payload.
+/// Returns only the inner marker sequence — the only field the core uses.
+/// Returns error if the payload is malformed.
+fn validateSnapshotEntry(entry: LogEntry, alloc: std.mem.Allocator) !Seq {
+    std.debug.assert(entry.header.kind == .snapshot_marker);
+    const marker = try storage_mod.SnapshotMarkerPayload.deserialize(entry.payload, alloc);
+    defer {
+        var m = marker;
+        m.deinit(alloc);
+    }
+    return marker.seq;
+}
+
 pub const ExecutorMetrics = obs.ExecutorMetrics;
 
 // Note: PartitionSet is in partition_set.zig (separate module to avoid circular imports).
@@ -125,13 +138,10 @@ pub const Executor = struct {
         // Non-txn entries advance seq; snapshot_marker additionally notifies the log.
         if (entry.header.kind != .txn_intent) {
             if (entry.header.kind == .snapshot_marker) {
-                const marker = storage_mod.SnapshotMarkerPayload.deserialize(entry.payload, self.alloc) catch
-                    return .{ .ok = .{ .rows_affected = 0 } };
-                defer {
-                    var m = marker;
-                    m.deinit(self.alloc);
-                }
-                if (self.log) |l| l.notifySnapshot(marker.seq);
+                // Domain boundary — decode snapshot marker; skip notification if payload is malformed.
+                if (validateSnapshotEntry(entry, self.alloc)) |marker_seq| {
+                    if (self.log) |l| l.notifySnapshot(marker_seq);
+                } else |_| {}
             }
             self.metrics.noops_processed.inc();
             return .{ .ok = .{ .rows_affected = 0 } };

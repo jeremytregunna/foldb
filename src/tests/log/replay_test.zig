@@ -6,6 +6,8 @@ const testing = std.testing;
 const log_mod = @import("log.zig");
 
 const Log = log_mod.Log;
+const LogEntry = log_mod.LogEntry;
+const Seq = log_mod.Seq;
 const TxnIntent = log_mod.TxnIntent;
 
 // ─── Temp dir helpers ─────────────────────────────────────────────────────────
@@ -54,6 +56,18 @@ fn removeDir(path: []const u8) void {
         }
     }
     _ = std.os.linux.rmdir(null_path.ptr);
+}
+
+// This is the domain boundary for tests — serializes a TxnIntent before handing
+// pre-built LogEntry bytes to the log core via appendEntryAt.
+fn appendTestIntent(log_inst: *Log, alloc: std.mem.Allocator, params: []const u8, client_id: u64) !Seq {
+    const intent = TxnIntent.initTest(params, client_id, 1);
+    const payload = try intent.serializeTo(alloc);
+    defer alloc.free(payload);
+    const seq = log_inst.current_seq + 1;
+    const entry = LogEntry.create(seq, 0, .txn_intent, payload);
+    try log_inst.appendEntryAt(entry);
+    return seq;
 }
 
 // ─── DST helper: compare entries read from two logs ───────────────────────────
@@ -108,8 +122,8 @@ test "Log Replay: identical appends produce identical entry sequences" {
     while (i < N) : (i += 1) {
         const params = try std.fmt.allocPrint(alloc, "key{d:03}:val{d}", .{ i % 10, i * 7 });
         defer alloc.free(params);
-        const seq_a = try log_a.append(TxnIntent.initTest(params, @intCast(i), 1));
-        const seq_b = try log_b.append(TxnIntent.initTest(params, @intCast(i), 1));
+        const seq_a = try appendTestIntent(&log_a, alloc, params, @intCast(i));
+        const seq_b = try appendTestIntent(&log_b, alloc, params, @intCast(i));
         try testing.expectEqual(seq_a, seq_b);
     }
 
@@ -151,8 +165,8 @@ test "Log Replay: multi-segment replay is deterministic" {
     while (i < N) : (i += 1) {
         const params = try std.fmt.allocPrint(alloc, "row{d}", .{i});
         defer alloc.free(params);
-        _ = try log_a.append(TxnIntent.initTest(params, @intCast(i % 7), 1));
-        _ = try log_b.append(TxnIntent.initTest(params, @intCast(i % 7), 1));
+        _ = try appendTestIntent(&log_a, alloc, params, @intCast(i % 7));
+        _ = try appendTestIntent(&log_b, alloc, params, @intCast(i % 7));
     }
 
     try assertEntriesEqual(&log_a, &log_b, 1, N + 10, alloc);
@@ -190,7 +204,7 @@ test "Log Replay: close and reopen preserves sealed segment entries" {
     for (0..N) |i| {
         const p = try std.fmt.allocPrint(alloc, "persist_entry_{d}", .{i});
         defer alloc.free(p);
-        _ = try log_a.append(TxnIntent.initTest(p, @intCast(i), 1));
+        _ = try appendTestIntent(&log_a, alloc, p, @intCast(i));
     }
     // Close cleanly — seals the current segment.
     log_a.deinit();
@@ -250,8 +264,8 @@ test "Log Replay: read from mid-sequence returns consistent suffix" {
     while (i < N) : (i += 1) {
         const params = try std.fmt.allocPrint(alloc, "entry{d:02}", .{i});
         defer alloc.free(params);
-        _ = try log_a.append(TxnIntent.initTest(params, @intCast(i), 1));
-        _ = try log_b.append(TxnIntent.initTest(params, @intCast(i), 1));
+        _ = try appendTestIntent(&log_a, alloc, params, @intCast(i));
+        _ = try appendTestIntent(&log_b, alloc, params, @intCast(i));
     }
 
     // Read only the second half

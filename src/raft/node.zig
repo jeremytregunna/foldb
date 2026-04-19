@@ -323,13 +323,12 @@ pub const RaftNode = struct {
             }
             try log.appendEntry(entry);
             replicated += 1;
-            // Track config_change entries for application when committed.
+            // Domain boundary — decode config_change payload from the replication stream.
             if (entry.header.kind == .config_change and self.pending_config_seq == 0) {
-                if (ConfigChange.deserialize(entry.payload)) |cc| {
-                    self.pending_config_seq = entry.header.seq;
-                    self.pending_config_op = cc.op;
-                    self.pending_config_peer = cc.node_id;
-                } else |_| {}
+                const cc = try ConfigChange.deserialize(entry.payload);
+                self.pending_config_seq = entry.header.seq;
+                self.pending_config_op = cc.op;
+                self.pending_config_peer = cc.node_id;
             }
         }
         if (replicated > 0) self.metrics.entries_replicated.add(replicated);

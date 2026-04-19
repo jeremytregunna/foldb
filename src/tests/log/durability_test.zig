@@ -64,6 +64,18 @@ fn makeTempDir() ![]const u8 {
     return path;
 }
 
+// This is the domain boundary for tests — serializes a TxnIntent before handing
+// pre-built LogEntry bytes to the log core via appendEntryAt.
+fn appendTestIntent(log_inst: *Log, alloc: std.mem.Allocator, params: []const u8) !Seq {
+    const intent = TxnIntent.initTest(params, 1, 1);
+    const payload = try intent.serializeTo(alloc);
+    defer alloc.free(payload);
+    const seq = log_inst.current_seq + 1;
+    const entry = LogEntry.create(seq, 0, .txn_intent, payload);
+    try log_inst.appendEntryAt(entry);
+    return seq;
+}
+
 test "Durability: data survives deinit and re-init" {
     const temp_path = try makeTempDir();
     defer {
@@ -83,7 +95,7 @@ test "Durability: data survives deinit and re-init" {
 
     var expected_seq: Seq = 0;
     for (payloads) |payload| {
-        const seq = try log_instance.append(TxnIntent.initTest(payload, 1, 1));
+        const seq = try appendTestIntent(&log_instance, testing.allocator, payload);
         expected_seq = seq;
     }
 
@@ -122,15 +134,15 @@ test "Durability: data survives multiple deinit/init cycles" {
     }
 
     var log_instance = try Log.init(temp_path, 1);
-    _ = try log_instance.append(TxnIntent.initTest("cycle1_data", 1, 1));
+    _ = try appendTestIntent(&log_instance, testing.allocator, "cycle1_data");
     log_instance.deinit();
 
     log_instance = try Log.init(temp_path, 1);
-    _ = try log_instance.append(TxnIntent.initTest("cycle2_data", 1, 2));
+    _ = try appendTestIntent(&log_instance, testing.allocator, "cycle2_data");
     log_instance.deinit();
 
     log_instance = try Log.init(temp_path, 1);
-    _ = try log_instance.append(TxnIntent.initTest("cycle3_data", 1, 3));
+    _ = try appendTestIntent(&log_instance, testing.allocator, "cycle3_data");
     log_instance.deinit();
 
     log_instance = try Log.init(temp_path, 1);
@@ -172,7 +184,7 @@ test "Durability: sealed segments persist correctly" {
 
     var i: usize = 0;
     while (i < 6) : (i += 1) {
-        _ = try log_instance.append(TxnIntent.initTest("data", 1, 1));
+        _ = try appendTestIntent(&log_instance, testing.allocator, "data");
     }
 
     try testing.expectEqual(@as(usize, 3), log_instance.sealed_segments.items.len);
@@ -207,7 +219,7 @@ test "Durability: CRC verification on re-read" {
     };
 
     for (payloads) |payload| {
-        _ = try log_instance.append(TxnIntent.initTest(payload, 1, 1));
+        _ = try appendTestIntent(&log_instance, testing.allocator, payload);
     }
 
     log_instance.deinit();
@@ -235,7 +247,7 @@ test "Durability: partial writes detected on reopen" {
     }
 
     var log_instance = try Log.init(temp_path, 1);
-    _ = try log_instance.append(TxnIntent.initTest("valid_entry", 1, 1));
+    _ = try appendTestIntent(&log_instance, testing.allocator, "valid_entry");
     try log_instance.seal();
     log_instance.deinit();
 
@@ -271,7 +283,7 @@ test "Durability: header CRC protects against corruption" {
     }
 
     var log_instance = try Log.init(temp_path, 1);
-    _ = try log_instance.append(TxnIntent.initTest("entry", 1, 1));
+    _ = try appendTestIntent(&log_instance, testing.allocator, "entry");
     try log_instance.seal();
     log_instance.deinit();
 
@@ -317,7 +329,7 @@ test "Durability: large payloads survive round-trip" {
     }
 
     var log_instance = try Log.init(temp_path, 1);
-    const seq = try log_instance.append(TxnIntent.initTest(large_payload, 1, 1));
+    const seq = try appendTestIntent(&log_instance, testing.allocator, large_payload);
     log_instance.deinit();
 
     log_instance = try Log.init(temp_path, 1);
@@ -352,7 +364,7 @@ test "Durability: empty log survives deinit/init" {
     const h = try log_instance.head();
     try testing.expectEqual(@as(Seq, 0), h);
 
-    const seq = try log_instance.append(TxnIntent.initTest("first", 1, 1));
+    const seq = try appendTestIntent(&log_instance, testing.allocator, "first");
     try testing.expectEqual(@as(Seq, 1), seq);
 }
 
@@ -366,7 +378,7 @@ test "Durability: node_id preserved across restarts" {
     const node_id: NodeId = 42;
 
     var log_instance = try Log.init(temp_path, node_id);
-    _ = try log_instance.append(TxnIntent.initTest("entry", 1, 1));
+    _ = try appendTestIntent(&log_instance, testing.allocator, "entry");
     log_instance.deinit();
 
     log_instance = try Log.init(temp_path, node_id);
