@@ -14,6 +14,7 @@ pub const ParseError = error{
     UnsupportedSyntax,
     AmbiguousColumnRef,
     MissingNullability, // column in CREATE TABLE lacks NULL/NOT NULL
+    UnknownParam,       // $name not found in TRANSACTION param list
     OutOfMemory,
 } || lex_mod.LexError;
 
@@ -23,6 +24,8 @@ pub const Parser = struct {
     src: []const u8,
     err_msg: ?[]const u8 = null,
     err_pos: u32 = 0,
+    // Set while parsing a TRANSACTION body so $name params can resolve to positional indices.
+    txn_params: []const ast.TxnParam = &.{},
 
     pub fn init(src: []const u8, arena: std.mem.Allocator) Parser {
         return .{ .lexer = Lexer.init(src), .arena = arena, .src = src };
@@ -863,6 +866,9 @@ pub const Parser = struct {
             _ = try self.expect(.sym_rparen);
         }
         _ = try self.expect(.sym_lbrace);
+        // Make param names visible to parsePrimaryExpr for $name resolution.
+        self.txn_params = params.items;
+        defer self.txn_params = &.{};
         var stmts: std.ArrayList(ast.TxnStmt) = .empty;
         while (!(try self.check(.sym_rbrace))) {
             const k = try self.peekKind();
@@ -1261,6 +1267,16 @@ pub const Parser = struct {
                 const num = std.fmt.parseInt(u32, num_str, 10) catch return error.UnexpectedToken;
                 if (num == 0) return error.UnexpectedToken;
                 e.* = .{ .param = num - 1 }; // convert to 0-based
+            },
+            .param_named => {
+                _ = try self.advance();
+                const name = t.text(self.src)[1..]; // skip '$'
+                for (self.txn_params, 0..) |p, idx| {
+                    if (std.mem.eql(u8, p.name, name)) {
+                        e.* = .{ .param = @intCast(idx) };
+                        break;
+                    }
+                } else return error.UnknownParam;
             },
             .kw_cast => {
                 _ = try self.advance();

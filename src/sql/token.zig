@@ -13,8 +13,9 @@ pub const TokenKind = enum {
     // Identifier (bare or "double-quoted")
     ident,
 
-    // Parameter: $1, $2, ...
+    // Parameter: $1, $2, ... (positional) or $name (named, inside TRANSACTION blocks)
     param,
+    param_named,
 
     // DDL
     kw_create,

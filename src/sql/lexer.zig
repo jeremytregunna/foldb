@@ -51,12 +51,18 @@ pub const Lexer = struct {
 
         if (c == '$') {
             self.pos += 1;
-            const digits_start = self.pos;
-            while (self.pos < self.src.len and std.ascii.isDigit(self.src[self.pos])) {
+            const inner_start = self.pos;
+            if (self.pos < self.src.len and std.ascii.isDigit(self.src[self.pos])) {
+                while (self.pos < self.src.len and std.ascii.isDigit(self.src[self.pos])) {
+                    self.pos += 1;
+                }
+                return self.tok(.param, start, self.pos);
+            }
+            while (self.pos < self.src.len and (std.ascii.isAlphanumeric(self.src[self.pos]) or self.src[self.pos] == '_')) {
                 self.pos += 1;
             }
-            if (self.pos == digits_start) return error.InvalidParam;
-            return self.tok(.param, start, self.pos);
+            if (self.pos == inner_start) return error.InvalidParam;
+            return self.tok(.param_named, start, self.pos);
         }
 
         if (c == '\'') return self.lexString(start);
