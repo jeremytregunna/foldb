@@ -19,7 +19,7 @@ pub const RegistryError = error{
     QueryNotFound,
     WasmValidationError,
     OutOfMemory,
-} || parser_mod.ParseError || tc_mod.TypeCheckError || plan_mod.PlanError || wasm_mod.WasmError;
+} || parser_mod.ParseError || tc_mod.TypeCheckError || plan_mod.PlanError || wasm_mod.WasmError || schema_mod.SchemaError;
 
 /// A registered query, ready for execution.
 pub const RegisteredQuery = struct {
@@ -167,15 +167,15 @@ pub const SqlRegistry = struct {
         // Apply the DDL to the schema
         switch (stmt) {
             .create_table => |s| {
-                _ = self.schema.createTable(s) catch return error.TypeCheckError;
+                _ = try self.schema.createTable(s);
             },
             .create_index => |s| {
-                self.schema.createIndex(s) catch return error.TypeCheckError;
+                try self.schema.createIndex(s);
             },
             .alter_table => |s| {
                 switch (s.action) {
-                    .add_column => |col| self.schema.addColumn(s.table, col) catch return error.TypeCheckError,
-                    .drop_column => |col| self.schema.dropColumn(s.table, col) catch return error.TypeCheckError,
+                    .add_column => |col| try self.schema.addColumn(s.table, col),
+                    .drop_column => |col| try self.schema.dropColumn(s.table, col),
                 }
             },
             else => return error.TypeCheckError,

@@ -320,7 +320,7 @@ test "DDL rejects adding column to unknown table" {
             .span = zero_span,
         } },
     } });
-    try std.testing.expectError(error.TypeCheckError, result);
+    try std.testing.expectError(error.TableNotFound, result);
 }
 
 test "DDL schema breaking change invalidates registered queries" {

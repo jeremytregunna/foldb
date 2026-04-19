@@ -526,14 +526,15 @@ test "Gateway: currentSeq advances with each execute" {
     try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
     const insert_reg = try gateway.register("INSERT INTO items (id, val) VALUES ($1, $2)");
 
+    // DDL takes seq 1, query registration takes seq 2; DML starts at seq 3
     _ = try gateway.execute(std.testing.io, insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
-    try testing.expectEqual(@as(Seq, 1), gateway.currentSeq());
+    try testing.expectEqual(@as(Seq, 3), gateway.currentSeq());
 
     _ = try gateway.execute(std.testing.io, insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
-    try testing.expectEqual(@as(Seq, 2), gateway.currentSeq());
+    try testing.expectEqual(@as(Seq, 4), gateway.currentSeq());
 
     _ = try gateway.execute(std.testing.io, insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 3 }, .{ .int64 = 30 } }, &.{});
-    try testing.expectEqual(@as(Seq, 3), gateway.currentSeq());
+    try testing.expectEqual(@as(Seq, 5), gateway.currentSeq());
 }
 
 test "Gateway: readAt intermediate state shows partial history" {

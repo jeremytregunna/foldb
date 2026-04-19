@@ -139,6 +139,9 @@ pub const Gateway = struct {
         gw.cdc = cdc_mod.CdcManager.init(alloc);
         gw.sql_exec.initCdc(&gw.cdc);
 
+        // Replay schema_change entries from partition log 0 to rebuild schema after restart.
+        try gw.replaySchemaFromLog();
+
         // Derive a stable client_id from the storage path hash
         gw.client_id = blk: {
             var h: u64 = 0xcbf29ce484222325;
@@ -181,6 +184,11 @@ pub const Gateway = struct {
         self.error_detail_len = 0;
         const hash = try self.registry.register(sql);
         self.metrics.queries_registered.inc();
+        // Persist registration so it can be replayed on restart.
+        const seq = self.sequencer.next_seq;
+        self.sequencer.next_seq += 1;
+        const entry = log_mod.LogEntry.create(seq, 0, .schema_change, sql);
+        try self.sequencer.partition_logs[0].appendEntryAt(entry);
         return .{
             .hash = hash,
             .schema_version = self.registry.schema_seq,
@@ -341,6 +349,54 @@ pub const Gateway = struct {
         };
     }
 
+    /// Replay partition log 0 to rebuild schema, query registry, and storage state.
+    /// schema_change entries with DDL are applied to the schema; others re-register
+    /// queries. txn_intent entries are executed to replay mutations into storage.
+    fn replaySchemaFromLog(self: *Gateway) !void {
+        var from_seq: log_mod.Seq = 1;
+        const batch = 256;
+        while (true) {
+            const entries = try self.sequencer.partition_logs[0].read(from_seq, batch, self.alloc);
+            defer {
+                for (entries) |*e| {
+                    var mut = e.*;
+                    mut.deinit(self.alloc);
+                }
+                self.alloc.free(entries);
+            }
+            if (entries.len == 0) break;
+            for (entries) |e| {
+                switch (e.header.kind) {
+                    .schema_change => {
+                        if (isSqlDdl(e.payload)) {
+                            self.replayDdl(e.payload) catch {};
+                        } else {
+                            _ = self.registry.register(e.payload) catch {};
+                        }
+                    },
+                    .txn_intent => {
+                        _ = self.sql_exec.run(e) catch {};
+                    },
+                    else => {},
+                }
+                from_seq = e.header.seq + 1;
+            }
+            if (entries.len < batch) break;
+        }
+    }
+
+    fn isSqlDdl(sql: []const u8) bool {
+        const s = std.mem.trimStart(u8, sql, " \t\r\n");
+        var end: usize = 0;
+        while (end < s.len and s[end] != ' ' and s[end] != '\t' and s[end] != '(') : (end += 1) {}
+        if (end == 0) return false;
+        var buf: [6]u8 = undefined;
+        const len = @min(end, buf.len);
+        for (s[0..len], 0..) |c, i| buf[i] = if (c >= 'A' and c <= 'Z') c + 32 else c;
+        const tok = buf[0..len];
+        return std.mem.eql(u8, tok, "create") or std.mem.eql(u8, tok, "drop") or std.mem.eql(u8, tok, "alter");
+    }
+
     /// Set a human-readable detail string for the last error (table/column context).
     fn setDetail(self: *Gateway, comptime fmt: []const u8, args: anytype) void {
         const s = std.fmt.bufPrint(&self.error_detail, fmt, args) catch &self.error_detail;
@@ -352,9 +408,27 @@ pub const Gateway = struct {
         return self.error_detail[0..self.error_detail_len];
     }
 
-    /// Apply a DDL statement to the schema and propagate to storage.
+    /// Apply a DDL statement to the schema, propagate to storage, and persist to log.
     pub fn applyDdl(self: *Gateway, sql: []const u8) !void {
         self.error_detail_len = 0;
+        try self.applyDdlToSchema(sql);
+        // Persist to partition log 0 so schema survives restart.
+        const seq = self.sequencer.next_seq;
+        self.sequencer.next_seq += 1;
+        const entry = log_mod.LogEntry.create(seq, 0, .schema_change, sql);
+        try self.sequencer.partition_logs[0].appendEntryAt(entry);
+    }
+
+    /// Apply DDL during log replay (does not write to log).
+    /// Silently ignores "already exists" errors — these are expected on replay.
+    fn replayDdl(self: *Gateway, sql: []const u8) !void {
+        self.applyDdlToSchema(sql) catch |e| switch (e) {
+            error.TableAlreadyExists, error.IndexAlreadyExists, error.ColumnAlreadyExists => {},
+            else => return e,
+        };
+    }
+
+    fn applyDdlToSchema(self: *Gateway, sql: []const u8) !void {
         var arena = std.heap.ArenaAllocator.init(self.alloc);
         defer arena.deinit();
 
@@ -385,7 +459,7 @@ pub const Gateway = struct {
                 const kind: storage_mod.IndexKind = switch (idx.kind) {
                     .vector => .vector,
                     .json_path => .json_path,
-                    else => return, // ordered/hash indexes not specialty — no storage structure
+                    else => return,
                 };
                 const column_idx: u32 = if (idx.columns.len > 0) idx.columns[0] else 0;
                 const json_paths: []const []const u8 = switch (idx.extra) {
