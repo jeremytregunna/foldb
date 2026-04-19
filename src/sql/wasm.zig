@@ -126,6 +126,10 @@ pub const FuncCode = struct {
 
 // ─── Validator ────────────────────────────────────────────────────────────────
 
+// This is the domain boundary — raw WASM bytes from external sources (client upload,
+// object store) are validated here: magic, version, import whitelist, and forbidden
+// opcodes. Only a proven-valid WasmModule crosses past this point; the Evaluator
+// and any core logic never receive unvalidated bytes.
 pub fn validate(bytes: []const u8, alloc: std.mem.Allocator) WasmError!WasmModule {
     if (bytes.len < 8) return error.InvalidMagic;
     if (!std.mem.eql(u8, bytes[0..4], &WASM_MAGIC)) return error.InvalidMagic;

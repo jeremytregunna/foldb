@@ -49,5 +49,15 @@ pub fn verifyExecutorModule() void {
         if (!@hasField(exchange.ForeignRow, "row")) {
             @compileError("ForeignRow missing row");
         }
+
+        // ValidatedTxnEntry must remain well-formed — it is the only type the executor
+        // core accepts; removing its fields would silently allow raw entries to leak in.
+        const exec_types = @import("types.zig");
+        if (!@hasField(exec_types.ValidatedTxnEntry, "seq")) {
+            @compileError("ValidatedTxnEntry must have seq field");
+        }
+        if (!@hasField(exec_types.ValidatedTxnEntry, "decoded")) {
+            @compileError("ValidatedTxnEntry must have decoded field");
+        }
     }
 }

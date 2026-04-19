@@ -363,8 +363,9 @@ pub const Gateway = struct {
     }
 
     /// Replay partition log 0 to rebuild schema, query registry, and storage state.
-    /// schema_change entries with DDL are applied to the schema; others re-register
-    /// queries. txn_intent entries are executed to replay mutations into storage.
+    // This is the domain boundary — entries are read from the durable partition log whose
+    // payloads were validated at write time. Errors such as already-exists or parse failures
+    // are silently dropped: idempotent re-registration on restart is expected and correct.
     fn replaySchemaFromLog(self: *Gateway) !void {
         var from_seq: log_mod.Seq = 1;
         const batch = 256;
