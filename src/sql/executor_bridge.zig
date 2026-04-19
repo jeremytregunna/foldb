@@ -31,6 +31,7 @@ pub const AbortCode = executor_mod.AbortCode;
 
 pub const SqlExecError = error{
     ConstraintViolation,
+    ForeignKeyViolation,
     TableNotFound,
     ColumnNotFound,
     TypeMismatch,
@@ -79,6 +80,17 @@ pub const SqlExecutor = struct {
     alloc: std.mem.Allocator,
     /// Optional CDC manager. When set, mutations are captured and fanned out to subscribers.
     cdc: ?*cdc_mod.CdcManager = null,
+    error_detail: [256]u8 = undefined,
+    error_detail_len: usize = 0,
+
+    pub fn lastDetail(self: *const SqlExecutor) []const u8 {
+        return self.error_detail[0..self.error_detail_len];
+    }
+
+    fn setDetail(self: *SqlExecutor, comptime fmt: []const u8, args: anytype) void {
+        const s = std.fmt.bufPrint(&self.error_detail, fmt, args) catch &self.error_detail;
+        self.error_detail_len = s.len;
+    }
 
     pub fn init(
         storage: *Storage,
@@ -616,6 +628,9 @@ pub const SqlExecutor = struct {
                         values[i] = try planValueToTypedColumnValue(pv, col.typ, ctx.alloc);
                     }
 
+                    // Enforce FK constraints
+                    try self.checkForeignKeys(tbl, ins.column_ids, values, ctx);
+
                     // Build the primary key
                     const key = try buildPrimaryKey(tbl, ins.column_ids, values, ctx.alloc);
 
@@ -647,6 +662,7 @@ pub const SqlExecutor = struct {
                             values[i] = defaultValue(col.typ);
                         }
                     }
+                    try self.checkForeignKeys(tbl, ins.column_ids, values, ctx);
                     const key = try buildPrimaryKey(tbl, ins.column_ids, values, ctx.alloc);
                     try mutations.append(ctx.alloc, .{
                         .kind = .insert,
@@ -703,6 +719,12 @@ pub const SqlExecutor = struct {
                 }
             }
 
+            // Enforce FK constraints on new values (all columns, sequential IDs)
+            const all_col_ids = try ctx.alloc.alloc(schema_mod.ColumnId, tbl.columns.len);
+            defer ctx.alloc.free(all_col_ids);
+            for (tbl.columns, 0..) |col, i| all_col_ids[i] = col.id;
+            try self.checkForeignKeys(tbl, all_col_ids, new_values, ctx);
+
             const key = try ctx.alloc.dupe(u8, row.key);
             try mutations.append(ctx.alloc, .{
                 .kind = .update,
@@ -720,7 +742,11 @@ pub const SqlExecutor = struct {
         mutations: *std.ArrayList(Mutation),
     ) SqlExecError!void {
         const tbl = self.schema.getTableById(del.table_id) orelse return error.TableNotFound;
-        _ = tbl;
+
+        // Collect inbound FKs once for this delete
+        const inbound = self.schema.getInboundForeignKeys(del.table_id, ctx.alloc) catch &.{};
+        defer ctx.alloc.free(inbound);
+
         var iter = self.storage.scan(del.table_id, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch return error.TableNotFound;
         defer iter.deinit();
 
@@ -733,6 +759,12 @@ pub const SqlExecutor = struct {
                 const v = try evalExpr(f, row_ctx);
                 if (!(v.toBool() orelse false)) continue;
             }
+
+            // Check no child rows reference this row
+            if (inbound.len > 0) {
+                try self.checkInboundForeignKeys(tbl, row, inbound, ctx);
+            }
+
             const key = try ctx.alloc.dupe(u8, row.key);
             try mutations.append(ctx.alloc, .{
                 .kind = .delete,
@@ -751,6 +783,98 @@ pub const SqlExecutor = struct {
         _ = self;
         const v = try evalExpr(a.predicate, ctx);
         if (!(v.toBool() orelse false)) return error.AssertionFailed;
+    }
+
+    /// Verify FK parent rows exist for the given row being inserted/updated.
+    fn checkForeignKeys(
+        self: *SqlExecutor,
+        tbl: *const schema_mod.TableSchema,
+        col_ids: []const schema_mod.ColumnId,
+        values: []const ColumnValue,
+        ctx: EvalCtx,
+    ) SqlExecError!void {
+        for (tbl.foreign_keys) |fk| {
+            const ref_tbl = self.schema.getTableById(fk.ref_table_id) orelse return error.TableNotFound;
+
+            // Collect the FK column values from the current row; skip if any column is missing
+            var fk_vals = try ctx.alloc.alloc(ColumnValue, fk.columns.len);
+            defer ctx.alloc.free(fk_vals);
+            var all_found = true;
+            for (fk.columns, 0..) |fk_col_id, i| {
+                var found = false;
+                for (col_ids, 0..) |col_id, j| {
+                    if (col_id == fk_col_id and j < values.len) {
+                        fk_vals[i] = values[j];
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) { all_found = false; break; }
+            }
+            if (!all_found) continue;
+
+            const ref_key = try buildForeignKeyLookup(ref_tbl, fk.ref_columns, fk_vals, ctx.alloc);
+            defer ctx.alloc.free(ref_key);
+
+            const exists = (self.storage.get(fk.ref_table_id, ref_key, ctx.seq -| 1) catch null) != null;
+            if (!exists) {
+                if (fk.name) |n| {
+                    self.setDetail("foreign key '{s}' references missing row in '{s}'", .{ n, ref_tbl.name });
+                } else {
+                    self.setDetail("foreign key references missing row in '{s}'", .{ref_tbl.name});
+                }
+                return error.ForeignKeyViolation;
+            }
+        }
+    }
+
+    /// Verify no child rows reference the given parent row being deleted.
+    fn checkInboundForeignKeys(
+        self: *SqlExecutor,
+        parent_tbl: *const schema_mod.TableSchema,
+        parent_row: storage_mod.Row,
+        inbound: []const schema_mod.InboundForeignKey,
+        ctx: EvalCtx,
+    ) SqlExecError!void {
+        for (inbound) |ibfk| {
+            const child_tbl = self.schema.getTableById(ibfk.source_table_id) orelse continue;
+            const fk = ibfk.fk;
+
+            // Get the parent's referenced column values
+            const parent_ref_vals = try ctx.alloc.alloc(ColumnValue, fk.ref_columns.len);
+            defer ctx.alloc.free(parent_ref_vals);
+            var parent_ok = true;
+            for (fk.ref_columns, 0..) |ref_col_id, i| {
+                const col_pos: usize = for (parent_tbl.columns, 0..) |col, ci| {
+                    if (col.id == ref_col_id) break ci;
+                } else { parent_ok = false; break; };
+                if (col_pos >= parent_row.values.len) { parent_ok = false; break; }
+                parent_ref_vals[i] = parent_row.values[col_pos];
+            }
+            if (!parent_ok) continue;
+
+            // Scan child table; if any child row's FK columns match, reject the delete
+            var child_iter = self.storage.scan(child_tbl.id, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch continue;
+            defer child_iter.deinit();
+            while (child_iter.next() catch null) |child_row| {
+                var matches = true;
+                for (fk.columns, 0..) |fk_col_id, i| {
+                    const col_pos: usize = for (child_tbl.columns, 0..) |col, ci| {
+                        if (col.id == fk_col_id) break ci;
+                    } else { matches = false; break; };
+                    if (col_pos >= child_row.values.len) { matches = false; break; }
+                    if (!child_row.values[col_pos].eql(parent_ref_vals[i])) { matches = false; break; }
+                }
+                if (matches) {
+                    if (ibfk.fk.name) |n| {
+                        self.setDetail("foreign key '{s}' in '{s}' still references this row", .{ n, child_tbl.name });
+                    } else {
+                        self.setDetail("'{s}' still references this row via foreign key", .{child_tbl.name});
+                    }
+                    return error.ForeignKeyViolation;
+                }
+            }
+        }
     }
 
     fn computeWindowFnForAll(
@@ -1701,6 +1825,26 @@ fn buildPrimaryKey(
         for (col_ids, 0..) |cid, i| {
             if (cid == pk_col_id and i < values.len) {
                 try encodeKeyComponent(&key_buf, values[i], alloc);
+                break;
+            }
+        }
+    }
+    return key_buf.toOwnedSlice(alloc);
+}
+
+/// Build the storage key for a referenced table row given FK column values.
+/// ref_col_ids are the referenced table's column IDs in FK order; fk_vals are the matching values.
+fn buildForeignKeyLookup(
+    ref_tbl: *const schema_mod.TableSchema,
+    ref_col_ids: []const schema_mod.ColumnId,
+    fk_vals: []const ColumnValue,
+    alloc: std.mem.Allocator,
+) SqlExecError![]const u8 {
+    var key_buf: std.ArrayList(u8) = .empty;
+    for (ref_tbl.primary_key) |pk_col_id| {
+        for (ref_col_ids, 0..) |ref_cid, i| {
+            if (ref_cid == pk_col_id and i < fk_vals.len) {
+                try encodeKeyComponent(&key_buf, fk_vals[i], alloc);
                 break;
             }
         }

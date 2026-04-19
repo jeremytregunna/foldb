@@ -31,12 +31,25 @@ pub const IndexExtra = union(enum) {
     json_paths: []const []const u8,
 };
 
+pub const ForeignKeySchema = struct {
+    name: ?[]const u8,
+    columns: []const ColumnId,
+    ref_table_id: TableId,
+    ref_columns: []const ColumnId,
+};
+
+pub const InboundForeignKey = struct {
+    source_table_id: TableId,
+    fk: *const ForeignKeySchema,
+};
+
 pub const TableSchema = struct {
     id: TableId,
     name: []const u8,
     columns: []const ColumnSchema,
     primary_key: []const ColumnId,
     indexes: []const IndexSchema,
+    foreign_keys: []const ForeignKeySchema = &.{},
 
     pub fn columnByName(self: *const TableSchema, name: []const u8) ?*const ColumnSchema {
         for (self.columns) |*col| {
@@ -63,6 +76,8 @@ pub const SchemaError = error{
     NoPrimaryKey,
     PrimaryKeyColumnNotFound,
     DuplicatePrimaryKeyColumn,
+    InvalidForeignKey,
+    ForeignKeyViolation,
     OutOfMemory,
 };
 
@@ -98,6 +113,12 @@ pub const SchemaRegistry = struct {
                 }
             }
             self.alloc.free(tbl.indexes);
+            for (tbl.foreign_keys) |fk| {
+                if (fk.name) |n| self.alloc.free(n);
+                self.alloc.free(fk.columns);
+                self.alloc.free(fk.ref_columns);
+            }
+            if (tbl.foreign_keys.len > 0) self.alloc.free(tbl.foreign_keys);
             self.alloc.free(tbl.name);
             self.alloc.destroy(tbl);
         }
@@ -111,6 +132,21 @@ pub const SchemaRegistry = struct {
 
     pub fn getTableById(self: *const SchemaRegistry, id: TableId) ?*const TableSchema {
         return self.tables_by_id.get(id);
+    }
+
+    /// Collect all FKs across all tables that reference the given table_id.
+    pub fn getInboundForeignKeys(self: *const SchemaRegistry, table_id: TableId, alloc: std.mem.Allocator) ![]InboundForeignKey {
+        var result: std.ArrayList(InboundForeignKey) = .empty;
+        var it = self.tables_by_id.iterator();
+        while (it.next()) |entry| {
+            const tbl = entry.value_ptr.*;
+            for (tbl.foreign_keys) |*fk| {
+                if (fk.ref_table_id == table_id) {
+                    try result.append(alloc, .{ .source_table_id = tbl.id, .fk = fk });
+                }
+            }
+        }
+        return result.toOwnedSlice(alloc);
     }
 
     /// Apply a CREATE TABLE statement to the schema.
@@ -152,6 +188,51 @@ pub const SchemaRegistry = struct {
             if (!found) return error.PrimaryKeyColumnNotFound;
         }
 
+        // Resolve foreign key constraints
+        const fk_schemas = try self.alloc.alloc(ForeignKeySchema, stmt.foreign_keys.len);
+        errdefer self.alloc.free(fk_schemas);
+        var fks_resolved: usize = 0;
+        errdefer for (fk_schemas[0..fks_resolved]) |fk| {
+            if (fk.name) |n| self.alloc.free(n);
+            self.alloc.free(fk.columns);
+            self.alloc.free(fk.ref_columns);
+        };
+        for (stmt.foreign_keys, 0..) |fk_def, fi| {
+            const ref_tbl = self.tables.get(fk_def.ref_table) orelse return error.InvalidForeignKey;
+            if (fk_def.columns.len == 0 or fk_def.columns.len != fk_def.ref_columns.len)
+                return error.InvalidForeignKey;
+
+            const local_ids = try self.alloc.alloc(ColumnId, fk_def.columns.len);
+            errdefer self.alloc.free(local_ids);
+            for (fk_def.columns, 0..) |col_name, i| {
+                var found = false;
+                for (cols) |col| {
+                    if (std.ascii.eqlIgnoreCase(col.name, col_name)) {
+                        local_ids[i] = col.id;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) return error.InvalidForeignKey;
+            }
+
+            const ref_ids = try self.alloc.alloc(ColumnId, fk_def.ref_columns.len);
+            errdefer self.alloc.free(ref_ids);
+            for (fk_def.ref_columns, 0..) |col_name, i| {
+                const col = ref_tbl.columnByName(col_name) orelse return error.InvalidForeignKey;
+                ref_ids[i] = col.id;
+            }
+
+            const fk_name: ?[]const u8 = if (fk_def.name) |n| try self.alloc.dupe(u8, n) else null;
+            fk_schemas[fi] = .{
+                .name = fk_name,
+                .columns = local_ids,
+                .ref_table_id = ref_tbl.id,
+                .ref_columns = ref_ids,
+            };
+            fks_resolved += 1;
+        }
+
         const tbl_name = try self.alloc.dupe(u8, stmt.name);
         errdefer self.alloc.free(tbl_name);
         const tbl = try self.alloc.create(TableSchema);
@@ -162,6 +243,7 @@ pub const SchemaRegistry = struct {
             .columns = cols,
             .primary_key = pk_ids,
             .indexes = &.{},
+            .foreign_keys = fk_schemas,
         };
         self.next_table_id += 1;
 

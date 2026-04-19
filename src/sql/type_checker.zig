@@ -72,8 +72,6 @@ pub const TypeChecker = struct {
     }
 
     fn checkCreateTable(self: *TypeChecker, stmt: ast.CreateTableStmt) TypeCheckError!void {
-        _ = self;
-        // Nullability is already enforced at parse time.
         // Validate primary key columns exist.
         for (stmt.primary_key.columns) |pk_col| {
             var found = false;
@@ -84,6 +82,21 @@ pub const TypeChecker = struct {
                 }
             }
             if (!found) return error.ColumnNotFound;
+        }
+        // Validate FK constraints: referenced table and columns must exist, column counts match.
+        for (stmt.foreign_keys) |fk| {
+            const ref_tbl = self.schema.getTable(fk.ref_table) orelse return error.TableNotFound;
+            if (fk.columns.len == 0 or fk.columns.len != fk.ref_columns.len) return error.TypeMismatch;
+            for (fk.columns) |col_name| {
+                var found = false;
+                for (stmt.columns) |col| {
+                    if (std.ascii.eqlIgnoreCase(col.name, col_name)) { found = true; break; }
+                }
+                if (!found) return error.ColumnNotFound;
+            }
+            for (fk.ref_columns) |col_name| {
+                _ = ref_tbl.columnByName(col_name) orelse return error.ColumnNotFound;
+            }
         }
     }
 

@@ -410,7 +410,11 @@ pub const Conn = struct {
         const exec_result = self.gw.execute(io, hash, params, &.{}) catch |e| {
             const code = gatewayErrToCode(e);
             var emsg_buf: [256]u8 = undefined;
-            const emsg = std.fmt.bufPrint(&emsg_buf, "execute failed: {s}", .{errors.humanize(e)}) catch "execute failed";
+            const detail = self.gw.lastDetail();
+            const emsg = if (detail.len > 0)
+                std.fmt.bufPrint(&emsg_buf, "execute failed: {s}", .{detail}) catch "execute failed"
+            else
+                std.fmt.bufPrint(&emsg_buf, "execute failed: {s}", .{errors.humanize(e)}) catch "execute failed";
             self.sendStreamError(stream_id, code, emsg);
             return;
         };
@@ -848,7 +852,7 @@ fn columnValueToTypedValue(v: gateway_mod.ColumnValue) TypedValue {
 fn gatewayErrToCode(e: anyerror) msg.ErrorCode {
     return switch (e) {
         error.QueryNotFound => .query_not_found,
-        error.ConstraintViolation => .constraint_violation,
+        error.ConstraintViolation, error.ForeignKeyViolation => .constraint_violation,
         error.ExecutionError => .transaction_aborted,
         error.ParamDecodeError => .type_mismatch,
         error.SchemaBreakingChange => .schema_conflict,

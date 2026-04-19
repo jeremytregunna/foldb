@@ -668,6 +668,7 @@ pub const Parser = struct {
         _ = try self.expect(.sym_lparen);
         var columns: std.ArrayList(ast.ColumnDef) = .empty;
         var pk_cols: std.ArrayList([]const u8) = .empty;
+        var fk_defs: std.ArrayList(ast.ForeignKeyConstraint) = .empty;
         while (true) {
             const k = try self.peekKind();
             if (k == .kw_primary) {
@@ -679,6 +680,11 @@ pub const Parser = struct {
                     if (!try self.eat(.sym_comma)) break;
                 }
                 _ = try self.expect(.sym_rparen);
+            } else if (try self.eatIdent("constraint")) {
+                const fk_name = try self.expectIdent();
+                try fk_defs.append(self.arena, try self.parseForeignKeyClause(fk_name));
+            } else if (try self.eatIdent("foreign")) {
+                try fk_defs.append(self.arena, try self.parseForeignKeyClause(null));
             } else {
                 const col_span_start = (try self.peek()).span.start;
                 const col_name = try self.expectIdent();
@@ -719,6 +725,36 @@ pub const Parser = struct {
             .name = name,
             .columns = try columns.toOwnedSlice(self.arena),
             .primary_key = .{ .columns = try pk_cols.toOwnedSlice(self.arena) },
+            .foreign_keys = try fk_defs.toOwnedSlice(self.arena),
+        };
+    }
+
+    fn parseForeignKeyClause(self: *Parser, fk_name: ?[]const u8) ParseError!ast.ForeignKeyConstraint {
+        // Caller has already consumed CONSTRAINT name (if any); next is FOREIGN KEY
+        _ = try self.eatIdent("foreign"); // no-op if called from bare FOREIGN branch (already consumed)
+        _ = try self.expect(.kw_key);
+        _ = try self.expect(.sym_lparen);
+        var local_cols: std.ArrayList([]const u8) = .empty;
+        while (true) {
+            try local_cols.append(self.arena, try self.expectIdent());
+            if (!try self.eat(.sym_comma)) break;
+        }
+        _ = try self.expect(.sym_rparen);
+        _ = try self.eatIdent("references");
+        const ref_table = try self.expectIdent();
+        var ref_cols: std.ArrayList([]const u8) = .empty;
+        if (try self.eat(.sym_lparen)) {
+            while (true) {
+                try ref_cols.append(self.arena, try self.expectIdent());
+                if (!try self.eat(.sym_comma)) break;
+            }
+            _ = try self.expect(.sym_rparen);
+        }
+        return .{
+            .name = fk_name,
+            .columns = try local_cols.toOwnedSlice(self.arena),
+            .ref_table = ref_table,
+            .ref_columns = try ref_cols.toOwnedSlice(self.arena),
         };
     }
 

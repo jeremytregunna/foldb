@@ -12,6 +12,8 @@ pub fn humanize(err: anyerror) []const u8 {
         error.NoPrimaryKey => "Table requires a primary key",
         error.PrimaryKeyColumnNotFound => "Primary key references an unknown column",
         error.DuplicatePrimaryKeyColumn => "Duplicate column in primary key",
+        error.InvalidForeignKey => "Invalid foreign key: referenced table or column not found",
+        error.ForeignKeyViolation => "Foreign key constraint violation",
 
         // Plan errors
         error.UnsupportedOperation => "Operation not supported",

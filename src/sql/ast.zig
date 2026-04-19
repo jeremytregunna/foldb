@@ -347,10 +347,18 @@ pub const PrimaryKey = struct {
     columns: []const []const u8,
 };
 
+pub const ForeignKeyConstraint = struct {
+    name: ?[]const u8,
+    columns: []const []const u8,
+    ref_table: []const u8,
+    ref_columns: []const []const u8,
+};
+
 pub const CreateTableStmt = struct {
     name: []const u8,
     columns: []const ColumnDef,
     primary_key: PrimaryKey,
+    foreign_keys: []const ForeignKeyConstraint = &.{},
 };
 
 pub const IndexKind = union(enum) {

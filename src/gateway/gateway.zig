@@ -261,7 +261,12 @@ pub const Gateway = struct {
             }
 
             // Execute via SqlExecutor (processes LogEntry through SQL plan)
-            const exec_result = try self.sql_exec.run(entries[0]);
+            const exec_result = self.sql_exec.run(entries[0]) catch |e| {
+                // Forward executor-level detail (e.g. FK violation message) to gateway detail
+                const exec_detail = self.sql_exec.lastDetail();
+                if (exec_detail.len > 0) self.setDetail("{s}", .{exec_detail});
+                return e;
+            };
 
             return switch (exec_result) {
                 .ok => |ok| .{ .rows_affected = ok.rows_affected, .result_set = null },

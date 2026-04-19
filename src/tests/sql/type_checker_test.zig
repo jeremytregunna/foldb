@@ -430,3 +430,68 @@ test "transaction block with correct param types" {
     try std.testing.expect(rq != null);
     try std.testing.expectEqual(@as(usize, 2), rq.?.param_types.len);
 }
+
+// ─── Foreign key constraint tests ────────────────────────────────────────────
+
+test "CREATE TABLE with valid FOREIGN KEY accepted" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+    var r = reg(alloc, &sr);
+    defer r.deinit();
+
+    // users already exists; orders references it — this should succeed
+    try r.applyDdl(.{ .create_table = .{
+        .name = "invoices",
+        .columns = &[_]ast_mod.ColumnDef{
+            .{ .name = "id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
+            .{ .name = "user_id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
+        },
+        .primary_key = .{ .columns = &.{"id"} },
+        .foreign_keys = &[_]ast_mod.ForeignKeyConstraint{
+            .{ .name = "fk_user", .columns = &.{"user_id"}, .ref_table = "users", .ref_columns = &.{"id"} },
+        },
+    } });
+}
+
+test "CREATE TABLE with FK referencing unknown table rejected" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+    var r = reg(alloc, &sr);
+    defer r.deinit();
+
+    const result = r.applyDdl(.{ .create_table = .{
+        .name = "invoices",
+        .columns = &[_]ast_mod.ColumnDef{
+            .{ .name = "id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
+            .{ .name = "ghost_id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
+        },
+        .primary_key = .{ .columns = &.{"id"} },
+        .foreign_keys = &[_]ast_mod.ForeignKeyConstraint{
+            .{ .name = null, .columns = &.{"ghost_id"}, .ref_table = "ghost", .ref_columns = &.{"id"} },
+        },
+    } });
+    try std.testing.expectError(error.InvalidForeignKey, result);
+}
+
+test "CREATE TABLE with FK referencing unknown column rejected" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+    var r = reg(alloc, &sr);
+    defer r.deinit();
+
+    const result = r.applyDdl(.{ .create_table = .{
+        .name = "invoices",
+        .columns = &[_]ast_mod.ColumnDef{
+            .{ .name = "id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
+            .{ .name = "user_id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
+        },
+        .primary_key = .{ .columns = &.{"id"} },
+        .foreign_keys = &[_]ast_mod.ForeignKeyConstraint{
+            .{ .name = null, .columns = &.{"user_id"}, .ref_table = "users", .ref_columns = &.{"nonexistent"} },
+        },
+    } });
+    try std.testing.expectError(error.InvalidForeignKey, result);
+}
