@@ -4,22 +4,42 @@ const frame = @import("frame.zig");
 const conn_mod = @import("conn.zig");
 const gateway_mod = @import("gateway.zig");
 
-/// Set by the SIGINT handler; polled in the accept loop to trigger clean shutdown.
+/// Set by SIGINT/SIGTERM/SIGHUP handlers; polled in the accept loop to trigger clean shutdown.
 var shutdown_requested = std.atomic.Value(bool).init(false);
 
-fn handleSigint(_: std.os.linux.SIG) callconv(.c) void {
+fn handleShutdown(_: std.os.linux.SIG) callconv(.c) void {
     shutdown_requested.store(true, .release);
 }
 
-/// Install the SIGINT handler. SA_RESETHAND restores default behaviour on a second ^C.
-fn installSigintHandler() void {
+/// Install signal handlers for clean shutdown and safe socket I/O.
+///
+///   SIGINT  — Ctrl+C; SA_RESETHAND so a second ^C kills immediately.
+///   SIGTERM — systemd/Docker/Kubernetes stop; same clean shutdown path.
+///   SIGHUP  — terminal hangup / daemon reload signal; treat as shutdown
+///             (no hot-reload config yet).
+///   SIGPIPE — broken client socket mid-write; ignored so the write syscall
+///             returns EPIPE instead of killing the process.
+fn installSignalHandlers() void {
     const linux = std.os.linux;
-    var sa = linux.Sigaction{
-        .handler = .{ .handler = handleSigint },
-        .mask = linux.sigemptyset(),
+    const empty = linux.sigemptyset();
+
+    var sa_shutdown = linux.Sigaction{
+        .handler = .{ .handler = handleShutdown },
+        .mask = empty,
         .flags = linux.SA.RESETHAND,
     };
-    _ = linux.sigaction(linux.SIG.INT, &sa, null);
+    _ = linux.sigaction(linux.SIG.INT, &sa_shutdown, null);
+    // SIGTERM and SIGHUP don't need RESETHAND — a second signal is fine.
+    sa_shutdown.flags = 0;
+    _ = linux.sigaction(linux.SIG.TERM, &sa_shutdown, null);
+    _ = linux.sigaction(linux.SIG.HUP, &sa_shutdown, null);
+
+    var sa_ignore = linux.Sigaction{
+        .handler = .{ .handler = linux.SIG.IGN },
+        .mask = empty,
+        .flags = 0,
+    };
+    _ = linux.sigaction(linux.SIG.PIPE, &sa_ignore, null);
 }
 
 /// Bind + listen on port. Returns the server fd.
@@ -91,7 +111,7 @@ pub fn serve(
     gw: *gateway_mod.Gateway,
     alloc: std.mem.Allocator,
 ) !void {
-    installSigintHandler();
+    installSignalHandlers();
 
     const server_fd = try bindListen(port);
     defer _ = std.os.linux.close(@intCast(server_fd));
