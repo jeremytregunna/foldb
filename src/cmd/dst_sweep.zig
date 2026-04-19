@@ -1,7 +1,7 @@
-/// DST seed sweep — runs three Raft simulation scenarios across N seeds.
+/// Raft consensus seed sweep — runs three Raft simulation scenarios across N seeds.
 ///
 /// Usage:
-///   zig build dst-sweep -- --seeds 10000
+///   zig build raft-sweep -- --seeds 10000
 ///
 /// Each seed exercises:
 ///   1. Basic election + commit (no faults)
