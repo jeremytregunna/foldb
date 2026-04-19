@@ -200,16 +200,11 @@ test "sim: recovery — schema and flushed data survive crash" {
         const ids = try scanRows(gw, scan, alloc);
         defer alloc.free(ids);
 
-        // All flushed rows (1..10) must be present.
-        var found: usize = 0;
-        for (ids) |row_id| {
-            if (row_id >= 1 and row_id <= 10) found += 1;
-        }
-        try testing.expectEqual(@as(usize, 10), found);
-
-        // No rows outside our inserted range should appear.
-        for (ids) |row_id| {
-            try testing.expect(row_id >= 1 and row_id <= 20);
+        // All 20 rows must be present — flushed rows from SSTables, unflushed rows
+        // recovered via DML replay from the partition log.
+        try testing.expectEqual(@as(usize, 20), ids.len);
+        for (ids, 0..) |row_id, i| {
+            try testing.expectEqual(@as(i64, @intCast(i + 1)), row_id);
         }
     }
 }

@@ -170,11 +170,10 @@ pub const Gateway = struct {
         gw.cdc = cdc_mod.CdcManager.init(alloc);
         gw.sql_exec.initCdc(&gw.cdc);
 
-        // Replay schema_change entries from partition log 0 to rebuild schema after restart.
-        try gw.replaySchemaFromLog();
-        // Sync committed_seq to the log head — storage state is loaded from the durable LSM,
-        // not rebuilt by replay, so we just need the cursor to reflect reality.
-        gw.sql_exec.committed_seq = try gw.sequencer.partition_logs[0].head();
+        // Replay log to rebuild schema and storage state after restart.
+        // Pass 1 reconstructs DDL/query registry; pass 2 replays DML into storage,
+        // recovering rows that were in the memtable and not flushed before a crash.
+        try gw.replayFromLog();
 
         // Derive a stable client_id from the storage path hash
         gw.client_id = blk: {
@@ -395,33 +394,56 @@ pub const Gateway = struct {
         };
     }
 
-    /// Replay partition log 0 to rebuild schema, query registry, and storage state.
+    /// Replay partition log 0 in two passes to rebuild full gateway state after restart.
     // This is the domain boundary — entries are read from the durable partition log whose
     // payloads were validated at write time. Errors such as already-exists or parse failures
     // are silently dropped: idempotent re-registration on restart is expected and correct.
-    fn replaySchemaFromLog(self: *Gateway) !void {
-        var from_seq: log_mod.Seq = 1;
+    //
+    // Pass 1 (schema): rebuild DDL and query registry so all query hashes are known.
+    // Pass 2 (DML): replay txn_intent entries through SqlExecutor to rebuild storage state,
+    //   including rows that were in the memtable and not yet flushed to SSTables at crash time.
+    fn replayFromLog(self: *Gateway) !void {
         const batch = 256;
+
+        // Pass 1: schema — DDL and query registration only.
+        var from_seq: log_mod.Seq = 1;
         while (true) {
             const entries = try self.sequencer.partition_logs[0].read(from_seq, batch, self.alloc);
             defer {
-                for (entries) |*e| {
-                    var mut = e.*;
-                    mut.deinit(self.alloc);
-                }
+                for (entries) |*e| e.deinit(self.alloc);
                 self.alloc.free(entries);
             }
             if (entries.len == 0) break;
             for (entries) |e| {
-                switch (e.header.kind) {
-                    .schema_change => {
-                        if (isSqlDdl(e.payload)) {
-                            self.replayDdl(e.payload) catch {};
-                        } else {
-                            _ = self.registry.register(e.payload) catch {};
-                        }
-                    },
-                    else => {},
+                if (e.header.kind == .schema_change) {
+                    if (isSqlDdl(e.payload)) {
+                        self.replayDdl(e.payload) catch {};
+                    } else {
+                        _ = self.registry.register(e.payload) catch {};
+                    }
+                }
+                from_seq = e.header.seq + 1;
+            }
+            if (entries.len < batch) break;
+        }
+
+        // Pass 2: DML — apply txn_intent entries to rebuild storage state.
+        // SqlExecutor.run handles CRC validation, deserialization, and committed_seq tracking.
+        // Aborted results (missing query, bad params) are silently skipped — they indicate
+        // entries that were rejected at runtime and should not affect recovered state.
+        from_seq = 1;
+        while (true) {
+            const entries = try self.sequencer.partition_logs[0].read(from_seq, batch, self.alloc);
+            defer {
+                for (entries) |*e| e.deinit(self.alloc);
+                self.alloc.free(entries);
+            }
+            if (entries.len == 0) break;
+            for (entries) |e| {
+                if (e.header.kind == .txn_intent) {
+                    _ = self.sql_exec.run(e) catch {};
+                } else {
+                    self.sql_exec.committed_seq = e.header.seq;
                 }
                 from_seq = e.header.seq + 1;
             }
