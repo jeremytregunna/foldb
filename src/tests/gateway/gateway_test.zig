@@ -20,6 +20,7 @@ fn makeTempDir() ![]const u8 {
 fn removeDirRecursive(path: []const u8) void {
     const z = std.heap.page_allocator.allocSentinel(u8, path.len, 0) catch return;
     defer std.heap.page_allocator.free(z);
+    @memcpy(z[0..path.len], path);
     const raw_fd = std.os.linux.open(z.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
     const fd_i: isize = @bitCast(raw_fd);
     if (fd_i < 0) return;
