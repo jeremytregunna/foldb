@@ -151,6 +151,33 @@ fn printValue(v: messages.TypedValue, out: *Out) !void {
     }
 }
 
+fn isConnError(e: anyerror) bool {
+    return e == error.ConnectionClosed or e == error.ReadError or
+        e == error.WriteError or e == error.ConnectError;
+}
+
+fn tryReconnect(
+    host: []const u8,
+    port: u16,
+    alloc: std.mem.Allocator,
+    out: *Out,
+) ?client_mod.Client {
+    const max_attempts = 10;
+    var attempt: u32 = 0;
+    while (attempt < max_attempts) : (attempt += 1) {
+        if (attempt > 0) {
+            var ts = std.os.linux.timespec{ .sec = 0, .nsec = 500_000_000 };
+            _ = std.os.linux.nanosleep(&ts, null);
+        }
+        out.print("reconnecting to {s}:{d}... ({d}/{d})\n", .{ host, port, attempt + 1, max_attempts }) catch {};
+        const c = client_mod.connect(host, port, alloc) catch continue;
+        out.print("reconnected\n", .{}) catch {};
+        return c;
+    }
+    out.print("error: could not reconnect after {d} attempts\n", .{max_attempts}) catch {};
+    return null;
+}
+
 // ---- Main ----
 
 pub fn main(init: std.process.Init) !void {
@@ -174,7 +201,6 @@ pub fn main(init: std.process.Init) !void {
         try out.print("error: could not connect to {s}:{d}: {}\n", .{ host, port, e });
         return;
     };
-    defer c.close();
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(alloc);
@@ -186,7 +212,7 @@ pub fn main(init: std.process.Init) !void {
             try writeAll("   ...> ");
         }
 
-        const line = try readLine(alloc) orelse break;
+        const line = readLine(alloc) catch break orelse break;
         defer alloc.free(line);
 
         const trimmed = std.mem.trimEnd(u8, line, "\r ");
@@ -205,16 +231,18 @@ pub fn main(init: std.process.Init) !void {
 
         if (std.mem.endsWith(u8, buf.items, ";")) {
             dispatch(&c, buf.items, &out) catch |e| {
-                if (e == error.ConnectionClosed or e == error.ReadError or
-                    e == error.WriteError or e == error.ConnectError)
-                {
+                buf.clearRetainingCapacity();
+                if (isConnError(e)) {
                     try out.print("connection lost\n", .{});
-                    buf.clearRetainingCapacity();
-                    break;
+                    c.deinit();
+                    c = tryReconnect(host, port, alloc, &out) orelse break;
+                    continue;
                 }
                 try out.print("error: {}\n", .{e});
             };
             buf.clearRetainingCapacity();
         }
     }
+
+    c.close();
 }
