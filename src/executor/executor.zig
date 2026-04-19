@@ -160,7 +160,7 @@ pub const Executor = struct {
         return self.runValidated(validated);
     }
 
-    fn runValidated(self: *Executor, entry: ValidatedTxnEntry) !ExecResult {
+    pub fn runValidated(self: *Executor, entry: ValidatedTxnEntry) !ExecResult {
         const decoded = entry.decoded;
 
         const registered = self.registry.lookup(decoded.query_hash.*) orelse {

@@ -190,6 +190,9 @@ pub fn restoreFromSnapshot(
     errdefer lsm.deinit();
 
     for (manifest.sstable_keys) |obj_key| {
+        // This is the domain boundary — raw SSTable bytes are fetched from the
+        // object store (cold tier) and written to local disk; SSTableReader.open
+        // validates structural integrity before the file is registered with the LSM.
         const file_data = try store.get(obj_key, alloc);
         defer alloc.free(file_data);
 
