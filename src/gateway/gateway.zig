@@ -141,6 +141,9 @@ pub const Gateway = struct {
 
         // Replay schema_change entries from partition log 0 to rebuild schema after restart.
         try gw.replaySchemaFromLog();
+        // Sync committed_seq to the log head — storage state is loaded from the durable LSM,
+        // not rebuilt by replay, so we just need the cursor to reflect reality.
+        gw.sql_exec.committed_seq = try gw.sequencer.partition_logs[0].head();
 
         // Derive a stable client_id from the storage path hash
         gw.client_id = blk: {
@@ -381,9 +384,6 @@ pub const Gateway = struct {
                         } else {
                             _ = self.registry.register(e.payload) catch {};
                         }
-                    },
-                    .txn_intent => {
-                        _ = self.sql_exec.run(e) catch {};
                     },
                     else => {},
                 }

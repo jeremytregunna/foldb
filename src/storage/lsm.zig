@@ -52,7 +52,8 @@ pub const LSM = struct {
     pub fn init(schema: TableSchema, dir: []const u8, alloc: std.mem.Allocator) !LSM {
         try mkdirAll(dir);
         const dir_copy = try alloc.dupe(u8, dir);
-        return .{
+        // NOTE: if BlockCache.init fails here, dir_copy leaks — pre-existing issue.
+        var lsm = LSM{
             .schema = schema,
             .dir = dir_copy,
             .memtable = Memtable.init(schema, alloc),
@@ -63,6 +64,12 @@ pub const LSM = struct {
             .object_store = null,
             .cache_dir = null,
         };
+        errdefer lsm.deinit();
+
+        // Load existing SSTables from disk so storage state survives restarts.
+        loadSSTables(&lsm, dir_copy, schema, alloc);
+
+        return lsm;
     }
 
     pub fn deinit(self: *LSM) void {
@@ -526,6 +533,49 @@ pub const LSM = struct {
             }
         }
         return result.toOwnedSlice(alloc);
+    }
+
+    fn loadSSTables(lsm: *LSM, dir: []const u8, schema: TableSchema, alloc: std.mem.Allocator) void {
+        const null_dir = std.heap.page_allocator.allocSentinel(u8, dir.len, 0) catch return;
+        defer std.heap.page_allocator.free(null_dir);
+        @memcpy(null_dir[0..dir.len], dir);
+
+        const raw_fd = std.os.linux.open(null_dir.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
+        const fd_i: isize = @bitCast(raw_fd);
+        if (fd_i < 0) return;
+        const fd: std.posix.fd_t = @intCast(fd_i);
+        defer _ = std.os.linux.close(@intCast(fd));
+
+        var buf: [4096]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
+        while (true) {
+            const ret = std.os.linux.getdents64(@intCast(fd), &buf, buf.len);
+            const n: isize = @bitCast(ret);
+            if (n <= 0) break;
+            var i: usize = 0;
+            while (i < @as(usize, @intCast(n))) {
+                const dent: *const std.os.linux.dirent64 = @ptrCast(@alignCast(buf[i..].ptr));
+                const name = std.mem.span(@as([*:0]const u8, @ptrCast(&dent.name)));
+                i += dent.reclen;
+                if (!std.mem.endsWith(u8, name, ".sst")) continue;
+                if (name.len < 2 or name[0] != 'L') continue;
+                const base = name[1 .. name.len - 4]; // strip 'L' prefix and '.sst'
+                const us = std.mem.indexOfScalar(u8, base, '_') orelse continue;
+                const level_u = std.fmt.parseUnsigned(u8, base[0..us], 10) catch continue;
+                const file_id = std.fmt.parseUnsigned(u64, base[us + 1 ..], 10) catch continue;
+                if (level_u >= lsm.levels.len) continue;
+                const file_path = std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name }) catch continue;
+                defer alloc.free(file_path);
+                var reader = SSTableReader.open(file_path, schema, alloc) catch continue;
+                defer reader.deinit();
+                const m = reader.meta(file_path, alloc) catch continue;
+                lsm.levels[level_u].files.append(alloc, m) catch {
+                    var mm = m;
+                    mm.deinit(alloc);
+                    continue;
+                };
+                if (file_id >= lsm.next_file_id) lsm.next_file_id = file_id + 1;
+            }
+        }
     }
 
     fn nextFilePath(self: *LSM, level: usize) ![]const u8 {
