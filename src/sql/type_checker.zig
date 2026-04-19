@@ -437,9 +437,10 @@ pub const TypeChecker = struct {
                 return lt;
             },
             .eq, .neq, .lt, .gt, .lte, .gte => {
-                // §10.2: = on nullable column is an error unless IS NULL guard used
-                if (op == .eq or op == .neq) {
-                    // Check if either side is a possibly-nullable column ref
+                // §10.2: = on nullable column is an error unless IS NULL guard used.
+                // Exception: JOIN ON conditions — NULL propagation (NULL = x → NULL/false)
+                // is correct SQL semantics and correctly excludes non-matching rows.
+                if ((op == .eq or op == .neq) and !ctx.in_join) {
                     if (left.* == .column_ref) {
                         if (self.resolveColumnNullable(left.column_ref, ctx)) |nullability| {
                             if (nullability == .nullable) {

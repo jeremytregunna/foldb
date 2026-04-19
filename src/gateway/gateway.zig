@@ -164,6 +164,8 @@ pub const Gateway = struct {
         self.sequencer.deinit();
         self.registry.deinit();
         self.schema.deinit();
+        // Flush memtables to SSTables before teardown so data survives restart.
+        self.storage.flushAll() catch {};
         self.storage.deinit();
         self.storage_schema_arena.deinit();
         self.alloc.destroy(self);

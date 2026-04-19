@@ -4,6 +4,24 @@ const frame = @import("frame.zig");
 const conn_mod = @import("conn.zig");
 const gateway_mod = @import("gateway.zig");
 
+/// Set by the SIGINT handler; polled in the accept loop to trigger clean shutdown.
+var shutdown_requested = std.atomic.Value(bool).init(false);
+
+fn handleSigint(_: std.os.linux.SIG) callconv(.c) void {
+    shutdown_requested.store(true, .release);
+}
+
+/// Install the SIGINT handler. SA_RESETHAND restores default behaviour on a second ^C.
+fn installSigintHandler() void {
+    const linux = std.os.linux;
+    var sa = linux.Sigaction{
+        .handler = .{ .handler = handleSigint },
+        .mask = linux.sigemptyset(),
+        .flags = linux.SA.RESETHAND,
+    };
+    _ = linux.sigaction(linux.SIG.INT, &sa, null);
+}
+
 /// Bind + listen on port. Returns the server fd.
 pub fn bindListen(port: u16) !std.posix.fd_t {
     const AF_INET: u32 = 2;
@@ -66,22 +84,29 @@ fn handleConn(
 }
 
 /// Main server loop. Accepts connections and spawns a concurrent task per connection.
-/// Returns only on unrecoverable error or if the server fd is closed.
+/// Returns cleanly when SIGINT is received so deferred cleanup (flush, deinit) runs.
 pub fn serve(
     io: std.Io,
     port: u16,
     gw: *gateway_mod.Gateway,
     alloc: std.mem.Allocator,
 ) !void {
+    installSigintHandler();
+
     const server_fd = try bindListen(port);
     defer _ = std.os.linux.close(@intCast(server_fd));
 
     var group: std.Io.Group = .{ .token = .init(null), .state = 0 };
     defer group.cancel(io);
 
-    while (true) {
-        const client_fd = acceptOne(server_fd) catch continue;
-
+    while (!shutdown_requested.load(.acquire)) {
+        const client_fd = acceptOne(server_fd) catch {
+            // accept4 returns EINTR when interrupted by a signal; check for shutdown.
+            if (shutdown_requested.load(.acquire)) break;
+            continue;
+        };
         group.async(io, handleConn, .{ io, client_fd, gw, alloc });
     }
+
+    std.debug.print("foldb: shutting down cleanly\n", .{});
 }
