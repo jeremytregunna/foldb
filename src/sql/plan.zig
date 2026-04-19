@@ -671,9 +671,16 @@ pub const Planner = struct {
             switch (item) {
                 .star => {}, // expand at execution time
                 .expr => |ei| {
+                    const alias = ei.alias orelse blk: {
+                        if (ei.expr.* == .column_ref) {
+                            const r = ei.expr.column_ref;
+                            if (r.table) |t| break :blk try std.fmt.allocPrint(self.arena, "{s}.{s}", .{ t, r.column });
+                        }
+                        break :blk exprNaturalName(ei.expr);
+                    };
                     try proj_items.append(self.arena, .{
                         .expr = try self.planExpr(ei.expr),
-                        .alias = ei.alias orelse exprNaturalName(ei.expr),
+                        .alias = alias,
                     });
                 },
             }

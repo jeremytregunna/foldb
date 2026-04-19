@@ -170,6 +170,37 @@ test "§10.2 allows qualified refs in join" {
     );
 }
 
+test "§10.2 allows AS alias in join" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+    var r = reg(alloc, &sr);
+    defer r.deinit();
+
+    try expectOk(
+        &r,
+        "SELECT f.id, o.amount FROM users AS f JOIN orders AS o ON f.id = o.user_id",
+    );
+}
+
+test "JOIN columns get table-qualified aliases in plan" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+    var r = reg(alloc, &sr);
+    defer r.deinit();
+
+    const h = try r.register("SELECT u.id, o.amount FROM users u JOIN orders o ON u.id = o.user_id");
+    const rq = r.lookup(h);
+    try std.testing.expect(rq != null);
+    const top = rq.?.plan.stmts[0].select;
+    try std.testing.expect(top.* == .project);
+    const proj = top.project;
+    try std.testing.expectEqual(@as(usize, 2), proj.exprs.len);
+    try std.testing.expectEqualStrings("u.id", proj.exprs[0].alias);
+    try std.testing.expectEqualStrings("o.amount", proj.exprs[1].alias);
+}
+
 // ─── §10.2: implicit type coercion ────────────────────────────────────────────
 
 test "§10.2 rejects adding int to string" {
