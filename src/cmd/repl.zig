@@ -73,6 +73,7 @@ fn dispatch(c: *client_mod.Client, sql_with_semi: []const u8, out: *Out) !void {
     const kind = classify(sql);
 
     const hash = c.register(sql) catch |e| {
+        if (isConnError(e)) return e;
         const msg = c.lastError();
         if (msg.len > 0) try out.print("error: {s}\n", .{msg}) else try out.print("error: {}\n", .{e});
         return;
@@ -81,6 +82,7 @@ fn dispatch(c: *client_mod.Client, sql_with_semi: []const u8, out: *Out) !void {
     switch (kind) {
         .ddl => {
             _ = c.execute(hash, &.{}) catch |e| {
+                if (isConnError(e)) return e;
                 const msg = c.lastError();
                 if (msg.len > 0) try out.print("error: {s}\n", .{msg}) else try out.print("error: {}\n", .{e});
                 return;
@@ -89,6 +91,7 @@ fn dispatch(c: *client_mod.Client, sql_with_semi: []const u8, out: *Out) !void {
         },
         .dml => {
             const result = c.execute(hash, &.{}) catch |e| {
+                if (isConnError(e)) return e;
                 const msg = c.lastError();
                 if (msg.len > 0) try out.print("error: {s}\n", .{msg}) else try out.print("error: {}\n", .{e});
                 return;
@@ -97,6 +100,7 @@ fn dispatch(c: *client_mod.Client, sql_with_semi: []const u8, out: *Out) !void {
         },
         .select => {
             var rs = c.query(hash, &.{}) catch |e| {
+                if (isConnError(e)) return e;
                 const msg = c.lastError();
                 if (msg.len > 0) try out.print("error: {s}\n", .{msg}) else try out.print("error: {}\n", .{e});
                 return;
@@ -230,17 +234,23 @@ pub fn main(init: std.process.Init) !void {
         try buf.appendSlice(alloc, trimmed);
 
         if (std.mem.endsWith(u8, buf.items, ";")) {
+            var disconnected = false;
             dispatch(&c, buf.items, &out) catch |e| {
-                buf.clearRetainingCapacity();
-                if (isConnError(e)) {
+                if (!isConnError(e)) {
+                    try out.print("error: {}\n", .{e});
+                } else {
                     try out.print("connection lost\n", .{});
                     c.deinit();
-                    c = tryReconnect(host, port, alloc, &out) orelse break;
-                    continue;
+                    if (tryReconnect(host, port, alloc, &out)) |new_c| {
+                        c = new_c;
+                        dispatch(&c, buf.items, &out) catch {};
+                    } else {
+                        disconnected = true;
+                    }
                 }
-                try out.print("error: {}\n", .{e});
             };
             buf.clearRetainingCapacity();
+            if (disconnected) break;
         }
     }
 
