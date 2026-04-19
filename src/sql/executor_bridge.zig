@@ -679,7 +679,6 @@ pub const SqlExecutor = struct {
         switch (ins.source) {
             .values => |rows| {
                 for (rows) |row| {
-                    // Evaluate value expressions
                     const values = try ctx.alloc.alloc(ColumnValue, ins.column_ids.len);
                     errdefer {
                         for (values) |v| v.freeIfOwned(ctx.alloc);
@@ -690,27 +689,9 @@ pub const SqlExecutor = struct {
                         const col = tbl.columnById(col_id) orelse return error.ColumnNotFound;
                         values[i] = try planValueToTypedColumnValue(pv, col.typ, ctx.alloc);
                     }
-
-                    // Enforce FK constraints
                     try self.checkForeignKeys(tbl, ins.column_ids, values, ctx);
-
-                    // Build the primary key
                     const key = try buildPrimaryKey(tbl, ins.column_ids, values, ctx.alloc);
-
-                    try mutations.append(ctx.alloc, .{
-                        .kind = .insert,
-                        .table_id = ins.table_id,
-                        .key = key,
-                        .values = values,
-                    });
-
-                    if (returning_rows) |rr| {
-                        if (ins.returning.len > 0) {
-                            const virtual = try buildVirtualRow(tbl.columns.len, ins.column_ids, values, ctx.alloc);
-                            defer ctx.alloc.free(virtual);
-                            try projectReturning(ins.returning, virtual, ctx, rr);
-                        }
-                    }
+                    try self.appendInsertMutation(ins, tbl, key, values, ctx, mutations, returning_rows);
                 }
             },
             .query => |node| {
@@ -735,22 +716,105 @@ pub const SqlExecutor = struct {
                     }
                     try self.checkForeignKeys(tbl, ins.column_ids, values, ctx);
                     const key = try buildPrimaryKey(tbl, ins.column_ids, values, ctx.alloc);
-                    try mutations.append(ctx.alloc, .{
-                        .kind = .insert,
-                        .table_id = ins.table_id,
-                        .key = key,
-                        .values = values,
-                    });
-
-                    if (returning_rows) |rr| {
-                        if (ins.returning.len > 0) {
-                            const virtual = try buildVirtualRow(tbl.columns.len, ins.column_ids, values, ctx.alloc);
-                            defer ctx.alloc.free(virtual);
-                            try projectReturning(ins.returning, virtual, ctx, rr);
-                        }
-                    }
+                    try self.appendInsertMutation(ins, tbl, key, values, ctx, mutations, returning_rows);
                 }
             },
+        }
+    }
+
+    /// Resolves ON CONFLICT and appends the appropriate mutation.
+    /// Takes ownership of `key` and `values` (frees them on DO NOTHING).
+    fn appendInsertMutation(
+        self: *SqlExecutor,
+        ins: plan_mod.InsertPlan,
+        tbl: *const schema_mod.TableSchema,
+        key: []const u8,
+        values: []ColumnValue,
+        ctx: EvalCtx,
+        mutations: *std.ArrayList(Mutation),
+        returning_rows: ?*std.ArrayList([]const ?ColumnValue),
+    ) SqlExecError!void {
+        if (ins.on_conflict) |oc| {
+            // Check whether the key already exists in storage.
+            var existing = self.storage.get(ins.table_id, key, ctx.seq -| 1) catch null;
+            defer if (existing) |*ex| ex.deinit(ctx.alloc);
+
+            if (existing != null) {
+                switch (oc) {
+                    .do_nothing => {
+                        // Discard incoming row — keep existing, emit nothing.
+                        ctx.alloc.free(key);
+                        for (values) |v| v.freeIfOwned(ctx.alloc);
+                        ctx.alloc.free(values);
+                        return;
+                    },
+                    .do_update => |assignments| {
+                        const ex_row = existing.?;
+                        // Build full table-width row from existing values.
+                        const new_values = try ctx.alloc.alloc(ColumnValue, tbl.columns.len);
+                        errdefer {
+                            for (new_values) |v| v.freeIfOwned(ctx.alloc);
+                            ctx.alloc.free(new_values);
+                        }
+                        for (tbl.columns, 0..) |col, i| {
+                            new_values[i] = if (i < ex_row.values.len)
+                                ex_row.values[i].dupe(ctx.alloc) catch defaultValue(col.typ)
+                            else
+                                defaultValue(col.typ);
+                        }
+                        // Build a row context using the existing row values for referencing old columns.
+                        const ex_nullable = try ctx.alloc.alloc(?ColumnValue, tbl.columns.len);
+                        defer ctx.alloc.free(ex_nullable);
+                        for (ex_row.values, 0..) |v, i| ex_nullable[i] = v;
+                        var row_ctx = ctx;
+                        row_ctx.row = ex_nullable;
+                        // Apply SET assignments.
+                        for (assignments) |asgn| {
+                            const pv = try evalExpr(asgn.value, row_ctx);
+                            const col = tbl.columnById(asgn.column_id) orelse return error.ColumnNotFound;
+                            const pos: usize = @intCast(asgn.column_id);
+                            if (pos < new_values.len) {
+                                new_values[pos].freeIfOwned(ctx.alloc);
+                                new_values[pos] = try planValueToTypedColumnValue(pv, col.typ, ctx.alloc);
+                            }
+                        }
+                        // Discard the incoming insert values (replaced by update).
+                        for (values) |v| v.freeIfOwned(ctx.alloc);
+                        ctx.alloc.free(values);
+
+                        try mutations.append(ctx.alloc, .{
+                            .kind = .update,
+                            .table_id = ins.table_id,
+                            .key = key,
+                            .values = new_values,
+                        });
+                        if (returning_rows) |rr| {
+                            if (ins.returning.len > 0) {
+                                const virtual = try ctx.alloc.alloc(?ColumnValue, new_values.len);
+                                defer ctx.alloc.free(virtual);
+                                for (new_values, 0..) |v, i| virtual[i] = v;
+                                try projectReturning(ins.returning, virtual, ctx, rr);
+                            }
+                        }
+                        return;
+                    },
+                }
+            }
+        }
+
+        // No conflict (or no on_conflict clause) — regular insert.
+        try mutations.append(ctx.alloc, .{
+            .kind = .insert,
+            .table_id = ins.table_id,
+            .key = key,
+            .values = values,
+        });
+        if (returning_rows) |rr| {
+            if (ins.returning.len > 0) {
+                const virtual = try buildVirtualRow(tbl.columns.len, ins.column_ids, values, ctx.alloc);
+                defer ctx.alloc.free(virtual);
+                try projectReturning(ins.returning, virtual, ctx, rr);
+            }
         }
     }
 

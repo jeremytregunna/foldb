@@ -926,6 +926,17 @@ pub fn build(b: *std.Build) void {
     const gateway_distinct_returning_tests = b.addTest(.{ .root_module = gateway_distinct_returning_test_module });
     const run_gateway_distinct_returning_tests = b.addRunArtifact(gateway_distinct_returning_tests);
 
+    const gateway_on_conflict_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/gateway/on_conflict_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gateway_on_conflict_test_module.addImport("gateway.zig", gateway_module);
+    gateway_on_conflict_test_module.addImport("storage.zig", storage_module);
+    gateway_on_conflict_test_module.addImport("sequencer.zig", sequencer_module);
+    const gateway_on_conflict_tests = b.addTest(.{ .root_module = gateway_on_conflict_test_module });
+    const run_gateway_on_conflict_tests = b.addRunArtifact(gateway_on_conflict_tests);
+
     // Gateway replay (DST)
     const gateway_replay_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/gateway/replay_test.zig"),
@@ -979,6 +990,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_gateway_txn_tests.step);
     test_step.dependOn(&run_gateway_subquery_tests.step);
     test_step.dependOn(&run_gateway_distinct_returning_tests.step);
+    test_step.dependOn(&run_gateway_on_conflict_tests.step);
     test_step.dependOn(&run_seq_epoch_tests.step);
     test_step.dependOn(&run_seq_idem_tests.step);
     test_step.dependOn(&run_seq_tests.step);

@@ -807,6 +807,16 @@ pub const Planner = struct {
         const on_conflict: ?OnConflictPlan = if (stmt.on_conflict) |oc| switch (oc) {
             .do_nothing => .do_nothing,
             .do_update => |du| blk: {
+                // Set up table scope so SET expressions can reference existing column values.
+                const scope_save = self.scope.items.len;
+                defer self.scope.shrinkRetainingCapacity(scope_save);
+                for (tbl.columns, 0..) |col, i| {
+                    try self.scope.append(self.arena, .{
+                        .table_alias = stmt.table,
+                        .col_name = col.name,
+                        .position = @intCast(i),
+                    });
+                }
                 var assignments: std.ArrayList(UpdateAssignment) = .empty;
                 for (du.sets) |a| {
                     const col = tbl.columnByName(a.column) orelse return error.ColumnNotFound;
