@@ -26,7 +26,10 @@ pub const TableId = storage_mod.TableId;
 pub const Seq = executor_mod.Seq;
 pub const LogEntry = log_mod.LogEntry;
 pub const ResolvedValue = executor_mod.ResolvedValue;
-pub const ExecResult = executor_mod.ExecResult;
+pub const ExecResult = union(enum) {
+    ok: struct { rows_affected: u64, result_set: ?ResultSet = null },
+    abort: struct { code: executor_mod.AbortCode, detail: []const u8 },
+};
 pub const AbortCode = executor_mod.AbortCode;
 
 pub const SqlExecError = error{
@@ -157,6 +160,26 @@ pub const SqlExecutor = struct {
             self.alloc.free(params);
         }
 
+        const has_returning = blk: {
+            for (rq.plan.stmts) |stmt| {
+                switch (stmt) {
+                    .insert => |ins| if (ins.returning.len > 0) break :blk true,
+                    .update => |upd| if (upd.returning.len > 0) break :blk true,
+                    .delete => |del| if (del.returning.len > 0) break :blk true,
+                    else => {},
+                }
+            }
+            break :blk false;
+        };
+
+        var returning_rows: std.ArrayList([]const ?ColumnValue) = .empty;
+        defer {
+            if (!has_returning) {
+                for (returning_rows.items) |r| SqlExecutor.freeRowValues(r, self.alloc);
+                returning_rows.deinit(self.alloc);
+            }
+        }
+
         const result = self.executePlan(
             rq.plan,
             params,
@@ -164,6 +187,7 @@ pub const SqlExecutor = struct {
             validated.seq,
             validated.epoch,
             .txn_intent,
+            if (has_returning) &returning_rows else null,
         ) catch |e| {
             return switch (e) {
                 error.AssertionFailed => .{ .abort = .{ .code = .constraint_violation, .detail = "assertion failed" } },
@@ -172,7 +196,12 @@ pub const SqlExecutor = struct {
             };
         };
 
-        return .{ .ok = .{ .rows_affected = result } };
+        if (has_returning and returning_rows.items.len > 0) {
+            const result_set = try buildReturningResultSet(rq.plan, returning_rows.toOwnedSlice(self.alloc) catch &.{}, self.alloc);
+            return .{ .ok = .{ .rows_affected = result, .result_set = result_set } };
+        }
+
+        return .{ .ok = .{ .rows_affected = result, .result_set = null } };
     }
 
     /// Execute a SELECT plan and return collected rows.
@@ -213,7 +242,7 @@ pub const SqlExecutor = struct {
         nondet: []const ResolvedValue,
         seq: Seq,
     ) SqlExecError!u64 {
-        return self.executePlan(plan, params, nondet, seq);
+        return self.executePlan(plan, params, nondet, seq, 0, .txn_intent, null);
     }
 
     fn executePlan(
@@ -224,6 +253,7 @@ pub const SqlExecutor = struct {
         seq: Seq,
         epoch: log_mod.Epoch,
         entry_kind: log_mod.EntryKind,
+        returning_rows: ?*std.ArrayList([]const ?ColumnValue),
     ) SqlExecError!u64 {
         var mutations: std.ArrayList(Mutation) = .empty;
         defer {
@@ -248,7 +278,7 @@ pub const SqlExecutor = struct {
         };
 
         for (plan.stmts) |stmt| {
-            try self.executeStmt(stmt, ctx, &mutations);
+            try self.executeStmt(stmt, ctx, &mutations, returning_rows);
         }
 
         // Capture before-images for CDC (before storage.apply)
@@ -278,6 +308,7 @@ pub const SqlExecutor = struct {
         stmt: plan_mod.StmtPlan,
         ctx: EvalCtx,
         mutations: *std.ArrayList(Mutation),
+        returning_rows: ?*std.ArrayList([]const ?ColumnValue),
     ) SqlExecError!void {
         switch (stmt) {
             .select => |node| {
@@ -289,9 +320,9 @@ pub const SqlExecutor = struct {
                 }
                 try self.executeScan(node, ctx, &rows);
             },
-            .insert => |ins| try self.executeInsert(ins, ctx, mutations),
-            .update => |upd| try self.executeUpdate(upd, ctx, mutations),
-            .delete => |del| try self.executeDelete(del, ctx, mutations),
+            .insert => |ins| try self.executeInsert(ins, ctx, mutations, returning_rows),
+            .update => |upd| try self.executeUpdate(upd, ctx, mutations, returning_rows),
+            .delete => |del| try self.executeDelete(del, ctx, mutations, returning_rows),
             .assert => |a| try self.executeAssert(a, ctx),
             .merge => |m| try self.executeMerge(m, ctx, mutations),
         }
@@ -336,6 +367,12 @@ pub const SqlExecutor = struct {
                     inner.deinit(ctx.alloc);
                 }
                 try self.executeScan(p.input, ctx, &inner);
+                var seen = std.StringHashMap(void).init(ctx.alloc);
+                defer {
+                    var it = seen.keyIterator();
+                    while (it.next()) |k| ctx.alloc.free(k.*);
+                    seen.deinit();
+                }
                 for (inner.items) |row| {
                     var row_ctx = ctx;
                     row_ctx.row = row;
@@ -343,6 +380,15 @@ pub const SqlExecutor = struct {
                     for (p.exprs, 0..) |item, i| {
                         const v = try evalExpr(item.expr, row_ctx);
                         projected[i] = planValueToColumnValue(v, ctx.alloc) catch null;
+                    }
+                    if (p.distinct) {
+                        const key = try serializeRowKey(projected, ctx.alloc);
+                        const gop = try seen.getOrPut(key);
+                        if (gop.found_existing) {
+                            ctx.alloc.free(key);
+                            SqlExecutor.freeRowValues(projected, ctx.alloc);
+                            continue;
+                        }
                     }
                     try out.append(ctx.alloc, projected);
                 }
@@ -626,6 +672,7 @@ pub const SqlExecutor = struct {
         ins: plan_mod.InsertPlan,
         ctx: EvalCtx,
         mutations: *std.ArrayList(Mutation),
+        returning_rows: ?*std.ArrayList([]const ?ColumnValue),
     ) SqlExecError!void {
         const tbl = self.schema.getTableById(ins.table_id) orelse return error.TableNotFound;
 
@@ -656,6 +703,14 @@ pub const SqlExecutor = struct {
                         .key = key,
                         .values = values,
                     });
+
+                    if (returning_rows) |rr| {
+                        if (ins.returning.len > 0) {
+                            const virtual = try buildVirtualRow(tbl.columns.len, ins.column_ids, values, ctx.alloc);
+                            defer ctx.alloc.free(virtual);
+                            try projectReturning(ins.returning, virtual, ctx, rr);
+                        }
+                    }
                 }
             },
             .query => |node| {
@@ -686,6 +741,14 @@ pub const SqlExecutor = struct {
                         .key = key,
                         .values = values,
                     });
+
+                    if (returning_rows) |rr| {
+                        if (ins.returning.len > 0) {
+                            const virtual = try buildVirtualRow(tbl.columns.len, ins.column_ids, values, ctx.alloc);
+                            defer ctx.alloc.free(virtual);
+                            try projectReturning(ins.returning, virtual, ctx, rr);
+                        }
+                    }
                 }
             },
         }
@@ -696,6 +759,7 @@ pub const SqlExecutor = struct {
         upd: plan_mod.UpdatePlan,
         ctx: EvalCtx,
         mutations: *std.ArrayList(Mutation),
+        returning_rows: ?*std.ArrayList([]const ?ColumnValue),
     ) SqlExecError!void {
         const tbl = self.schema.getTableById(upd.table_id) orelse return error.TableNotFound;
         var iter = self.storage.scan(upd.table_id, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch return error.TableNotFound;
@@ -752,6 +816,16 @@ pub const SqlExecutor = struct {
                 .key = key,
                 .values = new_values,
             });
+
+            if (returning_rows) |rr| {
+                if (upd.returning.len > 0) {
+                    // new_values is now owned by mutation; build nullable view for projection
+                    const virtual = try ctx.alloc.alloc(?ColumnValue, new_values.len);
+                    defer ctx.alloc.free(virtual);
+                    for (new_values, 0..) |v, i| virtual[i] = v;
+                    try projectReturning(upd.returning, virtual, ctx, rr);
+                }
+            }
         }
     }
 
@@ -760,6 +834,7 @@ pub const SqlExecutor = struct {
         del: plan_mod.DeletePlan,
         ctx: EvalCtx,
         mutations: *std.ArrayList(Mutation),
+        returning_rows: ?*std.ArrayList([]const ?ColumnValue),
     ) SqlExecError!void {
         const tbl = self.schema.getTableById(del.table_id) orelse return error.TableNotFound;
 
@@ -771,11 +846,16 @@ pub const SqlExecutor = struct {
         defer iter.deinit();
 
         while (iter.next() catch null) |row| {
+            const need_row_vals = del.filter != null or (returning_rows != null and del.returning.len > 0);
+            const row_vals: ?[]const ?ColumnValue = if (need_row_vals)
+                try self.rowToValues(row, &.{}, ctx.alloc)
+            else
+                null;
+            defer if (row_vals) |rv| SqlExecutor.freeRowValues(rv, ctx.alloc);
+
             if (del.filter) |f| {
-                const row_vals = try self.rowToValues(row, &.{}, ctx.alloc);
-                defer SqlExecutor.freeRowValues(row_vals, ctx.alloc);
                 var row_ctx = ctx;
-                row_ctx.row = row_vals;
+                row_ctx.row = row_vals.?;
                 const v = try evalExpr(f, row_ctx);
                 if (!(v.toBool() orelse false)) continue;
             }
@@ -792,6 +872,12 @@ pub const SqlExecutor = struct {
                 .key = key,
                 .values = null,
             });
+
+            if (returning_rows) |rr| {
+                if (del.returning.len > 0) {
+                    try projectReturning(del.returning, row_vals.?, ctx, rr);
+                }
+            }
         }
     }
 
@@ -2271,4 +2357,104 @@ fn decodeParamValueByTag(data: []const u8, pos: *usize, tag: u8, alloc: std.mem.
             break :blk .{ .bytes = b };
         },
     };
+}
+
+fn buildVirtualRow(
+    n_cols: usize,
+    col_ids: []const schema_mod.ColumnId,
+    values: []const ColumnValue,
+    alloc: std.mem.Allocator,
+) ![]const ?ColumnValue {
+    const virtual = try alloc.alloc(?ColumnValue, n_cols);
+    @memset(virtual, null);
+    for (col_ids, values) |col_id, val| {
+        const pos: usize = @intCast(col_id);
+        if (pos < virtual.len) virtual[pos] = val;
+    }
+    return virtual;
+}
+
+fn projectReturning(
+    items: []const plan_mod.ProjectItem,
+    virtual_row: []const ?ColumnValue,
+    ctx: EvalCtx,
+    out: *std.ArrayList([]const ?ColumnValue),
+) !void {
+    const projected = try ctx.alloc.alloc(?ColumnValue, items.len);
+    errdefer ctx.alloc.free(projected);
+    var row_ctx = ctx;
+    row_ctx.row = virtual_row;
+    for (items, 0..) |item, i| {
+        const v = try evalExpr(item.expr, row_ctx);
+        projected[i] = planValueToColumnValue(v, ctx.alloc) catch null;
+    }
+    try out.append(ctx.alloc, projected);
+}
+
+fn buildReturningResultSet(
+    plan: plan_mod.ExecutionPlan,
+    rows: []const []const ?ColumnValue,
+    alloc: std.mem.Allocator,
+) !ResultSet {
+    var col_names: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (col_names.items) |n| alloc.free(n);
+        col_names.deinit(alloc);
+    }
+    for (plan.stmts) |stmt| {
+        const returning = switch (stmt) {
+            .insert => |ins| ins.returning,
+            .update => |upd| upd.returning,
+            .delete => |del| del.returning,
+            else => continue,
+        };
+        for (returning) |item| {
+            try col_names.append(alloc, try alloc.dupe(u8, item.alias));
+        }
+        break;
+    }
+    return ResultSet{
+        .columns = try col_names.toOwnedSlice(alloc),
+        .rows = rows,
+        .alloc = alloc,
+    };
+}
+
+fn serializeRowKey(row: []const ?ColumnValue, alloc: std.mem.Allocator) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(alloc);
+    for (row) |maybe_val| {
+        if (maybe_val) |cv| {
+            try buf.append(alloc, 1);
+            switch (cv) {
+                .bool_t => |b| try buf.append(alloc, if (b) 1 else 0),
+                .int8 => |v| { var tmp: [1]u8 = undefined; std.mem.writeInt(i8, &tmp, v, .little); try buf.appendSlice(alloc, &tmp); },
+                .int16 => |v| { var tmp: [2]u8 = undefined; std.mem.writeInt(i16, &tmp, v, .little); try buf.appendSlice(alloc, &tmp); },
+                .int32 => |v| { var tmp: [4]u8 = undefined; std.mem.writeInt(i32, &tmp, v, .little); try buf.appendSlice(alloc, &tmp); },
+                .int64 => |v| { var tmp: [8]u8 = undefined; std.mem.writeInt(i64, &tmp, v, .little); try buf.appendSlice(alloc, &tmp); },
+                .uint8 => |v| try buf.append(alloc, v),
+                .uint16 => |v| { var tmp: [2]u8 = undefined; std.mem.writeInt(u16, &tmp, v, .little); try buf.appendSlice(alloc, &tmp); },
+                .uint32 => |v| { var tmp: [4]u8 = undefined; std.mem.writeInt(u32, &tmp, v, .little); try buf.appendSlice(alloc, &tmp); },
+                .uint64 => |v| { var tmp: [8]u8 = undefined; std.mem.writeInt(u64, &tmp, v, .little); try buf.appendSlice(alloc, &tmp); },
+                .float32 => |v| { var tmp: [4]u8 = undefined; std.mem.writeInt(u32, &tmp, @bitCast(v), .little); try buf.appendSlice(alloc, &tmp); },
+                .float64 => |v| { var tmp: [8]u8 = undefined; std.mem.writeInt(u64, &tmp, @bitCast(v), .little); try buf.appendSlice(alloc, &tmp); },
+                .string => |s| {
+                    var tmp: [4]u8 = undefined;
+                    std.mem.writeInt(u32, &tmp, @intCast(s.len), .little);
+                    try buf.appendSlice(alloc, &tmp);
+                    try buf.appendSlice(alloc, s);
+                },
+                .bytes => |b| {
+                    var tmp: [4]u8 = undefined;
+                    std.mem.writeInt(u32, &tmp, @intCast(b.len), .little);
+                    try buf.appendSlice(alloc, &tmp);
+                    try buf.appendSlice(alloc, b);
+                },
+            }
+        } else {
+            try buf.append(alloc, 0);
+        }
+        try buf.append(alloc, 0xFF);
+    }
+    return buf.toOwnedSlice(alloc);
 }

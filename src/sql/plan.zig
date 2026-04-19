@@ -127,6 +127,7 @@ pub const FilterNode = struct {
 pub const ProjectNode = struct {
     input: *PlanNode,
     exprs: []const ProjectItem,
+    distinct: bool = false,
 };
 
 pub const ProjectItem = struct {
@@ -176,6 +177,7 @@ pub const InsertPlan = struct {
     column_ids: []const schema_mod.ColumnId,
     source: InsertSource,
     on_conflict: ?OnConflictPlan,
+    returning: []const ProjectItem = &.{},
 };
 
 pub const InsertSource = union(enum) {
@@ -192,6 +194,7 @@ pub const UpdatePlan = struct {
     table_id: schema_mod.TableId,
     assignments: []const UpdateAssignment,
     filter: ?*PlanExpr,
+    returning: []const ProjectItem = &.{},
 };
 
 pub const UpdateAssignment = struct {
@@ -202,6 +205,7 @@ pub const UpdateAssignment = struct {
 pub const DeletePlan = struct {
     table_id: schema_mod.TableId,
     filter: ?*PlanExpr,
+    returning: []const ProjectItem = &.{},
 };
 
 pub const AssertPlan = struct {
@@ -705,7 +709,7 @@ pub const Planner = struct {
         }
         if (proj_items.items.len > 0) {
             const proj_node = try self.arena.create(PlanNode);
-            proj_node.* = .{ .project = .{ .input = node, .exprs = try proj_items.toOwnedSlice(self.arena) } };
+            proj_node.* = .{ .project = .{ .input = node, .exprs = try proj_items.toOwnedSlice(self.arena), .distinct = q.distinct } };
             node = proj_node;
         }
 
@@ -815,11 +819,37 @@ pub const Planner = struct {
             },
         } else null;
 
+        var returning_items: std.ArrayList(ProjectItem) = .empty;
+        if (stmt.returning.len > 0) {
+            const scope_save = self.scope.items.len;
+            defer self.scope.shrinkRetainingCapacity(scope_save);
+            for (tbl.columns, 0..) |col, i| {
+                try self.scope.append(self.arena, .{
+                    .table_alias = stmt.table,
+                    .col_name = col.name,
+                    .position = @intCast(i),
+                });
+            }
+            for (stmt.returning) |item| {
+                switch (item) {
+                    .star => {},
+                    .expr => |ei| {
+                        const alias = ei.alias orelse exprNaturalName(ei.expr);
+                        try returning_items.append(self.arena, .{
+                            .expr = try self.planExpr(ei.expr),
+                            .alias = alias,
+                        });
+                    },
+                }
+            }
+        }
+
         return .{
             .table_id = tbl.id,
             .column_ids = try col_ids.toOwnedSlice(self.arena),
             .source = source,
             .on_conflict = on_conflict,
+            .returning = try returning_items.toOwnedSlice(self.arena),
         };
     }
 
@@ -843,10 +873,24 @@ pub const Planner = struct {
             });
         }
         const filter = if (stmt.where) |w| try self.planExpr(w) else null;
+        var upd_returning: std.ArrayList(ProjectItem) = .empty;
+        for (stmt.returning) |item| {
+            switch (item) {
+                .star => {},
+                .expr => |ei| {
+                    const alias = ei.alias orelse exprNaturalName(ei.expr);
+                    try upd_returning.append(self.arena, .{
+                        .expr = try self.planExpr(ei.expr),
+                        .alias = alias,
+                    });
+                },
+            }
+        }
         return .{
             .table_id = tbl.id,
             .assignments = try assignments.toOwnedSlice(self.arena),
             .filter = filter,
+            .returning = try upd_returning.toOwnedSlice(self.arena),
         };
     }
 
@@ -862,7 +906,20 @@ pub const Planner = struct {
             });
         }
         const filter = if (stmt.where) |w| try self.planExpr(w) else null;
-        return .{ .table_id = tbl.id, .filter = filter };
+        var del_returning: std.ArrayList(ProjectItem) = .empty;
+        for (stmt.returning) |item| {
+            switch (item) {
+                .star => {},
+                .expr => |ei| {
+                    const alias = ei.alias orelse exprNaturalName(ei.expr);
+                    try del_returning.append(self.arena, .{
+                        .expr = try self.planExpr(ei.expr),
+                        .alias = alias,
+                    });
+                },
+            }
+        }
+        return .{ .table_id = tbl.id, .filter = filter, .returning = try del_returning.toOwnedSlice(self.arena) };
     }
 
     fn planMerge(self: *Planner, stmt: ast.MergeStmt) PlanError!MergePlan {

@@ -309,7 +309,7 @@ pub const Gateway = struct {
             };
 
             return switch (exec_result) {
-                .ok => |ok| .{ .rows_affected = ok.rows_affected, .result_set = null },
+                .ok => |ok| .{ .rows_affected = ok.rows_affected, .result_set = ok.result_set },
                 .abort => |ab| switch (ab.code) {
                     .constraint_violation => {
                         self.metrics.queries_aborted.inc();
