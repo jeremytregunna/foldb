@@ -660,6 +660,19 @@ pub fn build(b: *std.Build) void {
     const sim_txn_dst_tests = b.addTest(.{ .root_module = sim_txn_dst_test_module });
     const run_sim_txn_dst_tests = b.addRunArtifact(sim_txn_dst_tests);
 
+    // Sim subquery DST tests
+    const sim_subquery_dst_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sim/subquery_dst_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sim_subquery_dst_test_module.addImport("sim.zig", sim_module);
+    sim_subquery_dst_test_module.addImport("gateway.zig", gateway_module);
+    sim_subquery_dst_test_module.addImport("storage.zig", storage_module);
+    sim_subquery_dst_test_module.addImport("sequencer.zig", sequencer_module);
+    const sim_subquery_dst_tests = b.addTest(.{ .root_module = sim_subquery_dst_test_module });
+    const run_sim_subquery_dst_tests = b.addRunArtifact(sim_subquery_dst_tests);
+
     // Sim determinism property test
     const sim_determinism_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/sim/determinism_test.zig"),
@@ -890,6 +903,18 @@ pub fn build(b: *std.Build) void {
     const gateway_txn_tests = b.addTest(.{ .root_module = gateway_txn_test_module });
     const run_gateway_txn_tests = b.addRunArtifact(gateway_txn_tests);
 
+    // Gateway subquery tests
+    const gateway_subquery_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/gateway/subquery_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gateway_subquery_test_module.addImport("gateway.zig", gateway_module);
+    gateway_subquery_test_module.addImport("storage.zig", storage_module);
+    gateway_subquery_test_module.addImport("sequencer.zig", sequencer_module);
+    const gateway_subquery_tests = b.addTest(.{ .root_module = gateway_subquery_test_module });
+    const run_gateway_subquery_tests = b.addRunArtifact(gateway_subquery_tests);
+
     // Gateway replay (DST)
     const gateway_replay_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/gateway/replay_test.zig"),
@@ -941,6 +966,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_cdc_tests.step);
     test_step.dependOn(&run_gateway_tests.step);
     test_step.dependOn(&run_gateway_txn_tests.step);
+    test_step.dependOn(&run_gateway_subquery_tests.step);
     test_step.dependOn(&run_seq_epoch_tests.step);
     test_step.dependOn(&run_seq_idem_tests.step);
     test_step.dependOn(&run_seq_tests.step);
@@ -982,4 +1008,5 @@ pub fn build(b: *std.Build) void {
     dst_step.dependOn(&run_sim_recovery_tests.step);
     dst_step.dependOn(&run_sim_disk_fault_tests.step);
     dst_step.dependOn(&run_sim_txn_dst_tests.step);
+    dst_step.dependOn(&run_sim_subquery_dst_tests.step);
 }

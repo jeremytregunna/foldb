@@ -309,6 +309,13 @@ pub const PlanExpr = union(enum) {
     fn_call: struct { name: []const u8, args: []*PlanExpr },
 
     case_searched: struct { whens: []PlanCaseWhen, else_expr: ?*PlanExpr },
+
+    // Subquery expressions — plan node is executed at eval time.
+    scalar_subquery: *PlanNode,
+    exists_subquery: *PlanNode,
+    not_exists_subquery: *PlanNode,
+    in_subquery: struct { expr: *PlanExpr, plan: *PlanNode },
+    not_in_subquery: struct { expr: *PlanExpr, plan: *PlanNode },
 };
 
 pub const PlanCaseWhen = struct { cond: *PlanExpr, result: *PlanExpr };
@@ -526,8 +533,17 @@ pub const Planner = struct {
             node = filter_node;
         }
 
-        // GROUP BY + aggregates
-        if (q.group_by.len > 0) {
+        // GROUP BY + aggregates (also handles implicit aggregate: SELECT COUNT(*) FROM t with no GROUP BY)
+        const has_implicit_agg = q.group_by.len == 0 and blk: {
+            for (q.items) |item| {
+                switch (item) {
+                    .star => {},
+                    .expr => |ei| if (extractAggFn(ei.expr) != null) break :blk true,
+                }
+            }
+            break :blk false;
+        };
+        if (q.group_by.len > 0 or has_implicit_agg) {
             var keys: std.ArrayList(*PlanExpr) = .empty;
             var key_col_refs: std.ArrayList(?ast.ColumnRef) = .empty;
             for (q.group_by) |g| {
@@ -1057,8 +1073,32 @@ pub const Planner = struct {
                 for (il.values) |v| try args.append(self.arena, try self.planExpr(v));
                 pe.* = .{ .fn_call = .{ .name = "not_in_list", .args = try args.toOwnedSlice(self.arena) } };
             },
-            .in_subquery, .not_in_subquery, .exists, .not_exists, .subquery => {
-                pe.* = .null_literal; // subquery execution planned separately
+            .subquery => |q| {
+                // Fresh planner so subquery column positions start at 0,
+                // independent of the outer query's scope.
+                var sp = Planner.init(self.arena, self.schema);
+                const sub = try sp.planSelect(q.*);
+                pe.* = .{ .scalar_subquery = sub };
+            },
+            .exists => |q| {
+                var sp = Planner.init(self.arena, self.schema);
+                const sub = try sp.planSelect(q.*);
+                pe.* = .{ .exists_subquery = sub };
+            },
+            .not_exists => |q| {
+                var sp = Planner.init(self.arena, self.schema);
+                const sub = try sp.planSelect(q.*);
+                pe.* = .{ .not_exists_subquery = sub };
+            },
+            .in_subquery => |s| {
+                var sp = Planner.init(self.arena, self.schema);
+                const sub = try sp.planSelect(s.query.*);
+                pe.* = .{ .in_subquery = .{ .expr = try self.planExpr(s.expr), .plan = sub } };
+            },
+            .not_in_subquery => |s| {
+                var sp = Planner.init(self.arena, self.schema);
+                const sub = try sp.planSelect(s.query.*);
+                pe.* = .{ .not_in_subquery = .{ .expr = try self.planExpr(s.expr), .plan = sub } };
             },
             .typed => |t| return self.planExpr(t.inner),
         }

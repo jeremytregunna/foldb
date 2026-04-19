@@ -63,6 +63,7 @@ pub const ResultSet = struct {
 
 /// Context passed to expression evaluator during plan execution.
 const EvalCtx = struct {
+    executor: *SqlExecutor,
     params: []const ColumnValue,
     nondet: []const ResolvedValue,
     seq: Seq,
@@ -185,6 +186,7 @@ pub const SqlExecutor = struct {
         alloc: std.mem.Allocator,
     ) SqlExecError!std.ArrayList([]const ?ColumnValue) {
         const ctx = EvalCtx{
+            .executor = self,
             .params = params,
             .nondet = nondet,
             .seq = seq,
@@ -236,6 +238,7 @@ pub const SqlExecutor = struct {
         }
 
         const ctx = EvalCtx{
+            .executor = self,
             .params = params,
             .nondet = nondet,
             .seq = seq,
@@ -1385,6 +1388,70 @@ fn evalExpr(e: *plan_mod.PlanExpr, ctx: EvalCtx) SqlExecError!plan_mod.Value {
             // hit for unresolved cases. Return null safely.
             _ = tc;
             return .null_val;
+        },
+
+        .scalar_subquery => |sub| {
+            var rows: std.ArrayList([]const ?ColumnValue) = .empty;
+            defer {
+                for (rows.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
+                rows.deinit(ctx.alloc);
+            }
+            try ctx.executor.executeScan(sub, ctx, &rows);
+            if (rows.items.len == 0 or rows.items[0].len == 0) return .null_val;
+            const cv = rows.items[0][0] orelse return .null_val;
+            return columnValueToPlanValue(cv);
+        },
+
+        .exists_subquery => |sub| {
+            var rows: std.ArrayList([]const ?ColumnValue) = .empty;
+            defer {
+                for (rows.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
+                rows.deinit(ctx.alloc);
+            }
+            try ctx.executor.executeScan(sub, ctx, &rows);
+            return .{ .bool_val = rows.items.len > 0 };
+        },
+
+        .not_exists_subquery => |sub| {
+            var rows: std.ArrayList([]const ?ColumnValue) = .empty;
+            defer {
+                for (rows.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
+                rows.deinit(ctx.alloc);
+            }
+            try ctx.executor.executeScan(sub, ctx, &rows);
+            return .{ .bool_val = rows.items.len == 0 };
+        },
+
+        .in_subquery => |s| {
+            const lhs = try evalExpr(s.expr, ctx);
+            var rows: std.ArrayList([]const ?ColumnValue) = .empty;
+            defer {
+                for (rows.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
+                rows.deinit(ctx.alloc);
+            }
+            try ctx.executor.executeScan(s.plan, ctx, &rows);
+            for (rows.items) |row| {
+                if (row.len == 0) continue;
+                const cv = row[0] orelse continue;
+                if (lhs.eql(columnValueToPlanValue(cv))) return .{ .bool_val = true };
+            }
+            return .{ .bool_val = false };
+        },
+
+        .not_in_subquery => |s| {
+            const lhs = try evalExpr(s.expr, ctx);
+            var rows: std.ArrayList([]const ?ColumnValue) = .empty;
+            defer {
+                for (rows.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
+                rows.deinit(ctx.alloc);
+            }
+            try ctx.executor.executeScan(s.plan, ctx, &rows);
+            for (rows.items) |row| {
+                if (row.len == 0) continue;
+                const cv = row[0] orelse continue;
+                if (lhs.eql(columnValueToPlanValue(cv))) return .{ .bool_val = false };
+            }
+            return .{ .bool_val = true };
         },
     };
 }

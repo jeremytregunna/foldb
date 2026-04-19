@@ -358,3 +358,246 @@ test "planner no index_hint without specialty index" {
     try std.testing.expect(scan_node.* == .scan);
     try std.testing.expectEqual(@as(?schema_mod.IndexId, null), scan_node.scan.index_hint);
 }
+
+// ─── Subquery plan nodes ──────────────────────────────────────────────────────
+
+test "implicit aggregate: SELECT COUNT(*) without GROUP BY inserts hash_agg" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const parsed = try parser_mod.parse("SELECT COUNT(*) FROM orders", arena_alloc);
+    var planner = plan_mod.Planner.init(arena_alloc, &sr);
+    const ep = try planner.planStmt(parsed.stmts[0], &.{});
+
+    // project → hash_agg → scan
+    const proj = ep.stmts[0].select;
+    try std.testing.expect(proj.* == .project);
+    const agg = proj.project.input;
+    try std.testing.expect(agg.* == .hash_agg);
+    try std.testing.expectEqual(@as(usize, 0), agg.hash_agg.group_keys.len);
+    try std.testing.expectEqual(@as(usize, 1), agg.hash_agg.agg_exprs.len);
+    try std.testing.expect(std.ascii.eqlIgnoreCase("count", agg.hash_agg.agg_exprs[0].fn_name));
+    // COUNT(*) has no arg
+    try std.testing.expectEqual(@as(?*plan_mod.PlanExpr, null), agg.hash_agg.agg_exprs[0].arg);
+}
+
+test "implicit aggregate: SELECT MIN(amount) without GROUP BY inserts hash_agg" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const parsed = try parser_mod.parse("SELECT MIN(amount) FROM orders", arena_alloc);
+    var planner = plan_mod.Planner.init(arena_alloc, &sr);
+    const ep = try planner.planStmt(parsed.stmts[0], &.{});
+
+    const proj = ep.stmts[0].select;
+    try std.testing.expect(proj.* == .project);
+    const agg = proj.project.input;
+    try std.testing.expect(agg.* == .hash_agg);
+    try std.testing.expectEqual(@as(usize, 0), agg.hash_agg.group_keys.len);
+    try std.testing.expectEqual(@as(usize, 1), agg.hash_agg.agg_exprs.len);
+    try std.testing.expect(std.ascii.eqlIgnoreCase("min", agg.hash_agg.agg_exprs[0].fn_name));
+    // MIN(amount): amount is at position 2 in orders
+    const arg = agg.hash_agg.agg_exprs[0].arg.?;
+    try std.testing.expect(arg.* == .column);
+    try std.testing.expectEqual(@as(u32, 2), arg.column);
+}
+
+test "subquery plan: scalar_subquery node in SELECT list" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    // users has id=0, name=1, score=2; subquery adds no pollution
+    const parsed = try parser_mod.parse(
+        "SELECT id, (SELECT COUNT(*) FROM orders) FROM users",
+        aa,
+    );
+    var planner = plan_mod.Planner.init(aa, &sr);
+    const ep = try planner.planStmt(parsed.stmts[0], &.{});
+
+    const proj = ep.stmts[0].select;
+    try std.testing.expect(proj.* == .project);
+    try std.testing.expectEqual(@as(usize, 2), proj.project.exprs.len);
+    // Second item is a scalar_subquery
+    try std.testing.expect(proj.project.exprs[1].expr.* == .scalar_subquery);
+}
+
+test "subquery plan: exists_subquery node in WHERE" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    const parsed = try parser_mod.parse(
+        "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM orders)",
+        aa,
+    );
+    var planner = plan_mod.Planner.init(aa, &sr);
+    const ep = try planner.planStmt(parsed.stmts[0], &.{});
+
+    // project → filter → scan
+    const proj = ep.stmts[0].select;
+    try std.testing.expect(proj.* == .project);
+    const filt = proj.project.input;
+    try std.testing.expect(filt.* == .filter);
+    try std.testing.expect(filt.filter.predicate.* == .exists_subquery);
+}
+
+test "subquery plan: NOT EXISTS produces unary(not, exists_subquery)" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    // Parser encodes NOT EXISTS as unary(not, exists) — not a separate AST node.
+    const parsed = try parser_mod.parse(
+        "SELECT id FROM users WHERE NOT EXISTS (SELECT 1 FROM orders)",
+        aa,
+    );
+    var planner = plan_mod.Planner.init(aa, &sr);
+    const ep = try planner.planStmt(parsed.stmts[0], &.{});
+
+    const proj = ep.stmts[0].select;
+    try std.testing.expect(proj.* == .project);
+    const filt = proj.project.input;
+    try std.testing.expect(filt.* == .filter);
+    // unary(not, exists_subquery(...))
+    const pred = filt.filter.predicate;
+    try std.testing.expect(pred.* == .unary);
+    try std.testing.expectEqual(ast_mod.UnaryOp.not, pred.unary.op);
+    try std.testing.expect(pred.unary.expr.* == .exists_subquery);
+}
+
+test "subquery plan: in_subquery node in WHERE" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    const parsed = try parser_mod.parse(
+        "SELECT id FROM users WHERE id IN (SELECT user_id FROM orders)",
+        aa,
+    );
+    var planner = plan_mod.Planner.init(aa, &sr);
+    const ep = try planner.planStmt(parsed.stmts[0], &.{});
+
+    const proj = ep.stmts[0].select;
+    try std.testing.expect(proj.* == .project);
+    const filt = proj.project.input;
+    try std.testing.expect(filt.* == .filter);
+    try std.testing.expect(filt.filter.predicate.* == .in_subquery);
+    // LHS is users.id which is column(0)
+    const pred = filt.filter.predicate.in_subquery;
+    try std.testing.expect(pred.expr.* == .column);
+    try std.testing.expectEqual(@as(u32, 0), pred.expr.column);
+}
+
+test "subquery plan: not_in_subquery node in WHERE" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    const parsed = try parser_mod.parse(
+        "SELECT id FROM users WHERE id NOT IN (SELECT user_id FROM orders)",
+        aa,
+    );
+    var planner = plan_mod.Planner.init(aa, &sr);
+    const ep = try planner.planStmt(parsed.stmts[0], &.{});
+
+    const proj = ep.stmts[0].select;
+    try std.testing.expect(proj.* == .project);
+    const filt = proj.project.input;
+    try std.testing.expect(filt.* == .filter);
+    try std.testing.expect(filt.filter.predicate.* == .not_in_subquery);
+}
+
+test "subquery scope isolation: inner column positions start at 0" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    // Outer scope: users.id=0, users.name=1, users.score=2.
+    // Without isolation, orders columns would start at 3.
+    // With isolation, orders.user_id should be at position 1, not 4.
+    const parsed = try parser_mod.parse(
+        "SELECT id FROM users WHERE id IN (SELECT user_id FROM orders)",
+        aa,
+    );
+    var planner = plan_mod.Planner.init(aa, &sr);
+    const ep = try planner.planStmt(parsed.stmts[0], &.{});
+
+    const proj = ep.stmts[0].select;
+    const filt = proj.project.input;
+    const inner_plan = filt.filter.predicate.in_subquery.plan;
+
+    // inner plan: project [user_id] → scan(orders)
+    try std.testing.expect(inner_plan.* == .project);
+    try std.testing.expectEqual(@as(usize, 1), inner_plan.project.exprs.len);
+    const inner_col = inner_plan.project.exprs[0].expr;
+    try std.testing.expect(inner_col.* == .column);
+    // orders.user_id is at position 1 in a fresh scope (not 4 = 3 + 1)
+    try std.testing.expectEqual(@as(u32, 1), inner_col.column);
+}
+
+test "subquery scope isolation: EXISTS inner plan uses isolated scope" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    const parsed = try parser_mod.parse(
+        "SELECT id FROM users WHERE EXISTS (SELECT id FROM orders WHERE user_id = 1)",
+        aa,
+    );
+    var planner = plan_mod.Planner.init(aa, &sr);
+    const ep = try planner.planStmt(parsed.stmts[0], &.{});
+
+    const proj = ep.stmts[0].select;
+    const filt = proj.project.input;
+    const inner_plan = filt.filter.predicate.exists_subquery;
+
+    // inner: project → filter → scan(orders)
+    try std.testing.expect(inner_plan.* == .project);
+    const inner_filt = inner_plan.project.input;
+    try std.testing.expect(inner_filt.* == .filter);
+    // filter predicate: user_id = 1, user_id is column(1) in fresh scope
+    const pred = inner_filt.filter.predicate;
+    try std.testing.expect(pred.* == .binary);
+    const lhs = pred.binary.left;
+    try std.testing.expect(lhs.* == .column);
+    try std.testing.expectEqual(@as(u32, 1), lhs.column); // user_id at 1, not 4
+}
