@@ -264,8 +264,12 @@ pub const Gateway = struct {
                 return error.ExecutionError;
             }
 
-            // Execute via SqlExecutor (processes LogEntry through SQL plan)
-            const exec_result = self.sql_exec.run(entries[0]) catch |e| {
+            // This is the domain boundary — validate the committed log entry before execution.
+            var validated = executor_mod.validateTxnEntry(entries[0], self.alloc) catch {
+                return error.ExecutionError;
+            };
+            defer validated.decoded.deinit();
+            const exec_result = self.sql_exec.runValidated(validated) catch |e| {
                 // Forward executor-level detail (e.g. FK violation message) to gateway detail
                 const exec_detail = self.sql_exec.lastDetail();
                 if (exec_detail.len > 0) self.setDetail("{s}", .{exec_detail});

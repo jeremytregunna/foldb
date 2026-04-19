@@ -116,28 +116,38 @@ pub const SqlExecutor = struct {
         return self.committed_seq;
     }
 
-    /// Execute a LogEntry through the SQL registry, falling back to the raw
-    /// executor registry for hand-crafted handlers.
+    /// Domain boundary — validates and dispatches a LogEntry.
+    /// Non-txn_intent entries advance committed_seq and return ok.
+    /// For txn_intent: CRC-verifies and deserializes at the boundary, then
+    /// hands a proven-valid entry to runValidated.
     pub fn run(self: *SqlExecutor, entry: LogEntry) !ExecResult {
-        defer self.committed_seq = entry.header.seq;
-
         if (entry.header.kind != .txn_intent) {
+            self.committed_seq = entry.header.seq;
             return .{ .ok = .{ .rows_affected = 0 } };
         }
-        if (!entry.verifyCrc()) {
-            return .{ .abort = .{ .code = .bad_params, .detail = "crc mismatch" } };
-        }
-
-        var decoded = executor_mod.deserializeTxnIntent(entry.payload, self.alloc) catch {
-            return .{ .abort = .{ .code = .bad_params, .detail = "invalid payload" } };
+        // This is the domain boundary — CRC-verify and deserialize before the core.
+        var validated = executor_mod.validateTxnEntry(entry, self.alloc) catch |e| {
+            self.committed_seq = entry.header.seq;
+            return switch (e) {
+                error.CrcMismatch => .{ .abort = .{ .code = .bad_params, .detail = "crc mismatch" } },
+                else => .{ .abort = .{ .code = .bad_params, .detail = "invalid payload" } },
+            };
         };
-        defer decoded.deinit();
+        defer validated.decoded.deinit();
+        return self.runValidated(validated);
+    }
+
+    /// Domain core — receives a proven-valid TxnIntent entry. No input
+    /// validation here; only business invariants (missing_query, constraint_violation).
+    pub fn runValidated(self: *SqlExecutor, validated: executor_mod.ValidatedTxnEntry) !ExecResult {
+        defer self.committed_seq = validated.seq;
+        const decoded = validated.decoded;
 
         const rq = self.registry.lookup(decoded.query_hash.*) orelse {
             return .{ .abort = .{ .code = .missing_query, .detail = "unknown query hash" } };
         };
 
-        // Decode params from raw bytes using registered param types
+        // Domain boundary — decode raw param bytes into typed ColumnValues using the registered schema.
         const params = decodeParams(decoded.params, rq.param_types, self.alloc) catch {
             return .{ .abort = .{ .code = .bad_params, .detail = "param decode failed" } };
         };
@@ -150,9 +160,9 @@ pub const SqlExecutor = struct {
             rq.plan,
             params,
             decoded.nondet,
-            entry.header.seq,
-            entry.header.epoch,
-            entry.header.kind,
+            validated.seq,
+            validated.epoch,
+            .txn_intent,
         ) catch |e| {
             return switch (e) {
                 error.AssertionFailed => .{ .abort = .{ .code = .constraint_violation, .detail = "assertion failed" } },
