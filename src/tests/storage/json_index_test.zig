@@ -10,7 +10,7 @@ fn makeTempDir(alloc: std.mem.Allocator) ![]u8 {
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
-    const path = try std.fmt.allocPrint(alloc, "/tmp/folddb_json_idx_test_{d}", .{ns});
+    const path = try std.fmt.allocPrint(alloc, "/tmp/foldb_json_idx_test_{d}", .{ns});
     const null_path = try alloc.allocSentinel(u8, path.len, 0);
     defer alloc.free(null_path);
     @memcpy(null_path[0..path.len], path);

@@ -490,14 +490,15 @@ test "parse rejects ISOLATION LEVEL" {
     return error.TestExpectedError;
 }
 
-test "parse rejects column without nullability" {
+test "parse defaults column without nullability to nullable" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const result = parser_mod.parse(
+    const result = try parser_mod.parse(
         "CREATE TABLE t (id INT64)",
         arena.allocator(),
     );
-    try std.testing.expectError(error.MissingNullability, result);
+    // No explicit nullability — parser now defaults to nullable.
+    try std.testing.expectEqual(result.stmts[0].create_table.columns[0].nullable, .nullable);
 }
 
 test "parse rejects unterminated string" {

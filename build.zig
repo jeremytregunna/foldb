@@ -465,6 +465,7 @@ pub fn build(b: *std.Build) void {
     sql_module.addImport("storage.zig", storage_module);
     sql_module.addImport("executor.zig", executor_module);
     sql_module.addImport("log.zig", log_module);
+    sql_module.addImport("cdc.zig", cdc_module);
 
     // SQL lexer tests
     const sql_lexer_test_module = b.createModule(.{
@@ -614,6 +615,112 @@ pub fn build(b: *std.Build) void {
     gateway_module.addImport("parser.zig", sql_module);
     gateway_module.addImport("ast.zig", sql_module);
     gateway_module.addImport("types.zig", executor_module);
+    gateway_module.addImport("cdc.zig", cdc_module);
+
+    // Net sub-modules (wire protocol layer)
+    const net_frame_module = b.createModule(.{
+        .root_source_file = b.path("src/net/frame.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const net_codec_module = b.createModule(.{
+        .root_source_file = b.path("src/net/codec.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const net_messages_module = b.createModule(.{
+        .root_source_file = b.path("src/net/messages.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    net_messages_module.addImport("frame.zig", net_frame_module);
+    net_messages_module.addImport("codec.zig", net_codec_module);
+
+    const net_conn_module = b.createModule(.{
+        .root_source_file = b.path("src/net/conn.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    net_conn_module.addImport("frame.zig", net_frame_module);
+    net_conn_module.addImport("codec.zig", net_codec_module);
+    net_conn_module.addImport("messages.zig", net_messages_module);
+    net_conn_module.addImport("gateway.zig", gateway_module);
+
+    const net_server_module = b.createModule(.{
+        .root_source_file = b.path("src/net/server.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    net_server_module.addImport("frame.zig", net_frame_module);
+    net_server_module.addImport("conn.zig", net_conn_module);
+    net_server_module.addImport("gateway.zig", gateway_module);
+
+    // Wire gateway + server into the main binary
+    main_module.addImport("gateway.zig", gateway_module);
+    main_module.addImport("server.zig", net_server_module);
+
+    // Client library
+    const client_module = b.createModule(.{
+        .root_source_file = b.path("src/client/client.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    client_module.addImport("frame.zig", net_frame_module);
+    client_module.addImport("codec.zig", net_codec_module);
+    client_module.addImport("messages.zig", net_messages_module);
+
+    // REPL binary
+    const repl_module = b.createModule(.{
+        .root_source_file = b.path("src/cmd/repl.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    repl_module.addImport("client.zig", client_module);
+    repl_module.addImport("messages.zig", net_messages_module);
+
+    const repl_exe = b.addExecutable(.{
+        .name = "foldb-repl",
+        .root_module = repl_module,
+    });
+    b.installArtifact(repl_exe);
+
+    const run_repl = b.addRunArtifact(repl_exe);
+    if (b.args) |bargs| run_repl.addArgs(bargs);
+    const repl_step = b.step("repl", "Run the interactive SQL REPL");
+    repl_step.dependOn(&run_repl.step);
+
+    const net_module = b.createModule(.{
+        .root_source_file = b.path("src/net/net.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    net_module.addImport("frame.zig", net_frame_module);
+    net_module.addImport("codec.zig", net_codec_module);
+    net_module.addImport("messages.zig", net_messages_module);
+    net_module.addImport("conn.zig", net_conn_module);
+    net_module.addImport("server.zig", net_server_module);
+
+    // Net frame tests
+    const net_frame_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/net/frame_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    net_frame_test_module.addImport("frame.zig", net_frame_module);
+    const net_frame_tests = b.addTest(.{ .root_module = net_frame_test_module });
+    const run_net_frame_tests = b.addRunArtifact(net_frame_tests);
+
+    // Net codec tests
+    const net_codec_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/net/codec_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    net_codec_test_module.addImport("codec.zig", net_codec_module);
+    const net_codec_tests = b.addTest(.{ .root_module = net_codec_test_module });
+    const run_net_codec_tests = b.addRunArtifact(net_codec_tests);
 
     // Sequencer epoch tests
     const seq_epoch_test_module = b.createModule(.{
@@ -740,6 +847,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_seq_epoch_tests.step);
     test_step.dependOn(&run_seq_idem_tests.step);
     test_step.dependOn(&run_seq_tests.step);
+    test_step.dependOn(&run_net_frame_tests.step);
+    test_step.dependOn(&run_net_codec_tests.step);
 
     // DST seed sweep executable
     const dst_sweep_module = b.createModule(.{

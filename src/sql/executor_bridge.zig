@@ -13,6 +13,7 @@ const registry_mod = @import("registry.zig");
 const storage_mod = @import("storage.zig");
 const executor_mod = @import("executor.zig");
 const log_mod = @import("log.zig");
+const cdc_mod = @import("cdc.zig");
 
 pub const Storage = storage_mod.Storage;
 pub const Row = storage_mod.Row;
@@ -54,6 +55,7 @@ pub const ResultSet = struct {
             self.alloc.free(row);
         }
         self.alloc.free(self.rows);
+        for (self.columns) |name| self.alloc.free(name);
         self.alloc.free(self.columns);
     }
 };
@@ -75,6 +77,8 @@ pub const SqlExecutor = struct {
     schema: *schema_mod.SchemaRegistry,
     committed_seq: Seq,
     alloc: std.mem.Allocator,
+    /// Optional CDC manager. When set, mutations are captured and fanned out to subscribers.
+    cdc: ?*cdc_mod.CdcManager = null,
 
     pub fn init(
         storage: *Storage,
@@ -89,6 +93,11 @@ pub const SqlExecutor = struct {
             .committed_seq = 0,
             .alloc = alloc,
         };
+    }
+
+    /// Wire a CdcManager into this executor so committed mutations fan out to subscribers.
+    pub fn initCdc(self: *SqlExecutor, cdc: *cdc_mod.CdcManager) void {
+        self.cdc = cdc;
     }
 
     pub fn currentSeq(self: *const SqlExecutor) Seq {
@@ -130,6 +139,8 @@ pub const SqlExecutor = struct {
             params,
             decoded.nondet,
             entry.header.seq,
+            entry.header.epoch,
+            entry.header.kind,
         ) catch |e| {
             return switch (e) {
                 error.AssertionFailed => .{ .abort = .{ .code = .constraint_violation, .detail = "assertion failed" } },
@@ -187,6 +198,8 @@ pub const SqlExecutor = struct {
         params: []const ColumnValue,
         nondet: []const ResolvedValue,
         seq: Seq,
+        epoch: log_mod.Epoch,
+        entry_kind: log_mod.EntryKind,
     ) SqlExecError!u64 {
         var mutations: std.ArrayList(Mutation) = .empty;
         defer {
@@ -213,8 +226,25 @@ pub const SqlExecutor = struct {
             try self.executeStmt(stmt, ctx, &mutations);
         }
 
+        // Capture before-images for CDC (before storage.apply)
+        var before: ?cdc_mod.BeforeImages = null;
+        if (self.cdc) |cdc| {
+            if (mutations.items.len > 0) {
+                before = cdc.captureBeforeImages(mutations.items, self.storage, seq, self.alloc) catch null;
+            }
+        }
+        defer if (before) |*b| b.deinit();
+
         const count: u64 = @intCast(mutations.items.len);
         self.storage.apply(mutations.items, seq) catch return error.TableNotFound;
+
+        // Dispatch CDC events (after storage.apply)
+        if (self.cdc) |cdc| {
+            if (before) |b| {
+                cdc.dispatch(seq, epoch, entry_kind, mutations.items, b, self.alloc) catch {};
+            }
+        }
+
         return count;
     }
 
@@ -1016,16 +1046,16 @@ pub const SqlExecutor = struct {
         alloc: std.mem.Allocator,
     ) SqlExecError![]const ?ColumnValue {
         _ = self;
-        // When cols is empty, return all row values (used for filter-only scans)
-        if (cols.len == 0) {
-            const vals = try alloc.alloc(?ColumnValue, row.values.len);
-            for (row.values, 0..) |v, i| vals[i] = v;
-            return vals;
-        }
-        // Project: for each requested column ID, find its value in the row.
-        // Column IDs correspond to ordinal positions in the storage row.
+        _ = cols;
+        // Dupe each ColumnValue so the result outlives the scan iterator.
         const vals = try alloc.alloc(?ColumnValue, row.values.len);
-        for (row.values, 0..) |v, i| vals[i] = v;
+        errdefer alloc.free(vals);
+        var duped: usize = 0;
+        errdefer for (vals[0..duped]) |v| if (v) |vv| vv.freeIfOwned(alloc) else {};
+        for (row.values, 0..) |v, i| {
+            vals[i] = try v.dupe(alloc);
+            duped += 1;
+        }
         return vals;
     }
 };

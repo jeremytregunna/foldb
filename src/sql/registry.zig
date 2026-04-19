@@ -70,7 +70,15 @@ pub const SqlRegistry = struct {
         var arena = std.heap.ArenaAllocator.init(self.alloc);
         const arena_alloc = arena.allocator();
 
-        const parsed = parser_mod.parse(sql, arena_alloc) catch |e| {
+        // Dupe sql into the arena BEFORE parsing so all AST string slices
+        // (identifiers, literals) reference arena-owned memory and remain valid
+        // for the lifetime of the RegisteredQuery even after the caller frees sql.
+        const sql_copy = arena_alloc.dupe(u8, sql) catch |e| {
+            arena.deinit();
+            return e;
+        };
+
+        const parsed = parser_mod.parse(sql_copy, arena_alloc) catch |e| {
             arena.deinit();
             return e;
         };
@@ -125,11 +133,6 @@ pub const SqlRegistry = struct {
                 .param_types = param_types,
                 .nondet_count = planner.nondet_idx,
             };
-        };
-
-        const sql_copy = arena_alloc.dupe(u8, sql) catch |e| {
-            arena.deinit();
-            return e;
         };
 
         const rq = self.alloc.create(RegisteredQuery) catch |e| {

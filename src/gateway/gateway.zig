@@ -1,11 +1,4 @@
-/// Foldb Gateway (M7): client-facing entry point for query registration and execution.
-///
-/// Handles:
-/// - Query registration (SQL → QueryHash with schema-version pinning)
-/// - Query execution (execute registered queries with params, via Sequencer)
-/// - Historical reads (read at specific seq)
-///
-/// For M7, execute() goes through the Sequencer → partition log → SqlExecutor.run().
+/// Foldb Gateway: client-facing entry point for query registration, execution, and CDC.
 const std = @import("std");
 
 const sql_mod = @import("sql.zig");
@@ -14,10 +7,15 @@ const executor_mod = @import("executor.zig");
 const sequencer_mod = @import("sequencer.zig");
 const log_mod = @import("log.zig");
 const obs = @import("observability.zig");
+const cdc_mod = @import("cdc.zig");
 
 pub const QueryHash = sql_mod.QueryHash;
 pub const Seq = @import("types.zig").Seq;
 pub const ResolvedValue = @import("types.zig").ResolvedValue;
+
+// Re-export CDC types for use by the net layer
+pub const CdcSubscription = cdc_mod.CdcSubscription;
+pub const CdcEvent = cdc_mod.CdcEvent;
 pub const ResolvedKind = @import("types.zig").ResolvedKind;
 pub const ColumnValue = storage_mod.ColumnValue;
 pub const ResultSet = sql_mod.ResultSet;
@@ -100,6 +98,8 @@ pub const Gateway = struct {
     storage_schema_arena: std.heap.ArenaAllocator,
     nondet_resolver: NondetResolver,
     sequencer: sequencer_mod.Sequencer,
+    /// CDC event fan-out for wire-protocol subscriptions.
+    cdc: cdc_mod.CdcManager,
     /// Per-gateway client identity for idempotency tracking.
     client_id: u64,
     client_seq: u64,
@@ -131,6 +131,9 @@ pub const Gateway = struct {
         gw.sequencer = try sequencer_mod.Sequencer.init(storage_dir, seq_cfg, alloc);
         errdefer gw.sequencer.deinit();
 
+        gw.cdc = cdc_mod.CdcManager.init(alloc);
+        gw.sql_exec.initCdc(&gw.cdc);
+
         // Derive a stable client_id from the storage path hash
         gw.client_id = blk: {
             var h: u64 = 0xcbf29ce484222325;
@@ -146,12 +149,25 @@ pub const Gateway = struct {
     }
 
     pub fn deinit(self: *Gateway) void {
+        self.cdc.deinit();
         self.sequencer.deinit();
         self.registry.deinit();
         self.schema.deinit();
         self.storage.deinit();
         self.storage_schema_arena.deinit();
         self.alloc.destroy(self);
+    }
+
+    /// Returns true if the registered query is a pure SELECT (no mutations).
+    pub fn isSelectQuery(self: *const Gateway, hash: QueryHash) bool {
+        const rq = self.registry.lookup(hash) orelse return false;
+        for (rq.plan.stmts) |stmt| {
+            switch (stmt) {
+                .select => {},
+                else => return false,
+            }
+        }
+        return true;
     }
 
     /// Register a SQL query and return its hash with schema version.
@@ -275,7 +291,10 @@ pub const Gateway = struct {
             self.alloc,
         );
         const rows_slice = try rows.toOwnedSlice(self.alloc);
-        const columns_slice = try self.alloc.alloc([]const u8, 0);
+        const columns_slice = if (rq.plan.stmts.len > 0) blk: {
+            break :blk extractColumnNames(rq.plan.stmts[0].select, &self.schema, self.alloc) catch
+                try self.alloc.alloc([]const u8, 0);
+        } else try self.alloc.alloc([]const u8, 0);
 
         return ResultSet{
             .columns = columns_slice,
@@ -304,7 +323,10 @@ pub const Gateway = struct {
             self.alloc,
         );
         const rows_slice = try rows.toOwnedSlice(self.alloc);
-        const columns_slice = try self.alloc.alloc([]const u8, 0);
+        const columns_slice = if (rq.plan.stmts.len > 0) blk: {
+            break :blk extractColumnNames(rq.plan.stmts[0].select, &self.schema, self.alloc) catch
+                try self.alloc.alloc([]const u8, 0);
+        } else try self.alloc.alloc([]const u8, 0);
 
         return ResultSet{
             .columns = columns_slice,
@@ -369,6 +391,37 @@ pub const Gateway = struct {
     /// Flush all storage to disk.
     pub fn flushAll(self: *Gateway) !void {
         try self.storage.flushAll();
+    }
+
+    // ---- CDC subscription API (used by the net layer) ----
+
+    /// Create a CDC subscription. Pass null table_filter to receive all tables.
+    pub fn subscribeCdc(
+        self: *Gateway,
+        table_filter: ?u32,
+        from_seq: Seq,
+    ) !*cdc_mod.CdcSubscription {
+        return self.cdc.subscribe(table_filter, from_seq);
+    }
+
+    /// Remove a CDC subscription by its ID.
+    pub fn unsubscribeCdc(self: *Gateway, id: u64) void {
+        self.cdc.unsubscribe(id);
+    }
+
+    /// Look up an active CDC subscription by ID (returns null if not found).
+    pub fn getCdcSub(self: *Gateway, id: u64) ?*cdc_mod.CdcSubscription {
+        for (self.cdc.subscriptions.items) |sub| {
+            if (sub.id == id) return sub;
+        }
+        return null;
+    }
+
+    /// Resolve a table name to its numeric ID via the schema registry.
+    /// Returns null if the table is not found.
+    pub fn resolveTableName(self: *Gateway, name: []const u8) ?u32 {
+        const tbl = self.schema.getTable(name) orelse return null;
+        return tbl.id;
     }
 };
 
@@ -454,4 +507,53 @@ fn sqlTypeToColumnType(t: sql_mod.ast.SqlType) storage_mod.ColumnType {
         .decimal, .json, .vector, .array, .struct_type => .bytes,
         .null_type => .bytes,
     };
+}
+
+/// Extract output column names from a SELECT plan node.
+/// For project nodes uses the alias; for scan nodes uses schema column names.
+/// Caller owns the returned slice and its strings.
+fn extractColumnNames(
+    node: *const sql_mod.plan.PlanNode,
+    schema: *const sql_mod.SchemaRegistry,
+    alloc: std.mem.Allocator,
+) ![][]const u8 {
+    switch (node.*) {
+        .project => |p| {
+            const names = try alloc.alloc([]const u8, p.exprs.len);
+            errdefer alloc.free(names);
+            for (p.exprs, 0..) |item, i| names[i] = try alloc.dupe(u8, item.alias);
+            return names;
+        },
+        .scan => |s| {
+            const tbl = schema.getTableById(s.table_id) orelse return try alloc.alloc([]const u8, 0);
+            const ids = if (s.columns.len > 0) s.columns else blk: {
+                // all columns
+                const all = try alloc.alloc(sql_mod.schema.ColumnId, tbl.columns.len);
+                defer alloc.free(all);
+                for (tbl.columns, 0..) |col, i| all[i] = col.id;
+                break :blk all;
+            };
+            const names = try alloc.alloc([]const u8, ids.len);
+            errdefer alloc.free(names);
+            for (ids, 0..) |col_id, i| {
+                const col = tbl.columnById(col_id);
+                names[i] = if (col) |c| try alloc.dupe(u8, c.name) else try std.fmt.allocPrint(alloc, "col{d}", .{i});
+            }
+            return names;
+        },
+        .filter => |f| return extractColumnNames(f.input, schema, alloc),
+        .sort => |s| return extractColumnNames(s.input, schema, alloc),
+        .limit => |l| return extractColumnNames(l.input, schema, alloc),
+        .pk_lookup => |pk| {
+            const tbl = schema.getTableById(pk.table_id) orelse return try alloc.alloc([]const u8, 0);
+            const names = try alloc.alloc([]const u8, pk.columns.len);
+            errdefer alloc.free(names);
+            for (pk.columns, 0..) |col_id, i| {
+                const col = tbl.columnById(col_id);
+                names[i] = if (col) |c| try alloc.dupe(u8, c.name) else try std.fmt.allocPrint(alloc, "col{d}", .{i});
+            }
+            return names;
+        },
+        else => return try alloc.alloc([]const u8, 0),
+    }
 }

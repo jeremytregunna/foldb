@@ -343,6 +343,16 @@ const CteEntry = struct {
     items: []const ast.SelectItem, // output column info for scope setup
 };
 
+/// Returns the "natural" display name of an expression (for SELECT without AS alias).
+fn exprNaturalName(expr: *const ast.Expr) []const u8 {
+    return switch (expr.*) {
+        .column_ref => |r| r.column,
+        .fn_call => |f| f.name,
+        .cast => |c| exprNaturalName(c.expr),
+        else => "?",
+    };
+}
+
 // ─── Planner ─────────────────────────────────────────────────────────────────
 
 pub const Planner = struct {
@@ -663,7 +673,7 @@ pub const Planner = struct {
                 .expr => |ei| {
                     try proj_items.append(self.arena, .{
                         .expr = try self.planExpr(ei.expr),
-                        .alias = ei.alias orelse "",
+                        .alias = ei.alias orelse exprNaturalName(ei.expr),
                     });
                 },
             }
@@ -743,9 +753,13 @@ pub const Planner = struct {
     fn planInsert(self: *Planner, stmt: ast.InsertStmt) PlanError!InsertPlan {
         const tbl = self.schema.getTable(stmt.table) orelse return error.TableNotFound;
         var col_ids: std.ArrayList(schema_mod.ColumnId) = .empty;
-        for (stmt.columns) |col_name| {
-            const col = tbl.columnByName(col_name) orelse return error.ColumnNotFound;
-            try col_ids.append(self.arena, col.id);
+        if (stmt.columns.len == 0) {
+            for (tbl.columns) |col| try col_ids.append(self.arena, col.id);
+        } else {
+            for (stmt.columns) |col_name| {
+                const col = tbl.columnByName(col_name) orelse return error.ColumnNotFound;
+                try col_ids.append(self.arena, col.id);
+            }
         }
         const source: InsertSource = switch (stmt.source) {
             .values => |rows| blk: {

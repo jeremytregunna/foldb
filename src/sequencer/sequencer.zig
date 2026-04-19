@@ -117,6 +117,12 @@ pub const Sequencer = struct {
         var batcher = EpochBatcher.init(alloc);
         batcher.max_batch_size = cfg.max_epoch_size;
 
+        // Resume from the highest committed seq across all partition logs.
+        var max_seq: Seq = 0;
+        for (partition_logs) |pl| {
+            if (pl.current_seq > max_seq) max_seq = pl.current_seq;
+        }
+
         return Sequencer{
             .raft = raft_node,
             .raft_log = raft_log,
@@ -124,7 +130,7 @@ pub const Sequencer = struct {
             .batcher = batcher,
             .idempotency = IdempotencyCache.init(alloc),
             .partition_logs = partition_logs,
-            .next_seq = 1,
+            .next_seq = max_seq + 1,
             .next_epoch = 1,
             .alloc = alloc,
         };

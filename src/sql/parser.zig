@@ -683,20 +683,28 @@ pub const Parser = struct {
                 const col_span_start = (try self.peek()).span.start;
                 const col_name = try self.expectIdent();
                 const col_type = try self.parseType();
+                var is_pk = false;
                 const nullable: ast.NullConstraint = blk: {
-                    if (try self.eat(.kw_not)) {
-                        _ = try self.expect(.lit_null);
-                        break :blk .not_null;
+                    // Allow column constraints in any order: NOT NULL, NULL, PRIMARY KEY
+                    var got_null: ?ast.NullConstraint = null;
+                    while (true) {
+                        if (try self.eat(.kw_not)) {
+                            _ = try self.expect(.lit_null);
+                            got_null = .not_null;
+                        } else if ((try self.peekKind()) == .lit_null) {
+                            _ = try self.advance();
+                            got_null = .nullable;
+                        } else if ((try self.peekKind()) == .kw_primary) {
+                            _ = try self.advance();
+                            _ = try self.expect(.kw_key);
+                            is_pk = true;
+                            got_null = .not_null; // PRIMARY KEY implies NOT NULL
+                        } else break;
                     }
-                    if ((try self.peekKind()) == .lit_null) {
-                        _ = try self.advance();
-                        break :blk .nullable;
-                    }
-                    // Nullable-by-default is an error per §10.2
-                    self.err_pos = col_span_start;
-                    self.err_msg = "column must declare NULL or NOT NULL explicitly";
-                    return error.MissingNullability;
+                    if (got_null) |n| break :blk n;
+                    break :blk .nullable; // default: nullable when no constraint given
                 };
+                if (is_pk) try pk_cols.append(self.arena, col_name);
                 try columns.append(self.arena, .{
                     .name = col_name,
                     .typ = col_type,
@@ -788,9 +796,7 @@ pub const Parser = struct {
                         _ = try self.advance();
                         break :blk2 .nullable;
                     }
-                    self.err_pos = col_span_start;
-                    self.err_msg = "column must declare NULL or NOT NULL explicitly";
-                    return error.MissingNullability;
+                    break :blk2 .nullable; // default: nullable when no constraint given
                 };
                 break :blk .{ .add_column = .{
                     .name = col_name,

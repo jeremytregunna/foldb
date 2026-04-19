@@ -87,6 +87,7 @@ pub const SchemaRegistry = struct {
         var it = self.tables.iterator();
         while (it.next()) |entry| {
             const tbl = entry.value_ptr.*;
+            for (tbl.columns) |col| self.alloc.free(col.name);
             self.alloc.free(tbl.columns);
             self.alloc.free(tbl.primary_key);
             for (tbl.indexes) |idx| {
@@ -97,6 +98,7 @@ pub const SchemaRegistry = struct {
                 }
             }
             self.alloc.free(tbl.indexes);
+            self.alloc.free(tbl.name);
             self.alloc.destroy(tbl);
         }
         self.tables.deinit();
@@ -119,13 +121,16 @@ pub const SchemaRegistry = struct {
         // Assign column IDs
         const cols = try self.alloc.alloc(ColumnSchema, stmt.columns.len);
         errdefer self.alloc.free(cols);
+        var cols_named: usize = 0;
+        errdefer for (cols[0..cols_named]) |c| self.alloc.free(c.name);
         for (stmt.columns, 0..) |col_def, i| {
             cols[i] = .{
                 .id = @intCast(i),
-                .name = col_def.name,
+                .name = try self.alloc.dupe(u8, col_def.name),
                 .typ = col_def.typ,
                 .nullable = col_def.nullable,
             };
+            cols_named += 1;
         }
 
         // Map PK column names to IDs
@@ -147,18 +152,20 @@ pub const SchemaRegistry = struct {
             if (!found) return error.PrimaryKeyColumnNotFound;
         }
 
+        const tbl_name = try self.alloc.dupe(u8, stmt.name);
+        errdefer self.alloc.free(tbl_name);
         const tbl = try self.alloc.create(TableSchema);
         errdefer self.alloc.destroy(tbl);
         tbl.* = .{
             .id = self.next_table_id,
-            .name = stmt.name,
+            .name = tbl_name,
             .columns = cols,
             .primary_key = pk_ids,
             .indexes = &.{},
         };
         self.next_table_id += 1;
 
-        try self.tables.put(stmt.name, tbl);
+        try self.tables.put(tbl_name, tbl);
         try self.tables_by_id.put(tbl.id, tbl);
         return tbl;
     }
@@ -220,7 +227,7 @@ pub const SchemaRegistry = struct {
         @memcpy(new_cols[0..tbl.columns.len], tbl.columns);
         new_cols[tbl.columns.len] = .{
             .id = new_id,
-            .name = col_def.name,
+            .name = try self.alloc.dupe(u8, col_def.name),
             .typ = col_def.typ,
             .nullable = col_def.nullable,
         };
@@ -239,6 +246,7 @@ pub const SchemaRegistry = struct {
             }
         }
         const drop_idx = idx orelse return error.ColumnNotFound;
+        self.alloc.free(tbl.columns[drop_idx].name);
         const new_cols = try self.alloc.alloc(ColumnSchema, tbl.columns.len - 1);
         var j: usize = 0;
         for (tbl.columns, 0..) |col, i| {

@@ -150,6 +150,28 @@ pub const IndexEntry = struct {
     }
 };
 
+/// Scans entry headers from HEADER_SIZE forward to recover last_seq and next_offset
+/// for unsealed (no footer) segments. Leaves fd positioned at next_offset.
+fn scanUnsealedEntries(fd: std.posix.fd_t) struct { last_seq: Seq, entry_count: u32, next_offset: u64 } {
+    _ = std.os.linux.lseek(@intCast(fd), @intCast(HEADER_SIZE), std.os.linux.SEEK.SET);
+    var last_seq: Seq = 0;
+    var entry_count: u32 = 0;
+    var next_offset: u64 = HEADER_SIZE;
+    var hdr_buf: [entry_mod.LogEntryHeader.HEADER_SIZE]u8 = undefined;
+    while (true) {
+        const n = std.os.linux.read(@intCast(fd), &hdr_buf, entry_mod.LogEntryHeader.HEADER_SIZE);
+        if (n != entry_mod.LogEntryHeader.HEADER_SIZE) break;
+        const hdr = entry_mod.LogEntryHeader.deserializeFrom(&hdr_buf) catch break;
+        if (hdr.payload_len > 1024 * 1024) break;
+        _ = std.os.linux.lseek(@intCast(fd), @intCast(hdr.payload_len), std.os.linux.SEEK.CUR);
+        last_seq = hdr.seq;
+        entry_count += 1;
+        next_offset += entry_mod.LogEntryHeader.HEADER_SIZE + hdr.payload_len;
+    }
+    _ = std.os.linux.lseek(@intCast(fd), @intCast(next_offset), std.os.linux.SEEK.SET);
+    return .{ .last_seq = last_seq, .entry_count = entry_count, .next_offset = next_offset };
+}
+
 /// Segment file - a contiguous file containing log entries.
 /// The segment owns its path slice and frees it in deinit.
 pub const Segment = struct {
@@ -219,15 +241,15 @@ pub const Segment = struct {
         const file_size = std.os.linux.lseek(@intCast(fd), 0, std.os.linux.SEEK.END);
 
         if (file_size < HEADER_SIZE + FOOTER_SIZE) {
-            _ = std.os.linux.lseek(@intCast(fd), @intCast(HEADER_SIZE), std.os.linux.SEEK.SET);
+            const recovered = scanUnsealedEntries(@intCast(fd));
             return Segment{
                 .fd = fd,
                 .path = path,
                 .header = header,
                 .index = .empty,
-                .next_offset = HEADER_SIZE,
-                .entry_count = 0,
-                .last_seq = 0,
+                .next_offset = recovered.next_offset,
+                .entry_count = recovered.entry_count,
+                .last_seq = recovered.last_seq,
                 .sealed = false,
             };
         }
@@ -244,15 +266,15 @@ pub const Segment = struct {
         }
 
         const footer = SegmentFooter.deserializeFrom(&footer_buf) catch {
-            _ = std.os.linux.lseek(@intCast(fd), @intCast(HEADER_SIZE), std.os.linux.SEEK.SET);
+            const recovered = scanUnsealedEntries(@intCast(fd));
             return Segment{
                 .fd = fd,
                 .path = path,
                 .header = header,
                 .index = .empty,
-                .next_offset = HEADER_SIZE,
-                .entry_count = 0,
-                .last_seq = 0,
+                .next_offset = recovered.next_offset,
+                .entry_count = recovered.entry_count,
+                .last_seq = recovered.last_seq,
                 .sealed = false,
             };
         };
