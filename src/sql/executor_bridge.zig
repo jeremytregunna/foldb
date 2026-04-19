@@ -621,7 +621,10 @@ pub const SqlExecutor = struct {
                 for (rows) |row| {
                     // Evaluate value expressions
                     const values = try ctx.alloc.alloc(ColumnValue, ins.column_ids.len);
-                    errdefer ctx.alloc.free(values);
+                    errdefer {
+                        for (values) |v| v.freeIfOwned(ctx.alloc);
+                        ctx.alloc.free(values);
+                    }
                     for (ins.column_ids, 0..) |col_id, i| {
                         const pv = try evalExpr(row[i], ctx);
                         const col = tbl.columnById(col_id) orelse return error.ColumnNotFound;
@@ -701,7 +704,10 @@ pub const SqlExecutor = struct {
 
             // Evaluate new values
             const new_values = try ctx.alloc.alloc(ColumnValue, tbl.columns.len);
-            errdefer ctx.alloc.free(new_values);
+            errdefer {
+                for (new_values) |v| v.freeIfOwned(ctx.alloc);
+                ctx.alloc.free(new_values);
+            }
             // Copy existing values
             for (tbl.columns, 0..) |col, i| {
                 new_values[i] = if (i < row.values.len)
@@ -715,6 +721,7 @@ pub const SqlExecutor = struct {
                 const col = tbl.columnById(asgn.column_id) orelse return error.ColumnNotFound;
                 const col_pos: usize = @intCast(asgn.column_id);
                 if (col_pos < new_values.len) {
+                    new_values[col_pos].freeIfOwned(ctx.alloc);
                     new_values[col_pos] = try planValueToTypedColumnValue(pv, col.typ, ctx.alloc);
                 }
             }
@@ -816,8 +823,11 @@ pub const SqlExecutor = struct {
             const ref_key = try buildForeignKeyLookup(ref_tbl, fk.ref_columns, fk_vals, ctx.alloc);
             defer ctx.alloc.free(ref_key);
 
-            const exists = (self.storage.get(fk.ref_table_id, ref_key, ctx.seq -| 1) catch null) != null;
-            if (!exists) {
+            const maybe_row = self.storage.get(fk.ref_table_id, ref_key, ctx.seq -| 1) catch null;
+            if (maybe_row) |row| {
+                var r = row;
+                r.deinit(ctx.alloc);
+            } else {
                 if (fk.name) |n| {
                     self.setDetail("foreign key '{s}' references missing row in '{s}'", .{ n, ref_tbl.name });
                 } else {
