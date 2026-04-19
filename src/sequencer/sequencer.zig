@@ -6,6 +6,7 @@
 const std = @import("std");
 const log_mod = @import("log.zig");
 const raft_mod = @import("raft.zig");
+const obs = @import("observability.zig");
 
 const types_mod = @import("types.zig");
 const idempotency_mod = @import("idempotency.zig");
@@ -60,6 +61,7 @@ pub const Sequencer = struct {
     next_seq: Seq,
     next_epoch: EpochNum,
     alloc: std.mem.Allocator,
+    metrics: obs.SequencerMetrics = .{},
 
     /// Initialize a Sequencer at the given base path.
     /// Creates:
@@ -174,8 +176,11 @@ fn doCommit(
     client_id: u64,
     client_seq_num: u64,
 ) anyerror!SubmitResult {
+    sequencer.metrics.intents_submitted.inc();
+
     // Idempotency fast path
     if (sequencer.idempotency.lookup(client_id, client_seq_num)) |existing_seq| {
+        sequencer.metrics.dedup_hits.inc();
         const partition: PartitionId = @intCast(existing_seq % @as(Seq, sequencer.partition_logs.len));
         return .{ .seq = existing_seq, .partition = partition };
     }
@@ -193,6 +198,8 @@ fn doCommit(
 
     sequencer.next_epoch += 1;
     sequencer.next_seq += @intCast(decision.entries.len);
+    sequencer.metrics.epochs_closed.inc();
+    sequencer.metrics.last_epoch_size.set(@intCast(decision.entries.len));
 
     // Replicate ordering decision via Raft
     var payload_buf: std.ArrayList(u8) = .empty;
@@ -207,7 +214,10 @@ fn doCommit(
         .epoch_decision,
         payload_buf.items,
         &outputs,
-    ) orelse return SequencerError.NotLeader;
+    ) orelse {
+        sequencer.metrics.not_leader_errors.inc();
+        return SequencerError.NotLeader;
+    };
     _ = ordering_seq;
 
     for (outputs.items) |output| {
@@ -231,6 +241,7 @@ fn doCommit(
     try partition_log.appendEntryAt(log_entry);
 
     try sequencer.idempotency.record(client_id, client_seq_num, entry.seq);
+    sequencer.metrics.current_seq.set(@intCast(entry.seq));
 
     return .{ .seq = entry.seq, .partition = entry.partition };
 }

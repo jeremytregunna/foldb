@@ -7,6 +7,7 @@ const storage_mod = @import("storage.zig");
 const exchange_mod = @import("exchange.zig");
 const determinism_mod = @import("determinism.zig");
 const cdc_mod = @import("cdc.zig");
+const obs = @import("observability.zig");
 
 // Verify determinism invariants at compile time.
 comptime {
@@ -45,6 +46,8 @@ pub const ExecutorError = error{
     ConstraintViolation,
 };
 
+pub const ExecutorMetrics = obs.ExecutorMetrics;
+
 // Note: PartitionSet is in partition_set.zig (separate module to avoid circular imports).
 // Import it via build.zig's partition_set_module, not through executor.zig.
 
@@ -65,6 +68,7 @@ pub const Executor = struct {
     log: ?*Log = null,
     /// Optional CDC manager for change-data-capture event dispatch.
     cdc: ?*CdcManager = null,
+    metrics: obs.ExecutorMetrics = .{},
 
     pub fn init(storage: *Storage, alloc: std.mem.Allocator) Executor {
         return .{
@@ -102,7 +106,10 @@ pub const Executor = struct {
     }
 
     pub fn run(self: *Executor, entry: LogEntry) !ExecResult {
-        defer self.committed_seq = entry.header.seq;
+        defer {
+            self.committed_seq = entry.header.seq;
+            self.metrics.current_seq.set(@intCast(entry.header.seq));
+        }
 
         // Non-txn entries advance seq; snapshot_marker additionally notifies the log.
         if (entry.header.kind != .txn_intent) {
@@ -115,19 +122,23 @@ pub const Executor = struct {
                 }
                 if (self.log) |l| l.notifySnapshot(marker.seq);
             }
+            self.metrics.noops_processed.inc();
             return .{ .ok = .{ .rows_affected = 0 } };
         }
 
         if (!entry.verifyCrc()) {
+            self.metrics.txns_aborted.inc();
             return .{ .abort = .{ .code = .bad_params, .detail = "crc mismatch" } };
         }
 
         var decoded = deserializeTxnIntent(entry.payload, self.alloc) catch {
+            self.metrics.txns_aborted.inc();
             return .{ .abort = .{ .code = .bad_params, .detail = "invalid payload" } };
         };
         defer decoded.deinit();
 
         const registered = self.registry.lookup(decoded.query_hash.*) orelse {
+            self.metrics.txns_missing_query.inc();
             return .{ .abort = .{ .code = .missing_query, .detail = "unknown query hash" } };
         };
 
@@ -160,6 +171,7 @@ pub const Executor = struct {
 
         handler(ctx, self.storage, &mutations) catch |err| {
             if (err == error.ConstraintViolation) {
+                self.metrics.txns_aborted.inc();
                 return .{ .abort = .{ .code = .constraint_violation, .detail = "constraint failed" } };
             }
             return err;
@@ -183,6 +195,8 @@ pub const Executor = struct {
         }
 
         const rows: u64 = @intCast(mutations.items.len);
+        self.metrics.txns_ok.inc();
+        self.metrics.rows_affected.add(rows);
         return .{ .ok = .{ .rows_affected = rows } };
     }
 };

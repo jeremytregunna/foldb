@@ -19,7 +19,8 @@ test "Segment: header fields are correct" {
     const base_seq: Seq = 42;
     const node_id: NodeId = 1;
 
-    const header = SegmentHeader.init(base_seq, node_id);
+    const created_at: i64 = 1_000_000;
+    const header = SegmentHeader.init(base_seq, node_id, created_at);
 
     // Validate header fields
     try testing.expectEqualSlices(u8, &log.MAGIC, &header.magic);
@@ -27,7 +28,7 @@ test "Segment: header fields are correct" {
     try testing.expectEqual(base_seq, header.base_seq);
     try testing.expectEqual(node_id, header.node_id);
     try testing.expect(header.part_id == 0);
-    try testing.expect(header.created_at > 0);
+    try testing.expectEqual(created_at, header.created_at);
 }
 
 test "Segment: footer fields are correct" {
@@ -167,10 +168,17 @@ test "Segment: LogEntryHeader serialization round-trip" {
 }
 
 test "Segment: SegmentHeader isValid rejects corruption" {
-    var header = SegmentHeader.init(1, 42);
+    var header = SegmentHeader.init(1, 42, 0);
     try testing.expect(header.isValid());
     header.base_seq ^= 0xDEAD;
     try testing.expect(!header.isValid());
+}
+
+test "Segment: SegmentHeader created_at is stored verbatim" {
+    const ts: i64 = 42_000;
+    const header = SegmentHeader.init(1, 99, ts);
+    try testing.expectEqual(ts, header.created_at);
+    try testing.expect(header.isValid());
 }
 
 // Helpers for disk-level segment tests
@@ -204,7 +212,7 @@ test "Segment: disk round-trip (init, append, seal, open, read)" {
     const payloads = [_][]const u8{ "alpha", "beta", "gamma" };
 
     {
-        var seg = try log.Segment.init(path, 1, 99);
+        var seg = try log.Segment.init(path, 1, 99, 0);
         for (payloads, 0..) |payload, i| {
             const entry = LogEntry.create(@intCast(i + 1), 0, .txn_intent, payload);
             try seg.append(entry);
@@ -245,7 +253,7 @@ test "Segment: open unsealed segment recovers gracefully" {
 
     {
         // Write header only — simulate crash before any entries or seal
-        var seg = try log.Segment.init(path, 1, 1);
+        var seg = try log.Segment.init(path, 1, 1, 0);
         // Do not seal, just deinit (simulates abrupt close)
         seg.deinit();
     }
@@ -267,7 +275,7 @@ test "Segment: sealed segment rejects further appends" {
         std.heap.page_allocator.free(path_for_cleanup);
     }
 
-    var seg = try log.Segment.init(path, 1, 1);
+    var seg = try log.Segment.init(path, 1, 1, 0);
     defer seg.deinit();
 
     try seg.seal();

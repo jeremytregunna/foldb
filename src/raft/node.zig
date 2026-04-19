@@ -14,6 +14,7 @@ const std = @import("std");
 const log_mod = @import("log.zig");
 const types = @import("types.zig");
 const rpc = @import("rpc.zig");
+const obs = @import("observability.zig");
 
 const Log = log_mod.Log;
 const LogEntry = log_mod.LogEntry;
@@ -27,6 +28,10 @@ const AppendEntriesResult = rpc.AppendEntriesResult;
 const RequestVoteArgs = rpc.RequestVoteArgs;
 const RequestVoteResult = rpc.RequestVoteResult;
 const Message = rpc.Message;
+
+/// Re-export config change types for callers.
+pub const ConfigChangeOp = log_mod.ConfigChangeOp;
+pub const ConfigChange = log_mod.ConfigChange;
 
 /// Effects the caller must process after each state machine step.
 pub const Output = union(enum) {
@@ -48,6 +53,9 @@ pub const Output = union(enum) {
         from_index: Seq,
         leader_commit: Seq,
     },
+    /// A config_change entry committed; caller must ensure the new node (if any)
+    /// is wired into the cluster transport layer.
+    apply_config: struct { seq: Seq, op: ConfigChangeOp, peer_id: NodeId },
 };
 
 const PeerState = struct {
@@ -84,6 +92,15 @@ pub const RaftNode = struct {
     election_timeout: u32,
     heartbeat_ticks: u32,
     prng: std.Random.Xoroshiro128,
+    metrics: obs.RaftMetrics = .{},
+    /// Seq of the pending config_change entry (0 = none in progress).
+    pending_config_seq: Seq = 0,
+    pending_config_op: ?ConfigChangeOp = null,
+    pending_config_peer: NodeId = 0,
+    /// During joint consensus (leader only): peer IDs in the new config (heap-owned).
+    joint_config_peer_ids: ?[]NodeId = null,
+    /// During joint consensus (leader only): PeerState for genuinely new nodes (heap-owned).
+    new_peer_states: ?[]PeerState = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -123,6 +140,8 @@ pub const RaftNode = struct {
 
     pub fn deinit(self: *RaftNode) void {
         self.allocator.free(self.peers);
+        if (self.joint_config_peer_ids) |ids| self.allocator.free(ids);
+        if (self.new_peer_states) |nps| self.allocator.free(nps);
     }
 
     // -----------------------------------------------------------------------
@@ -168,6 +187,64 @@ pub const RaftNode = struct {
         try log.appendEntry(entry);
 
         // Update our own match_index conceptually (handled via head() in checkCommit).
+        try self.broadcastAppendEntries(log, out);
+        return seq;
+    }
+
+    /// Leader initiates a membership change using joint consensus.
+    /// Returns the seq of the config_change entry, or null if not leader or
+    /// another config change is already in progress.
+    pub fn proposeConfigChange(
+        self: *RaftNode,
+        log: *Log,
+        op: ConfigChangeOp,
+        peer_id: NodeId,
+        out: *std.ArrayList(Output),
+    ) !?Seq {
+        if (self.role != .leader) return null;
+        if (self.pending_config_seq != 0) return null;
+
+        // Build new peer ID list and PeerState for genuinely new nodes.
+        const head = try log.head();
+        switch (op) {
+            .add_voter => {
+                const new_ids = try self.allocator.alloc(NodeId, self.peers.len + 1);
+                for (self.peers, 0..) |p, i| new_ids[i] = p.id;
+                new_ids[self.peers.len] = peer_id;
+                self.joint_config_peer_ids = new_ids;
+
+                const nps = try self.allocator.alloc(PeerState, 1);
+                nps[0] = .{ .id = peer_id, .next_index = head + 1, .match_index = 0, .vote_responded = false, .vote_granted = false };
+                self.new_peer_states = nps;
+            },
+            .remove_voter => {
+                var count: usize = 0;
+                for (self.peers) |p| {
+                    if (p.id != peer_id) count += 1;
+                }
+                const new_ids = try self.allocator.alloc(NodeId, count);
+                var i: usize = 0;
+                for (self.peers) |p| {
+                    if (p.id != peer_id) {
+                        new_ids[i] = p.id;
+                        i += 1;
+                    }
+                }
+                self.joint_config_peer_ids = new_ids;
+                // No new peer states for removal.
+            },
+        }
+
+        const cc = ConfigChange{ .op = op, .node_id = peer_id };
+        const cc_payload = cc.serialize();
+        const seq = head + 1;
+        const entry = LogEntry.create(seq, self.current_term, .config_change, &cc_payload);
+        try log.appendEntry(entry);
+
+        self.pending_config_seq = seq;
+        self.pending_config_op = op;
+        self.pending_config_peer = peer_id;
+
         try self.broadcastAppendEntries(log, out);
         return seq;
     }
@@ -230,16 +307,32 @@ pub const RaftNode = struct {
         }
 
         // Append new entries (skip any already present and matching).
+        var replicated: u64 = 0;
         for (args.entries) |entry| {
             const our_head = try log.head();
             if (entry.header.seq <= our_head) {
                 const our_term = try log.termAt(entry.header.seq, self.allocator);
                 if (our_term == entry.header.epoch) continue; // already have it
-                // Conflict at this index — truncate and append.
+                // Conflict: truncate and clear any pending config change at or after this seq.
                 try log.truncateSuffix(entry.header.seq);
+                if (self.pending_config_seq > 0 and self.pending_config_seq >= entry.header.seq) {
+                    self.pending_config_seq = 0;
+                    self.pending_config_op = null;
+                    self.pending_config_peer = 0;
+                }
             }
             try log.appendEntry(entry);
+            replicated += 1;
+            // Track config_change entries for application when committed.
+            if (entry.header.kind == .config_change and self.pending_config_seq == 0) {
+                if (ConfigChange.deserialize(entry.payload)) |cc| {
+                    self.pending_config_seq = entry.header.seq;
+                    self.pending_config_op = cc.op;
+                    self.pending_config_peer = cc.node_id;
+                } else |_| {}
+            }
         }
+        if (replicated > 0) self.metrics.entries_replicated.add(replicated);
 
         // Advance commit index.
         const new_head = try log.head();
@@ -248,6 +341,7 @@ pub const RaftNode = struct {
             if (new_commit > self.commit_index) {
                 self.commit_index = new_commit;
                 try out.append(self.allocator, .{ .committed = self.commit_index });
+                try self.maybeApplyConfig(out);
             }
         }
 
@@ -364,6 +458,20 @@ pub const RaftNode = struct {
         self.votes_for_me = 1;
         self.election_ticks = 0;
         self.election_timeout = randomElectionTimeout(&self.prng, self.cfg);
+        self.metrics.elections_started.inc();
+        self.metrics.current_term.set(@intCast(self.current_term));
+        // Abandon any in-progress config change — the new leader must re-propose it.
+        self.pending_config_seq = 0;
+        self.pending_config_op = null;
+        self.pending_config_peer = 0;
+        if (self.joint_config_peer_ids) |ids| {
+            self.allocator.free(ids);
+            self.joint_config_peer_ids = null;
+        }
+        if (self.new_peer_states) |nps| {
+            self.allocator.free(nps);
+            self.new_peer_states = null;
+        }
 
         try out.append(self.allocator, .{ .persist = .{ .term = self.current_term, .voted_for = self.id } });
 
@@ -391,6 +499,8 @@ pub const RaftNode = struct {
     fn becomeLeader(self: *RaftNode, log: *Log, out: *std.ArrayList(Output)) !void {
         self.role = .leader;
         self.heartbeat_ticks = 0;
+        self.metrics.leadership_won.inc();
+        self.metrics.is_leader.set(1);
         const last_index = try log.head();
         for (self.peers) |*peer| {
             peer.next_index = last_index + 1;
@@ -401,6 +511,7 @@ pub const RaftNode = struct {
     }
 
     fn stepDown(self: *RaftNode, term: Term, out: *std.ArrayList(Output)) !void {
+        const was_leader = self.role == .leader;
         const need_persist = term > self.current_term;
         self.current_term = term;
         if (need_persist) {
@@ -410,12 +521,22 @@ pub const RaftNode = struct {
         self.role = .follower;
         self.election_ticks = 0;
         self.election_timeout = randomElectionTimeout(&self.prng, self.cfg);
+        if (was_leader) {
+            self.metrics.leadership_lost.inc();
+            self.metrics.is_leader.set(0);
+        }
+        self.metrics.current_term.set(@intCast(self.current_term));
     }
 
     fn broadcastAppendEntries(self: *RaftNode, log: *Log, out: *std.ArrayList(Output)) !void {
         for (self.peers) |*peer| {
             try self.emitSendEntries(log, peer, out);
         }
+        // During joint consensus, also send to genuinely new peers.
+        if (self.new_peer_states) |nps| {
+            for (nps) |*peer| try self.emitSendEntries(log, peer, out);
+        }
+        self.metrics.heartbeats_sent.inc();
         // For single-node clusters (0 peers), majority is already met by self alone.
         // For multi-node clusters, this is a no-op until peer acks arrive.
         try self.checkCommit(log, out);
@@ -436,23 +557,110 @@ pub const RaftNode = struct {
     }
 
     /// Advance commit_index to the highest N such that:
-    ///   N > commit_index AND entry[N].term == currentTerm AND majority have matchIndex >= N
+    ///   N > commit_index AND entry[N].term == currentTerm AND quorum have matchIndex >= N
+    ///
+    /// During joint consensus, quorum requires majority from BOTH old AND new config.
     fn checkCommit(self: *RaftNode, log: *Log, out: *std.ArrayList(Output)) !void {
         const our_head = try log.head();
         var n = our_head;
         while (n > self.commit_index) : (n -= 1) {
             const entry_term = try log.termAt(n, self.allocator);
-            if (entry_term != self.current_term) continue; // safety: only commit current-term entries
+            if (entry_term != self.current_term) continue;
 
-            var count: usize = 1; // self
+            // Old config quorum.
+            var old_count: usize = 1;
             for (self.peers) |peer| {
-                if (peer.match_index >= n) count += 1;
+                if (peer.match_index >= n) old_count += 1;
             }
-            const majority = (self.peers.len + 1) / 2 + 1;
-            if (count >= majority) {
-                self.commit_index = n;
-                try out.append(self.allocator, .{ .committed = n });
-                break;
+            const old_majority = (self.peers.len + 1) / 2 + 1;
+            if (old_count < old_majority) continue;
+
+            // Joint consensus: also require new config quorum.
+            if (self.joint_config_peer_ids) |jids| {
+                var new_count: usize = 1; // self is in new config
+                for (jids) |jid| {
+                    const mi = if (self.findPeer(jid)) |p| p.match_index else 0;
+                    if (mi >= n) new_count += 1;
+                }
+                const new_majority = (jids.len + 1) / 2 + 1;
+                if (new_count < new_majority) continue;
+            }
+
+            self.commit_index = n;
+            try out.append(self.allocator, .{ .committed = n });
+            break;
+        }
+
+        try self.maybeApplyConfig(out);
+    }
+
+    /// If a pending config change has now committed, emit apply_config and update peer list.
+    fn maybeApplyConfig(self: *RaftNode, out: *std.ArrayList(Output)) !void {
+        if (self.pending_config_seq == 0) return;
+        if (self.commit_index < self.pending_config_seq) return;
+
+        const op = self.pending_config_op.?;
+        const peer_id = self.pending_config_peer;
+
+        try out.append(self.allocator, .{ .apply_config = .{
+            .seq = self.pending_config_seq,
+            .op = op,
+            .peer_id = peer_id,
+        } });
+
+        try self.applyConfigChangeInternal(op, peer_id);
+
+        self.pending_config_seq = 0;
+        self.pending_config_op = null;
+        self.pending_config_peer = 0;
+    }
+
+    /// Update peer list to reflect committed config change.
+    fn applyConfigChangeInternal(self: *RaftNode, op: ConfigChangeOp, peer_id: NodeId) !void {
+        if (self.joint_config_peer_ids) |jids| {
+            // Leader: build new peers from joint_config_peer_ids using current state.
+            const new_peers = try self.allocator.alloc(PeerState, jids.len);
+            for (jids, 0..) |jid, i| {
+                if (self.findPeer(jid)) |p| {
+                    new_peers[i] = p.*;
+                } else {
+                    new_peers[i] = .{ .id = jid, .next_index = 1, .match_index = 0, .vote_responded = false, .vote_granted = false };
+                }
+            }
+            self.allocator.free(self.peers);
+            self.peers = new_peers;
+            self.allocator.free(jids);
+            self.joint_config_peer_ids = null;
+            if (self.new_peer_states) |nps| {
+                self.allocator.free(nps);
+                self.new_peer_states = null;
+            }
+        } else {
+            // Follower: compute new peer set directly from op.
+            switch (op) {
+                .add_voter => {
+                    const np = try self.allocator.alloc(PeerState, self.peers.len + 1);
+                    @memcpy(np[0..self.peers.len], self.peers);
+                    np[self.peers.len] = .{ .id = peer_id, .next_index = 1, .match_index = 0, .vote_responded = false, .vote_granted = false };
+                    self.allocator.free(self.peers);
+                    self.peers = np;
+                },
+                .remove_voter => {
+                    var count: usize = 0;
+                    for (self.peers) |p| {
+                        if (p.id != peer_id) count += 1;
+                    }
+                    const np = try self.allocator.alloc(PeerState, count);
+                    var i: usize = 0;
+                    for (self.peers) |p| {
+                        if (p.id != peer_id) {
+                            np[i] = p;
+                            i += 1;
+                        }
+                    }
+                    self.allocator.free(self.peers);
+                    self.peers = np;
+                },
             }
         }
     }
@@ -467,6 +675,11 @@ pub const RaftNode = struct {
     fn findPeer(self: *RaftNode, id: NodeId) ?*PeerState {
         for (self.peers) |*peer| {
             if (peer.id == id) return peer;
+        }
+        if (self.new_peer_states) |nps| {
+            for (nps) |*peer| {
+                if (peer.id == id) return peer;
+            }
         }
         return null;
     }

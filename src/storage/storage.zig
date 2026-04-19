@@ -1,6 +1,7 @@
 /// Public storage API: unified module re-exporting all storage types.
 const std = @import("std");
 const types = @import("types.zig");
+const obs = @import("observability.zig");
 const lsm_mod = @import("lsm.zig");
 const codec_mod = @import("codec.zig");
 const block_mod = @import("block.zig");
@@ -133,6 +134,8 @@ const IndexEntry = union(enum) {
     }
 };
 
+pub const StorageMetrics = obs.StorageMetrics;
+
 pub const Storage = struct {
     tables: std.AutoHashMap(TableId, lsm_mod.LSM),
     indexes: std.AutoHashMap(IndexId, IndexEntry),
@@ -141,6 +144,7 @@ pub const Storage = struct {
     object_store: ?object_store_mod.ObjectStore = null,
     cache_dir: ?[]const u8 = null,
     snapshot_policy: ?SnapshotPolicy = null,
+    metrics: obs.StorageMetrics = .{},
 
     pub fn init(dir: []const u8, alloc: std.mem.Allocator) !Storage {
         mkdirAll(dir);
@@ -234,7 +238,10 @@ pub const Storage = struct {
 
     pub fn get(self: *Storage, table_id: TableId, key: []const u8, at_seq: Seq) !?Row {
         const lsm = self.tables.getPtr(table_id) orelse return error.TableNotFound;
-        return lsm.get(key, at_seq);
+        self.metrics.gets.inc();
+        const result = try lsm.get(key, at_seq);
+        if (result == null) self.metrics.get_misses.inc();
+        return result;
     }
 
     pub fn apply(self: *Storage, mutations: []const Mutation, at_seq: Seq) !void {
@@ -269,12 +276,17 @@ pub const Storage = struct {
             if (!found) try table_ids.append(self.alloc, m.table_id);
         }
 
+        self.metrics.applies.inc();
+        self.metrics.mutations_applied.add(@intCast(mutations.len));
+        self.metrics.current_seq.set(@intCast(at_seq));
+
         for (table_ids.items) |tid| {
             const lsm = self.tables.getPtr(tid) orelse return error.TableNotFound;
             const l0_before = lsm.levels[0].files.items.len;
             try lsm.apply(mutations, at_seq);
             const l0_after = lsm.levels[0].files.items.len;
             if (l0_before > 0 and l0_after < l0_before) {
+                self.metrics.compactions.inc();
                 // Compaction fired; prune tombstoned HNSW nodes for this table
                 var idx_it = self.indexes.iterator();
                 while (idx_it.next()) |kv| {
@@ -317,6 +329,7 @@ pub const Storage = struct {
                     );
                     manifest.deinit();
                 }
+                self.metrics.snapshots_taken.inc();
                 if (policy.post_snapshot) |hook| hook.call(at_seq);
             }
         }
@@ -325,6 +338,8 @@ pub const Storage = struct {
     pub fn scan(self: *Storage, table_id: TableId, range: KeyRange, at_seq: Seq, alloc: std.mem.Allocator) !ScanIterator {
         const lsm = self.tables.getPtr(table_id) orelse return error.TableNotFound;
         const rows = try lsm.scan(range, at_seq, alloc);
+        self.metrics.scans.inc();
+        self.metrics.scan_rows_returned.add(@intCast(rows.len));
         return ScanIterator{ .rows = rows, .pos = 0, .alloc = alloc };
     }
 

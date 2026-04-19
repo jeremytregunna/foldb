@@ -19,12 +19,17 @@ pub const MessageKind = rpc_mod.MessageKind;
 pub const RaftNode = node_mod.RaftNode;
 pub const Output = node_mod.Output;
 pub const Config = node_mod.Config;
+pub const ConfigChangeOp = node_mod.ConfigChangeOp;
+pub const ConfigChange = node_mod.ConfigChange;
 
 pub const InProcessBus = transport_mod.InProcessBus;
 pub const Envelope = transport_mod.Envelope;
 
 pub const SimCluster = cluster_mod.SimCluster;
+pub const DynSimCluster = cluster_mod.DynSimCluster;
 pub const ClusterError = cluster_mod.ClusterError;
+pub const NetworkSim = cluster_mod.NetworkSim;
+pub const NetworkConfig = cluster_mod.NetworkConfig;
 
 pub const PersistentState = persistent_mod.PersistentState;
 pub const loadPersistentState = persistent_mod.load;

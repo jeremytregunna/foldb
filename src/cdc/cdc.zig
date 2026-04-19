@@ -5,6 +5,7 @@
 const std = @import("std");
 const storage_mod = @import("storage.zig");
 const log_mod = @import("log.zig");
+const obs = @import("observability.zig");
 
 pub const TableId = storage_mod.TableId;
 pub const Seq = storage_mod.Seq;
@@ -120,6 +121,7 @@ pub const CdcManager = struct {
     subscriptions: std.ArrayListUnmanaged(*CdcSubscription),
     next_id: u64,
     alloc: std.mem.Allocator,
+    metrics: obs.CdcMetrics = .{},
 
     pub fn init(alloc: std.mem.Allocator) CdcManager {
         return .{ .subscriptions = .empty, .next_id = 1, .alloc = alloc };
@@ -143,6 +145,7 @@ pub const CdcManager = struct {
         errdefer self.alloc.destroy(sub);
         sub.* = CdcSubscription.init(id, table_filter, from_seq, self.alloc);
         try self.subscriptions.append(self.alloc, sub);
+        self.metrics.subscriptions_active.set(@intCast(self.subscriptions.items.len));
         return sub;
     }
 
@@ -153,6 +156,7 @@ pub const CdcManager = struct {
                 sub.deinit();
                 self.alloc.destroy(sub);
                 _ = self.subscriptions.swapRemove(i);
+                self.metrics.subscriptions_active.set(@intCast(self.subscriptions.items.len));
                 return;
             }
         }
@@ -167,7 +171,6 @@ pub const CdcManager = struct {
         at_seq: Seq,
         alloc: std.mem.Allocator,
     ) !BeforeImages {
-        _ = self;
         const images = try alloc.alloc(?[]ColumnValue, mutations.len);
         var committed: usize = 0;
         errdefer {
@@ -196,6 +199,7 @@ pub const CdcManager = struct {
             }
         }
 
+        self.metrics.before_images_captured.add(@intCast(mutations.len));
         return .{ .images = images, .alloc = alloc };
     }
 
@@ -234,13 +238,16 @@ pub const CdcManager = struct {
                 continue;
             }
 
+            const effects_slice = try effects.toOwnedSlice(alloc);
             const ev = CdcEvent{
                 .seq = seq,
                 .epoch = epoch,
                 .kind = kind,
-                .effects = try effects.toOwnedSlice(alloc),
+                .effects = effects_slice,
                 .alloc = alloc,
             };
+            self.metrics.events_emitted.inc();
+            self.metrics.effects_total.add(@intCast(effects_slice.len));
             sub.push(ev) catch |err| {
                 var e = ev;
                 e.deinit();

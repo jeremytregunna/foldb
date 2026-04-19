@@ -13,6 +13,7 @@ const storage_mod = @import("storage.zig");
 const executor_mod = @import("executor.zig");
 const sequencer_mod = @import("sequencer.zig");
 const log_mod = @import("log.zig");
+const obs = @import("observability.zig");
 
 pub const QueryHash = sql_mod.QueryHash;
 pub const Seq = @import("types.zig").Seq;
@@ -103,6 +104,7 @@ pub const Gateway = struct {
     client_id: u64,
     client_seq: u64,
     alloc: std.mem.Allocator,
+    metrics: obs.GatewayMetrics = .{},
 
     /// Initialize and heap-allocate a Gateway. Caller owns the pointer; call `deinit` to free.
     pub fn init(
@@ -156,6 +158,7 @@ pub const Gateway = struct {
     /// Idempotent: registering the same SQL twice returns the same hash.
     pub fn register(self: *Gateway, sql: []const u8) !RegisterResult {
         const hash = try self.registry.register(sql);
+        self.metrics.queries_registered.inc();
         return .{
             .hash = hash,
             .schema_version = self.registry.schema_seq,
@@ -173,6 +176,8 @@ pub const Gateway = struct {
     ) !ExecResult {
         const rq = self.registry.lookup(hash) orelse return error.QueryNotFound;
 
+        self.metrics.queries_executed.inc();
+
         // Assign a stable client_seq for this logical operation ONCE, before any retry.
         self.client_seq += 1;
         const op_seq = self.client_seq;
@@ -184,6 +189,7 @@ pub const Gateway = struct {
         // Resolve nondeterministic functions in the SQL text (NOW(), RANDOM(), UUID()).
         const resolved = try resolveNondet(rq.sql_text, &self.nondet_resolver, self.alloc);
         defer self.alloc.free(resolved);
+        if (resolved.len > 0) self.metrics.nondet_resolved.add(@intCast(resolved.len));
 
         // Merge caller-supplied nondet with gateway-resolved values.
         const all_nondet = if (nondet.len > 0) nondet else resolved;
@@ -191,6 +197,7 @@ pub const Gateway = struct {
         const max_retries: usize = 3;
         var attempt: usize = 0;
         while (attempt < max_retries) : (attempt += 1) {
+            if (attempt > 0) self.metrics.recon_retries.inc();
             // Serialize TxnIntent payload — client_seq stays constant across retries.
             var intent_buf: std.ArrayList(u8) = .empty;
             defer intent_buf.deinit(self.alloc);
@@ -229,9 +236,18 @@ pub const Gateway = struct {
             return switch (exec_result) {
                 .ok => |ok| .{ .rows_affected = ok.rows_affected, .result_set = null },
                 .abort => |ab| switch (ab.code) {
-                    .constraint_violation => error.ConstraintViolation,
-                    .missing_query => error.QueryNotFound,
-                    else => error.ExecutionError,
+                    .constraint_violation => {
+                        self.metrics.queries_aborted.inc();
+                        return error.ConstraintViolation;
+                    },
+                    .missing_query => {
+                        self.metrics.queries_aborted.inc();
+                        return error.QueryNotFound;
+                    },
+                    else => {
+                        self.metrics.queries_aborted.inc();
+                        return error.ExecutionError;
+                    },
                 },
             };
         }

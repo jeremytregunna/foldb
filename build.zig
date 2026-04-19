@@ -64,12 +64,68 @@ pub fn build(b: *std.Build) void {
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 
+    // Observability module
+    const observability_module = b.createModule(.{
+        .root_source_file = b.path("src/observability/observability.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Sim module
+    const sim_module = b.createModule(.{
+        .root_source_file = b.path("src/sim/sim.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Sim clock tests
+    const sim_clock_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sim/clock_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sim_clock_test_module.addImport("sim.zig", sim_module);
+
+    const sim_clock_tests = b.addTest(.{ .root_module = sim_clock_test_module });
+    const run_sim_clock_tests = b.addRunArtifact(sim_clock_tests);
+
+    // Sim scheduler tests
+    const sim_scheduler_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sim/scheduler_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sim_scheduler_test_module.addImport("sim.zig", sim_module);
+    const sim_scheduler_tests = b.addTest(.{ .root_module = sim_scheduler_test_module });
+    const run_sim_scheduler_tests = b.addRunArtifact(sim_scheduler_tests);
+
+    // Sim network tests
+    const sim_network_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sim/network_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sim_network_test_module.addImport("sim.zig", sim_module);
+    const sim_network_tests = b.addTest(.{ .root_module = sim_network_test_module });
+    const run_sim_network_tests = b.addRunArtifact(sim_network_tests);
+
+    // Observability tests
+    const obs_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/observability/metrics_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    obs_test_module.addImport("observability.zig", observability_module);
+    const obs_tests = b.addTest(.{ .root_module = obs_test_module });
+    const run_obs_tests = b.addRunArtifact(obs_tests);
+
     // Create log module for tests
     const log_module = b.createModule(.{
         .root_source_file = b.path("src/log/log.zig"),
         .target = target,
         .optimize = optimize,
     });
+    log_module.addImport("observability.zig", observability_module);
 
     // Log segment tests
     const log_segment_test_module = b.createModule(.{
@@ -130,6 +186,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     raft_module.addImport("log.zig", log_module);
+    raft_module.addImport("observability.zig", observability_module);
+    raft_module.addImport("sim.zig", sim_module);
 
     // Raft sub-modules need log.zig too
     // (raft.zig imports types/rpc/node/transport/cluster/persistent which import log.zig)
@@ -185,6 +243,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    storage_module.addImport("observability.zig", observability_module);
 
     // Storage codec tests
     const storage_codec_test_module = b.createModule(.{
@@ -304,6 +363,7 @@ pub fn build(b: *std.Build) void {
     });
     cdc_module.addImport("storage.zig", storage_module);
     cdc_module.addImport("log.zig", log_module);
+    cdc_module.addImport("observability.zig", observability_module);
 
     // Executor module
     const executor_module = b.createModule(.{
@@ -314,6 +374,7 @@ pub fn build(b: *std.Build) void {
     executor_module.addImport("storage.zig", storage_module);
     executor_module.addImport("log.zig", log_module);
     executor_module.addImport("cdc.zig", cdc_module);
+    executor_module.addImport("observability.zig", observability_module);
 
     // Recovery module
     const recovery_module = b.createModule(.{
@@ -530,6 +591,7 @@ pub fn build(b: *std.Build) void {
     sequencer_module.addImport("types.zig", seq_types_module);
     sequencer_module.addImport("idempotency.zig", seq_idempotency_module);
     sequencer_module.addImport("epoch.zig", seq_epoch_module);
+    sequencer_module.addImport("observability.zig", observability_module);
 
     // Wire sequencer into lib.zig now that it exists
     lib_module.addImport("sequencer.zig", sequencer_module);
@@ -547,6 +609,7 @@ pub fn build(b: *std.Build) void {
     gateway_module.addImport("sequencer.zig", sequencer_module);
     gateway_module.addImport("registry.zig", sql_module);
     gateway_module.addImport("executor_bridge.zig", sql_module);
+    gateway_module.addImport("observability.zig", observability_module);
     gateway_module.addImport("schema.zig", sql_module);
     gateway_module.addImport("parser.zig", sql_module);
     gateway_module.addImport("ast.zig", sql_module);
@@ -639,6 +702,10 @@ pub fn build(b: *std.Build) void {
 
     // Unit tests: pure logic, no simulation harness
     const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_sim_clock_tests.step);
+    test_step.dependOn(&run_sim_scheduler_tests.step);
+    test_step.dependOn(&run_sim_network_tests.step);
+    test_step.dependOn(&run_obs_tests.step);
     test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
     test_step.dependOn(&run_log_segment_tests.step);
@@ -673,6 +740,26 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_seq_epoch_tests.step);
     test_step.dependOn(&run_seq_idem_tests.step);
     test_step.dependOn(&run_seq_tests.step);
+
+    // DST seed sweep executable
+    const dst_sweep_module = b.createModule(.{
+        .root_source_file = b.path("src/cmd/dst_sweep.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    dst_sweep_module.addImport("raft.zig", raft_module);
+
+    const dst_sweep_exe = b.addExecutable(.{
+        .name = "dst-sweep",
+        .root_module = dst_sweep_module,
+    });
+    b.installArtifact(dst_sweep_exe);
+
+    const run_dst_sweep = b.addRunArtifact(dst_sweep_exe);
+    if (b.args) |bargs| run_dst_sweep.addArgs(bargs);
+
+    const dst_sweep_step = b.step("dst-sweep", "Run DST seed sweep (pass -- --seeds N)");
+    dst_sweep_step.dependOn(&run_dst_sweep.step);
 
     // Deterministic simulation tests
     const dst_step = b.step("dst-test", "Run deterministic simulation tests");

@@ -44,4 +44,13 @@ pub const Log = manager.Log;
 pub const LogError = manager.LogError;
 pub const DEFAULT_SEGMENT_MAX_ENTRIES = manager.DEFAULT_SEGMENT_MAX_ENTRIES;
 
+// Re-export observability
+pub const LogMetrics = @import("observability.zig").LogMetrics;
+pub const realTimeSec = segment.realTimeSec;
+
+// Re-export config change types
+const config_change = @import("config_change.zig");
+pub const ConfigChangeOp = config_change.ConfigChangeOp;
+pub const ConfigChange = config_change.ConfigChange;
+
 pub const ENTRY_HEADER_SIZE = entry.LogEntryHeader.HEADER_SIZE;

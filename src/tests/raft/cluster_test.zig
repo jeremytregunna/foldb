@@ -8,7 +8,10 @@ const raft = @import("raft.zig");
 const log_mod = @import("log.zig");
 
 const SimCluster3 = raft.SimCluster(3);
+const DynSimCluster = raft.DynSimCluster;
 const Config = raft.Config;
+const NetworkSim = raft.NetworkSim;
+const NetworkConfig = raft.NetworkConfig;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -65,14 +68,19 @@ fn removeDirRecursive(path: []const u8) void {
     _ = std.os.linux.rmdir(z.ptr);
 }
 
+const test_cfg = Config{
+    .election_timeout_min = 5,
+    .election_timeout_max = 10,
+    .heartbeat_interval = 2,
+    .max_append_batch = 64,
+};
+
 fn initCluster(base_dir: []const u8) !SimCluster3 {
-    const cfg = Config{
-        .election_timeout_min = 5,
-        .election_timeout_max = 10,
-        .heartbeat_interval = 2,
-        .max_append_batch = 64,
-    };
-    return SimCluster3.init(testing.allocator, base_dir, cfg, .{ 1, 2, 3 });
+    return SimCluster3.init(testing.allocator, base_dir, test_cfg, .{ 1, 2, 3 });
+}
+
+fn initDynCluster(base_dir: []const u8) !DynSimCluster {
+    return DynSimCluster.init(testing.allocator, base_dir, test_cfg, &.{ 1, 2, 3 }, &.{ 1, 2, 3 });
 }
 
 /// Drive the cluster until a leader emerges or we hit max_steps.
@@ -235,6 +243,199 @@ test "Cluster: appends continue after re-election" {
     const seq = try cluster.propose("after", 100);
     try testing.expect(seq >= 2);
     try testing.expect(try cluster.isCommitted(seq));
+}
+
+// ---------------------------------------------------------------------------
+// Reconfiguration tests (DynSimCluster)
+// ---------------------------------------------------------------------------
+
+test "Reconfig: add peer — cluster still commits after membership change" {
+    const dir = try makeTempDir("reconfig_add");
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
+
+    var cluster = try initDynCluster(dir);
+    defer cluster.deinit();
+
+    // Elect a leader in the initial 3-node cluster.
+    var steps: usize = 0;
+    while (steps < 50) : (steps += 1) {
+        try cluster.step();
+        if (cluster.leader() != null) break;
+    }
+    try testing.expect(cluster.leader() != null);
+
+    // Commit an entry before the config change.
+    const seq1 = try cluster.propose("before_add", 100);
+    try testing.expect(cluster.isCommitted(seq1));
+
+    // Add a 4th node.
+    try cluster.addNode(4, dir, test_cfg);
+
+    // Drive until the config change commits (joint consensus).
+    try cluster.stepN(100);
+
+    // Commit an entry after the config change — quorum includes new node.
+    const seq2 = try cluster.propose("after_add", 100);
+    try testing.expect(cluster.isCommitted(seq2));
+    try testing.expect(seq2 > seq1);
+}
+
+test "Reconfig: remove peer — quorum holds after removal" {
+    const dir = try makeTempDir("reconfig_rem");
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
+
+    var cluster = try initDynCluster(dir);
+    defer cluster.deinit();
+
+    var steps: usize = 0;
+    while (steps < 50) : (steps += 1) {
+        try cluster.step();
+        if (cluster.leader() != null) break;
+    }
+    try testing.expect(cluster.leader() != null);
+
+    const seq1 = try cluster.propose("before_remove", 100);
+    try testing.expect(cluster.isCommitted(seq1));
+
+    // Remove a follower (not the leader).
+    const leader_id = cluster.node_ids.items[cluster.leader().?];
+    var remove_id: u64 = 0;
+    for (cluster.node_ids.items) |nid| {
+        if (nid != leader_id) {
+            remove_id = nid;
+            break;
+        }
+    }
+    try cluster.removeNode(remove_id);
+
+    // Drive until the config change commits.
+    try cluster.stepN(100);
+
+    // The remaining 2-node cluster should still commit (majority = 2/2+1 = 2, we have 2).
+    const seq2 = try cluster.propose("after_remove", 100);
+    try testing.expect(cluster.isCommitted(seq2));
+}
+
+test "Reconfig: proposals continue during config change" {
+    const dir = try makeTempDir("reconfig_concurrent");
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
+
+    var cluster = try initDynCluster(dir);
+    defer cluster.deinit();
+
+    var steps: usize = 0;
+    while (steps < 50) : (steps += 1) {
+        try cluster.step();
+        if (cluster.leader() != null) break;
+    }
+    try testing.expect(cluster.leader() != null);
+
+    // Initiate config change (add node 4).
+    try cluster.addNode(4, dir, test_cfg);
+
+    // Interleave proposals while config change is in flight.
+    const seq_a = try cluster.propose("concurrent_a", 100);
+    const seq_b = try cluster.propose("concurrent_b", 100);
+
+    // Drive to completion.
+    try cluster.stepN(100);
+
+    try testing.expect(cluster.isCommitted(seq_a));
+    try testing.expect(cluster.isCommitted(seq_b));
+    try testing.expect(seq_b > seq_a);
+}
+
+// ---------------------------------------------------------------------------
+// Failure injection tests (NetworkSim)
+// ---------------------------------------------------------------------------
+
+test "Network: 10% message drop — cluster still commits all entries" {
+    const dir = try makeTempDir("net_drop");
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
+
+    var cluster = try initCluster(dir);
+    defer cluster.deinit();
+
+    // Enable 10% random message drop seeded at 0xF4U1T.
+    cluster.net = NetworkSim.init(0xF4_01_7, NetworkConfig{ .drop_prob = 0.1 });
+
+    _ = try waitForLeader(&cluster, 200);
+
+    const payloads = [_][]const u8{ "drop_a", "drop_b", "drop_c", "drop_d", "drop_e" };
+    var last_seq: u64 = 0;
+    for (payloads) |p| {
+        const seq = try cluster.propose(p, 500);
+        try testing.expect(seq > last_seq);
+        last_seq = seq;
+    }
+    try testing.expect(try cluster.isCommitted(last_seq));
+}
+
+test "Network: partition during commit — committed entry survives after heal" {
+    const dir = try makeTempDir("net_partition_commit");
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
+
+    var cluster = try initCluster(dir);
+    defer cluster.deinit();
+
+    const old_leader = try waitForLeader(&cluster, 50);
+
+    // Commit one entry cleanly.
+    const seq1 = try cluster.propose("before", 100);
+    try testing.expect(try cluster.isCommitted(seq1));
+
+    // Partition the leader exactly as a second proposal is in flight.
+    try cluster.partitionNode(old_leader);
+
+    // The proposal may not commit through the old leader — drive to elect a new one.
+    var new_leader: ?usize = null;
+    for (0..150) |_| {
+        try cluster.step();
+        if (cluster.leader()) |idx| {
+            if (idx != old_leader) {
+                new_leader = idx;
+                break;
+            }
+        }
+    }
+    try testing.expect(new_leader != null);
+
+    // Commit through the new leader.
+    const seq2 = try cluster.propose("after_partition", 100);
+    try testing.expect(try cluster.isCommitted(seq2));
+
+    // Heal — old leader must not roll back committed entries.
+    cluster.heal(false);
+    try cluster.stepN(100);
+
+    // Both majority-committed entries must be present on the new leader's log.
+    const head = try cluster.logs[new_leader.?].head();
+    try testing.expect(head >= seq2);
+}
+
+test "Network: different seeds produce different drop patterns" {
+    var net_a = NetworkSim.init(1, NetworkConfig{ .drop_prob = 0.3 });
+    var net_b = NetworkSim.init(2, NetworkConfig{ .drop_prob = 0.3 });
+    var differ: usize = 0;
+    for (0..500) |_| {
+        if (net_a.shouldDrop() != net_b.shouldDrop()) differ += 1;
+    }
+    try testing.expect(differ > 0);
 }
 
 test "Cluster: partition heal — old leader rejoins and converges" {

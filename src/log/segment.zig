@@ -8,6 +8,14 @@ const LogEntryHeader = entry_mod.LogEntryHeader;
 const Seq = entry_mod.Seq;
 const NodeId = entry_mod.NodeId;
 
+/// Returns the current wall-clock time in seconds (unix epoch).
+/// Use this in production code. Tests should use VirtualClock instead.
+pub fn realTimeSec() i64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
+    return ts.sec;
+}
+
 pub const MAGIC: [4]u8 = .{ 'F', 'L', 'O', 'G' };
 pub const VERSION: u32 = 1;
 pub const HEADER_SIZE: usize = 64;
@@ -31,14 +39,11 @@ pub const SegmentHeader = extern struct {
         std.debug.assert(@sizeOf(SegmentHeader) == HEADER_SIZE);
     }
 
-    pub fn init(base_seq: Seq, node_id: NodeId) SegmentHeader {
-        var ts: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
-
+    pub fn init(base_seq: Seq, node_id: NodeId, created_at: i64) SegmentHeader {
         var header = SegmentHeader{
             .base_seq = base_seq,
             .node_id = node_id,
-            .created_at = ts.sec,
+            .created_at = created_at,
             .magic = MAGIC,
             .version = VERSION,
             .part_id = 0,
@@ -157,7 +162,7 @@ pub const Segment = struct {
     last_seq: Seq,
     sealed: bool,
 
-    pub fn init(path: []u8, base_seq: Seq, node_id: NodeId) !Segment {
+    pub fn init(path: []u8, base_seq: Seq, node_id: NodeId, created_at: i64) !Segment {
         const null_path = try std.heap.page_allocator.allocSentinel(u8, path.len, 0);
         defer std.heap.page_allocator.free(null_path);
         @memcpy(null_path[0..path.len], path);
@@ -170,7 +175,7 @@ pub const Segment = struct {
         const fd: std.posix.fd_t = @intCast(@as(isize, @bitCast(raw_fd)));
         if (fd < 0) return error.FileOpenError;
 
-        const header = SegmentHeader.init(base_seq, node_id);
+        const header = SegmentHeader.init(base_seq, node_id, created_at);
         const header_bytes = header.toBytes();
         _ = std.os.linux.write(@intCast(fd), header_bytes.ptr, HEADER_SIZE);
 

@@ -2,6 +2,7 @@
 const std = @import("std");
 const entry_mod = @import("entry.zig");
 const segment = @import("segment.zig");
+const obs = @import("observability.zig");
 
 const LogEntry = entry_mod.LogEntry;
 const TxnIntent = entry_mod.TxnIntent;
@@ -44,6 +45,7 @@ pub const Log = struct {
     sealed_segments: std.ArrayList(Segment),
     sealed: bool,
     last_snapshot_seq: Seq = 0,
+    metrics: obs.LogMetrics = .{},
 
     /// Creates or opens a log at the given directory path.
     /// partition_id identifies which data/ordering partition this log belongs to.
@@ -106,7 +108,7 @@ pub const Log = struct {
         const current_path = try buildPath(path, seg_name);
         errdefer std.heap.page_allocator.free(current_path);
 
-        const current_segment = try Segment.init(current_path, base_seq, node_id);
+        const current_segment = try Segment.init(current_path, base_seq, node_id, segment.realTimeSec());
 
         return Log{
             .path = try std.heap.page_allocator.dupe(u8, path),
@@ -150,6 +152,10 @@ pub const Log = struct {
         const entry = LogEntry.create(seq, self.current_term, .txn_intent, payload);
         try self.current_segment.append(entry);
 
+        self.metrics.entries_appended.inc();
+        self.metrics.bytes_appended.add(@intCast(payload.len));
+        self.metrics.current_seq.set(@intCast(seq));
+
         if (self.current_segment.entry_count >= self.segment_max_entries) {
             try self.rotate();
         }
@@ -177,6 +183,7 @@ pub const Log = struct {
     }
 
     pub fn rotate(self: *Log) !void {
+        self.metrics.segments_rotated.inc();
         try self.current_segment.seal();
 
         const new_base_seq = self.current_seq + 1;
@@ -185,7 +192,7 @@ pub const Log = struct {
         const new_path = try buildPath(self.path, seg_name);
         errdefer std.heap.page_allocator.free(new_path);
 
-        var new_segment = try Segment.init(new_path, new_base_seq, self.node_id);
+        var new_segment = try Segment.init(new_path, new_base_seq, self.node_id, segment.realTimeSec());
         errdefer new_segment.deinit();
 
         try self.sealed_segments.append(std.heap.page_allocator, self.current_segment);
@@ -239,7 +246,12 @@ pub const Log = struct {
             allocator.free(cur_entries);
         }
 
-        return entries.toOwnedSlice(allocator);
+        const result = try entries.toOwnedSlice(allocator);
+        self.metrics.entries_read.add(@intCast(result.len));
+        var bytes: u64 = 0;
+        for (result) |e| bytes += @intCast(e.payload.len);
+        self.metrics.bytes_read.add(bytes);
+        return result;
     }
 
     /// Return the Raft term (epoch) of the entry at seq, or 0 if seq == 0.
@@ -279,6 +291,7 @@ pub const Log = struct {
     }
 
     pub fn truncate_prefix(self: *Log, before_seq: Seq) !void {
+        self.metrics.truncations.inc();
         const safe_seq = if (self.last_snapshot_seq == 0) before_seq else @min(before_seq, self.last_snapshot_seq);
         var removed: usize = 0;
         for (self.sealed_segments.items) |*seg| {
@@ -320,6 +333,10 @@ pub const Log = struct {
         self.current_seq = entry.header.seq;
         self.current_term = entry.header.epoch;
 
+        self.metrics.entries_appended.inc();
+        self.metrics.bytes_appended.add(@intCast(entry.header.payload_len));
+        self.metrics.current_seq.set(@intCast(entry.header.seq));
+
         if (self.current_segment.entry_count >= self.segment_max_entries) {
             try self.rotate();
         }
@@ -333,7 +350,11 @@ pub const Log = struct {
 
         try self.current_segment.append(entry);
         self.current_seq = entry.header.seq;
-        self.current_term = entry.header.epoch; // Update term to match appended entry
+        self.current_term = entry.header.epoch;
+
+        self.metrics.entries_appended.inc();
+        self.metrics.bytes_appended.add(@intCast(entry.header.payload_len));
+        self.metrics.current_seq.set(@intCast(entry.header.seq));
 
         if (self.current_segment.entry_count >= self.segment_max_entries) {
             try self.rotate();
@@ -392,7 +413,7 @@ pub const Log = struct {
             const seg_name = std.fmt.bufPrint(&name_buf, "{d:0>16}.seg", .{base}) catch unreachable;
             const new_path = try buildPath(self.path, seg_name);
             errdefer std.heap.page_allocator.free(new_path);
-            self.current_segment = try Segment.init(new_path, base, self.node_id);
+            self.current_segment = try Segment.init(new_path, base, self.node_id, segment.realTimeSec());
             self.current_seq = if (from_seq > 0) from_seq - 1 else 0;
         }
     }
