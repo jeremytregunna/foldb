@@ -319,9 +319,8 @@ pub const Gateway = struct {
             self.alloc,
         );
         const rows_slice = try rows.toOwnedSlice(self.alloc);
-        const columns_slice = if (rq.plan.stmts.len > 0) blk: {
-            break :blk extractColumnNames(rq.plan.stmts[0].select, &self.schema, self.alloc) catch
-                try self.alloc.alloc([]const u8, 0);
+        const columns_slice = if (rq.plan.stmts.len > 0 and rq.plan.stmts[0] == .select) blk: {
+            break :blk try extractColumnNames(rq.plan.stmts[0].select, &self.schema, self.alloc);
         } else try self.alloc.alloc([]const u8, 0);
 
         return ResultSet{
@@ -352,9 +351,8 @@ pub const Gateway = struct {
             self.alloc,
         );
         const rows_slice = try rows.toOwnedSlice(self.alloc);
-        const columns_slice = if (rq.plan.stmts.len > 0) blk: {
-            break :blk extractColumnNames(rq.plan.stmts[0].select, &self.schema, self.alloc) catch
-                try self.alloc.alloc([]const u8, 0);
+        const columns_slice = if (rq.plan.stmts.len > 0 and rq.plan.stmts[0] == .select) blk: {
+            break :blk try extractColumnNames(rq.plan.stmts[0].select, &self.schema, self.alloc);
         } else try self.alloc.alloc([]const u8, 0);
 
         return ResultSet{

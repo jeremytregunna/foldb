@@ -66,6 +66,9 @@ pub const SqlRegistry = struct {
     /// Register a SQL string, returning its QueryHash.
     /// Rejects SELECT * in registered queries.
     /// Idempotent: registering the same SQL twice returns the same hash.
+    // This is the SQL frontend domain boundary — raw client SQL enters here and must pass
+    // parse, canonicalization, type-checking, and planning before entering the domain core.
+    // All data past this point is validated; the resulting ExecutionPlan is a pure domain type.
     pub fn register(self: *SqlRegistry, sql: []const u8) RegistryError!QueryHash {
         var arena = std.heap.ArenaAllocator.init(self.alloc);
         const arena_alloc = arena.allocator();

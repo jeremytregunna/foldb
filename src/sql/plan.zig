@@ -447,6 +447,8 @@ pub const Planner = struct {
         };
     }
 
+    // Domain core entry point — caller guarantees the AST has passed TypeChecker.checkStmt.
+    // No input validation here; only domain invariants (TableNotFound, ColumnNotFound) as asserts.
     pub fn planAstStmt(self: *Planner, s: ast.Stmt) PlanError!StmtPlan {
         return switch (s) {
             .select => |q| .{ .select = try self.planSelect(q) },
@@ -950,12 +952,9 @@ pub const Planner = struct {
                 self.nondet_idx += 1;
             },
             .column_ref => |ref| {
-                if (self.resolveColRef(ref)) |pos| {
-                    pe.* = .{ .column = pos };
-                } else {
-                    // CTE ref or subquery col — fall back to name-based lookup
-                    pe.* = .{ .fn_call = .{ .name = ref.column, .args = &.{} } };
-                }
+                // Type-checked AST guarantees all column refs are resolvable.
+                const pos = self.resolveColRef(ref) orelse return error.ColumnNotFound;
+                pe.* = .{ .column = pos };
             },
             .cast => |c| pe.* = .{ .cast = .{
                 .expr = try self.planExpr(c.expr),
@@ -983,12 +982,11 @@ pub const Planner = struct {
                 .right = try self.planExpr(pair.right),
             } },
             .fn_call => |f| {
-                // In post-agg projection context, resolve aggregate fn names to column positions
-                if (f.args.len == 0 or f.star) {
-                    if (self.resolveAggFn(f.name)) |pos| {
-                        pe.* = .{ .column = pos };
-                        return pe;
-                    }
+                // In post-agg projection context, the agg result is already computed —
+                // resolve by name to its output column regardless of arg count.
+                if (self.resolveAggFn(f.name)) |pos| {
+                    pe.* = .{ .column = pos };
+                    return pe;
                 }
                 var args: std.ArrayList(*PlanExpr) = .empty;
                 for (f.args) |a| try args.append(self.arena, try self.planExpr(a));
@@ -998,18 +996,9 @@ pub const Planner = struct {
                 } };
             },
             .window_fn => |w| {
-                // If a window node was inserted upstream, resolve to the computed column
-                if (self.resolveWindowFn(w.call.name)) |pos| {
-                    pe.* = .{ .column = pos };
-                } else {
-                    // No window node in context — fall back to plain fn_call (returns null)
-                    var args: std.ArrayList(*PlanExpr) = .empty;
-                    for (w.call.args) |a| try args.append(self.arena, try self.planExpr(a));
-                    pe.* = .{ .fn_call = .{
-                        .name = w.call.name,
-                        .args = try args.toOwnedSlice(self.arena),
-                    } };
-                }
+                // Window node is pre-inserted by planSelect before any item projection.
+                const pos = self.resolveWindowFn(w.call.name) orelse return error.UnsupportedOperation;
+                pe.* = .{ .column = pos };
             },
             .case_searched => |c| {
                 var whens: std.ArrayList(PlanCaseWhen) = .empty;
