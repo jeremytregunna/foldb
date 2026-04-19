@@ -25,6 +25,18 @@ const L0_COMPACTION_TRIGGER: usize = 4;
 const L2_TIERING_TRIGGER: usize = 4;
 const BLOCK_CACHE_BYTES: usize = 32 * 1024 * 1024; // 32 MiB default
 
+/// Injectable disk fault hook. Production leaves this null. Sim tests set it
+/// to a function backed by DiskSim.shouldFault() to inject failures at flush
+/// and compaction boundaries without importing the sim module from storage.
+pub const DiskFaultHook = struct {
+    ptr: ?*anyopaque = null,
+    fault_fn: *const fn (?*anyopaque) bool,
+
+    pub fn shouldFault(self: DiskFaultHook) bool {
+        return self.fault_fn(self.ptr);
+    }
+};
+
 pub const Level = struct {
     files: std.ArrayList(SSTableMeta),
 
@@ -48,6 +60,7 @@ pub const LSM = struct {
     alloc: std.mem.Allocator,
     object_store: ?ObjectStore,
     cache_dir: ?[]const u8,
+    fault_hook: ?DiskFaultHook = null,
 
     pub fn init(schema: TableSchema, dir: []const u8, alloc: std.mem.Allocator) !LSM {
         try mkdirAll(dir);
@@ -289,6 +302,7 @@ pub const LSM = struct {
     }
 
     pub fn flushMemtable(self: *LSM) !void {
+        if (self.fault_hook) |h| if (h.shouldFault()) return error.DiskFault;
         if (self.memtable.isEmpty()) return;
         const path = try self.nextFilePath(0);
         defer self.alloc.free(path);

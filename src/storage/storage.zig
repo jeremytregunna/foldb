@@ -149,6 +149,8 @@ const IndexEntry = union(enum) {
 
 pub const StorageMetrics = obs.StorageMetrics;
 
+pub const DiskFaultHook = lsm_mod.DiskFaultHook;
+
 pub const Storage = struct {
     tables: std.AutoHashMap(TableId, lsm_mod.LSM),
     indexes: std.AutoHashMap(IndexId, IndexEntry),
@@ -158,6 +160,7 @@ pub const Storage = struct {
     cache_dir: ?[]const u8 = null,
     snapshot_policy: ?SnapshotPolicy = null,
     metrics: obs.StorageMetrics = .{},
+    fault_hook: ?DiskFaultHook = null,
 
     pub fn init(dir: []const u8, alloc: std.mem.Allocator) !Storage {
         mkdirAll(dir);
@@ -194,6 +197,7 @@ pub const Storage = struct {
         const table_dir = try std.fmt.allocPrint(self.alloc, "{s}/t{d}", .{ self.dir, schema.table_id });
         defer self.alloc.free(table_dir);
         var lsm = try lsm_mod.LSM.init(schema, table_dir, self.alloc);
+        lsm.fault_hook = self.fault_hook;
         if (self.object_store) |store| {
             lsm.withObjectStore(store, self.cache_dir orelse table_dir);
         }

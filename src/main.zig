@@ -21,7 +21,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("foldb starting: storage={s} port={d}\n", .{ storage_dir, port });
 
-    const gw = try gateway_mod.Gateway.init(storage_dir, alloc);
+    const gw = try gateway_mod.Gateway.init(storage_dir, alloc, .{});
     defer gw.deinit();
 
     try server.serve(io, port, gw, alloc);

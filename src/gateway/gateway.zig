@@ -43,47 +43,70 @@ pub const GatewayError = error{
     ConstraintViolation,
 };
 
-/// Nondeterminism resolver - computes values for NOW(), RANDOM(), UUID()
-pub const NondetResolver = struct {
-    alloc: std.mem.Allocator,
+/// Injectable clock source. Production uses real clock_gettime; sim substitutes VirtualClock.
+/// now_micros_fn returns unix microseconds as i64.
+pub const ClockSource = struct {
+    ptr: ?*anyopaque = null,
+    now_micros_fn: *const fn (?*anyopaque) i64 = realNowMicros,
 
-    pub fn init(alloc: std.mem.Allocator) NondetResolver {
-        return .{ .alloc = alloc };
+    pub fn now(self: ClockSource) i64 {
+        return self.now_micros_fn(self.ptr);
     }
 
-    pub fn resolveNow(self: NondetResolver) ResolvedValue {
-        _ = self;
+    fn realNowMicros(_: ?*anyopaque) i64 {
         var ts: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
-        const micros: i64 = @as(i64, @intCast(ts.sec)) * 1_000_000 + @as(i64, @intCast(@divTrunc(ts.nsec, 1_000)));
-        return .{ .now = micros };
+        return @as(i64, @intCast(ts.sec)) * 1_000_000 + @as(i64, @intCast(@divTrunc(ts.nsec, 1_000)));
+    }
+};
+
+/// Injectable random source. Production uses clock-seeded PRNG; sim substitutes SimScheduler.
+pub const RandSource = struct {
+    ptr: ?*anyopaque = null,
+    fill_fn: *const fn (?*anyopaque, []u8) void = realFill,
+
+    pub fn fill(self: RandSource, buf: []u8) void {
+        self.fill_fn(self.ptr, buf);
     }
 
-    pub fn resolveRandom(self: NondetResolver) ResolvedValue {
-        _ = self;
+    fn realFill(_: ?*anyopaque, buf: []u8) void {
         var ts: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
         const seed: u64 = @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
         var rand = std.Random.Xoroshiro128.init(seed);
+        rand.fill(buf);
+    }
+};
+
+/// Nondeterminism resolver - computes values for NOW(), RANDOM(), UUID()
+pub const NondetResolver = struct {
+    clock: ClockSource,
+    rand: RandSource,
+
+    pub fn init(clock: ClockSource, rand: RandSource) NondetResolver {
+        return .{ .clock = clock, .rand = rand };
+    }
+
+    pub fn resolveNow(self: NondetResolver) ResolvedValue {
+        return .{ .now = self.clock.now() };
+    }
+
+    pub fn resolveRandom(self: NondetResolver) ResolvedValue {
         var bytes: [16]u8 = undefined;
-        rand.fill(&bytes);
+        self.rand.fill(&bytes);
         return .{ .random = bytes };
     }
 
     pub fn resolveUuidV7(self: NondetResolver) ResolvedValue {
-        _ = self;
-        var ts: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
-        const micros: i64 = @as(i64, @intCast(ts.sec)) * 1_000_000 + @as(i64, @intCast(@divTrunc(ts.nsec, 1_000)));
-
+        const micros = self.clock.now();
         var uuid: [16]u8 = undefined;
         const ms: u64 = @intCast(@divTrunc(micros, 1_000));
         std.mem.writeInt(u64, &uuid[0..8].*, ms, .big);
         uuid[6] = (uuid[6] & 0x0F) | 0x70;
-        var rand = std.Random.DefaultPrng.init(ms);
-        rand.random().bytes(uuid[8..16]);
+        var rand_bytes: [8]u8 = undefined;
+        self.rand.fill(&rand_bytes);
+        @memcpy(uuid[8..16], &rand_bytes);
         uuid[8] = (uuid[8] & 0x3F) | 0x80;
-
         return .{ .uuid_v7 = uuid };
     }
 };
@@ -111,10 +134,17 @@ pub const Gateway = struct {
     error_detail: [256]u8 = undefined,
     error_detail_len: usize = 0,
 
+    pub const Options = struct {
+        clock: ClockSource = .{},
+        rand: RandSource = .{},
+        disk_fault: ?storage_mod.DiskFaultHook = null,
+    };
+
     /// Initialize and heap-allocate a Gateway. Caller owns the pointer; call `deinit` to free.
     pub fn init(
         storage_dir: []const u8,
         alloc: std.mem.Allocator,
+        opts: Options,
     ) !*Gateway {
         const gw = try alloc.create(Gateway);
         errdefer alloc.destroy(gw);
@@ -122,12 +152,13 @@ pub const Gateway = struct {
         gw.alloc = alloc;
         gw.storage_schema_arena = std.heap.ArenaAllocator.init(alloc);
         gw.storage = try storage_mod.Storage.init(storage_dir, alloc);
+        gw.storage.fault_hook = opts.disk_fault;
         errdefer gw.storage.deinit();
 
         gw.schema = sql_mod.SchemaRegistry.init(alloc);
         gw.registry = sql_mod.SqlRegistry.init(alloc, &gw.schema);
         gw.sql_exec = sql_mod.SqlExecutor.init(&gw.storage, &gw.registry, &gw.schema, alloc);
-        gw.nondet_resolver = NondetResolver.init(alloc);
+        gw.nondet_resolver = NondetResolver.init(opts.clock, opts.rand);
 
         const seq_cfg = sequencer_mod.Config{
             .partition_count = 1,

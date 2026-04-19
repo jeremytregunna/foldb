@@ -164,9 +164,9 @@ test "Gateway Replay: INSERT UPDATE DELETE produces byte-equal SSTables" {
         alloc.free(dir_b);
     }
 
-    const gw_a = try Gateway.init(dir_a, alloc);
+    const gw_a = try Gateway.init(dir_a, alloc, .{});
     defer gw_a.deinit();
-    const gw_b = try Gateway.init(dir_b, alloc);
+    const gw_b = try Gateway.init(dir_b, alloc, .{});
     defer gw_b.deinit();
 
     const ddl = "CREATE TABLE accounts (id INT64 NOT NULL, balance INT64 NOT NULL, PRIMARY KEY (id))";
@@ -235,9 +235,9 @@ test "Gateway Replay: multi-table workload produces byte-equal SSTables" {
         alloc.free(dir_b);
     }
 
-    const gw_a = try Gateway.init(dir_a, alloc);
+    const gw_a = try Gateway.init(dir_a, alloc, .{});
     defer gw_a.deinit();
-    const gw_b = try Gateway.init(dir_b, alloc);
+    const gw_b = try Gateway.init(dir_b, alloc, .{});
     defer gw_b.deinit();
 
     const users_ddl = "CREATE TABLE users (id INT64 NOT NULL, score INT64 NOT NULL, PRIMARY KEY (id))";
@@ -316,9 +316,9 @@ test "Gateway Replay: compaction-triggering load produces byte-equal SSTables" {
         alloc.free(dir_b);
     }
 
-    const gw_a = try Gateway.init(dir_a, alloc);
+    const gw_a = try Gateway.init(dir_a, alloc, .{});
     defer gw_a.deinit();
-    const gw_b = try Gateway.init(dir_b, alloc);
+    const gw_b = try Gateway.init(dir_b, alloc, .{});
     defer gw_b.deinit();
 
     const ddl = "CREATE TABLE metrics (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))";

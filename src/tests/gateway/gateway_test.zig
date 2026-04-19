@@ -61,7 +61,7 @@ test "Gateway: init and deinit" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     try testing.expectEqual(@as(Seq, 0), gateway.currentSeq());
@@ -74,7 +74,7 @@ test "Gateway: register simple SELECT" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     const create_sql = "CREATE TABLE users (id INT64 NOT NULL, name STRING NOT NULL, PRIMARY KEY (id))";
@@ -94,7 +94,7 @@ test "Gateway: register is idempotent" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     const create_sql = "CREATE TABLE items (id INT64 NOT NULL, value INT64 NOT NULL, PRIMARY KEY (id))";
@@ -115,7 +115,7 @@ test "Gateway: execute INSERT" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     const create_sql = "CREATE TABLE accounts (id INT64 NOT NULL, balance INT64 NOT NULL, PRIMARY KEY (id))";
@@ -140,7 +140,7 @@ test "Gateway: execute UPDATE" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     const create_sql = "CREATE TABLE accounts (id INT64 NOT NULL, balance INT64 NOT NULL, PRIMARY KEY (id))";
@@ -171,7 +171,7 @@ test "Gateway: execute DELETE" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     const create_sql = "CREATE TABLE accounts (id INT64 NOT NULL, balance INT64 NOT NULL, PRIMARY KEY (id))";
@@ -195,7 +195,7 @@ test "Gateway: execute DELETE" {
 }
 
 test "Gateway: nondet resolver NOW" {
-    const resolver = gateway_mod.NondetResolver.init(testing.allocator);
+    const resolver = gateway_mod.NondetResolver.init(.{}, .{});
 
     const now1 = resolver.resolveNow();
     const now2 = resolver.resolveNow();
@@ -206,7 +206,7 @@ test "Gateway: nondet resolver NOW" {
 }
 
 test "Gateway: nondet resolver RANDOM" {
-    var resolver = gateway_mod.NondetResolver.init(testing.allocator);
+    var resolver = gateway_mod.NondetResolver.init(.{}, .{});
 
     const rand1 = resolver.resolveRandom();
     const rand2 = resolver.resolveRandom();
@@ -218,7 +218,7 @@ test "Gateway: nondet resolver RANDOM" {
 }
 
 test "Gateway: nondet resolver UUIDv7" {
-    const resolver = gateway_mod.NondetResolver.init(testing.allocator);
+    const resolver = gateway_mod.NondetResolver.init(.{}, .{});
 
     const uuid1 = resolver.resolveUuidV7();
     const uuid2 = resolver.resolveUuidV7();
@@ -241,7 +241,7 @@ test "Gateway: flushAll" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     const create_sql = "CREATE TABLE test (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))";
@@ -265,7 +265,7 @@ test "Gateway: query not found returns error" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     var fake_hash: QueryHash = undefined;
@@ -282,7 +282,7 @@ test "Gateway: multiple tables" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     try gateway.applyDdl("CREATE TABLE users (id INT64 NOT NULL, name STRING NOT NULL, PRIMARY KEY (id))");
@@ -313,7 +313,7 @@ test "Gateway: querySelect returns inserted rows" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     try gateway.applyDdl("CREATE TABLE accounts (id INT64 NOT NULL, balance INT64 NOT NULL, PRIMARY KEY (id))");
@@ -353,7 +353,7 @@ test "Gateway: readAt returns data at correct seq" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     try gateway.applyDdl("CREATE TABLE log (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
@@ -385,7 +385,7 @@ test "Gateway: querySelect with WHERE param returns matching row only" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
@@ -412,7 +412,7 @@ test "Gateway: querySelect on empty table returns zero rows" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     try gateway.applyDdl("CREATE TABLE empty_tbl (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
@@ -431,7 +431,7 @@ test "Gateway: DELETE makes row invisible in subsequent SELECT" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
@@ -458,7 +458,7 @@ test "Gateway: UPDATE value is visible in subsequent SELECT" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
@@ -484,7 +484,7 @@ test "Gateway: UPDATE with no matching rows returns rows_affected zero" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
@@ -501,7 +501,7 @@ test "Gateway: DELETE with no matching rows returns rows_affected zero" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
@@ -518,7 +518,7 @@ test "Gateway: currentSeq advances with each execute" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     try testing.expectEqual(@as(Seq, 0), gateway.currentSeq());
@@ -544,7 +544,7 @@ test "Gateway: readAt intermediate state shows partial history" {
         testing.allocator.free(temp_path);
     }
 
-    const gateway = try Gateway.init(temp_path, testing.allocator);
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
     defer gateway.deinit();
 
     try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
