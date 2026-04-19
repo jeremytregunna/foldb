@@ -20,6 +20,7 @@ pub const EpochDecision = types_mod.EpochDecision;
 pub const OrderingEntry = types_mod.OrderingEntry;
 pub const SubmitResult = types_mod.SubmitResult;
 pub const SubmitHandle = types_mod.SubmitHandle;
+pub const ValidatedSubmit = types_mod.ValidatedSubmit;
 pub const IdempotencyCache = idempotency_mod.IdempotencyCache;
 pub const EpochBatcher = epoch_mod.EpochBatcher;
 
@@ -159,8 +160,10 @@ pub const Sequencer = struct {
         return &self.partition_logs[partition];
     }
 
-    /// Submit a pre-serialized TxnIntent payload for sequencing.
-    /// Infallible — errors surface when the caller calls awaitCommit() on the returned handle.
+    /// Domain boundary — accepts raw gateway input and wraps it in a ValidatedSubmit
+    /// before handing off to the sequencer core. The intent_payload is opaque here;
+    /// TxnIntent structural validation happened at the gateway before this call.
+    /// Infallible — errors surface when the caller calls awaitCommit() on the handle.
     /// Idempotent on (client_id, client_seq_num).
     pub fn submitBytes(
         self: *Sequencer,
@@ -169,20 +172,27 @@ pub const Sequencer = struct {
         client_id: u64,
         client_seq_num: u64,
     ) SubmitHandle {
-        return .{ .future = io.async(doCommit, .{ self, intent_payload, client_id, client_seq_num }) };
+        // This is the domain boundary — external gateway data enters the sequencer here.
+        const validated = ValidatedSubmit{
+            .client_id = client_id,
+            .client_seq = client_seq_num,
+            .intent_payload = intent_payload,
+        };
+        return .{ .future = io.async(doCommit, .{ self, validated }) };
     }
 };
 
 /// Free function passed to io.async — contains all durable commit work.
+/// Receives a ValidatedSubmit: all external data validation happened at the boundary
+/// (submitBytes). This function is pure domain logic: idempotency, batching, seq
+/// assignment, Raft replication of ordering decisions, and data log writes.
 /// For M7 single-node io.async executes this synchronously; future milestones block here on
 /// multi-node Raft round-trips.
-fn doCommit(
-    sequencer: *Sequencer,
-    intent_payload: []const u8,
-    client_id: u64,
-    client_seq_num: u64,
-) anyerror!SubmitResult {
+fn doCommit(sequencer: *Sequencer, submit: ValidatedSubmit) anyerror!SubmitResult {
     sequencer.metrics.intents_submitted.inc();
+
+    const client_id = submit.client_id;
+    const client_seq_num = submit.client_seq;
 
     // Idempotency fast path
     if (sequencer.idempotency.lookup(client_id, client_seq_num)) |existing_seq| {
@@ -240,10 +250,12 @@ fn doCommit(
         }
     }
 
-    // Append TxnIntent to assigned partition log at global seq
+    // Sequencer→data-log boundary: write the opaque intent payload at the assigned
+    // global seq. Raft replicated only the ordering decision above; the intent bytes
+    // are written here directly to the data partition log.
     const entry = decision.entries[0]; // single-entry epoch
     const partition_log = &sequencer.partition_logs[entry.partition];
-    const log_entry = LogEntry.create(entry.seq, 0, .txn_intent, intent_payload);
+    const log_entry = LogEntry.create(entry.seq, 0, .txn_intent, submit.intent_payload);
     try partition_log.appendEntryAt(log_entry);
 
     try sequencer.idempotency.record(client_id, client_seq_num, entry.seq);

@@ -21,6 +21,15 @@ pub const EpochDecision = struct {
     entries: []const OrderingEntry,
 };
 
+/// A gateway-submitted TxnIntent that has crossed the sequencer's input boundary.
+/// The intent_payload is opaque to the sequencer — its content was validated by the
+/// gateway before submission. The sequencer treats it as an ordered, opaque blob.
+pub const ValidatedSubmit = struct {
+    client_id: u64,
+    client_seq: u64,
+    intent_payload: []const u8,
+};
+
 /// Committed position of a submitted intent.
 pub const SubmitResult = struct {
     seq: Seq,
@@ -81,6 +90,9 @@ pub fn serializeEpochDecision(
     }
 }
 
+/// Domain boundary — deserializes Raft-replicated ordering decision bytes into a
+/// proven-valid EpochDecision. Called when applying committed Raft entries; validates
+/// structure and length before the sequencer core acts on the decision.
 pub fn deserializeEpochDecision(payload: []const u8, alloc: std.mem.Allocator) !EpochDecision {
     if (payload.len < 12) return error.InvalidPayload;
 
