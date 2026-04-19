@@ -46,9 +46,7 @@ test "json index insert and lookup" {
         .id = 100,
         .table_id = 1,
         .column_idx = 0,
-        .kind = .json_path,
-        .json_paths = paths,
-        .vector_dim = 0,
+        .spec = .{ .json_path = paths },
     });
 
     // Insert a row
@@ -95,9 +93,7 @@ test "json index delete removes entry" {
         .id = 101,
         .table_id = 1,
         .column_idx = 0,
-        .kind = .json_path,
-        .json_paths = paths,
-        .vector_dim = 0,
+        .spec = .{ .json_path = paths },
     });
 
     const json: []const u8 = "{\"status\": \"active\"}";
@@ -148,9 +144,7 @@ test "json index lookup survives memtable flush to SSTable" {
         .id = 102,
         .table_id = 1,
         .column_idx = 0,
-        .kind = .json_path,
-        .json_paths = paths,
-        .vector_dim = 0,
+        .spec = .{ .json_path = paths },
     });
 
     const json: []const u8 = "{\"tag\": \"urgent\"}";
@@ -192,9 +186,7 @@ test "json index delete removes entry after flush" {
         .id = 103,
         .table_id = 1,
         .column_idx = 0,
-        .kind = .json_path,
-        .json_paths = paths,
-        .vector_dim = 0,
+        .spec = .{ .json_path = paths },
     });
 
     const json: []const u8 = "{\"color\": \"red\"}";

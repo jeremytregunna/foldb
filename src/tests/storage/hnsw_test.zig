@@ -48,9 +48,7 @@ test "hnsw insert and exact search" {
         .id = 200,
         .table_id = 1,
         .column_idx = 0,
-        .kind = .vector,
-        .json_paths = &.{},
-        .vector_dim = 4,
+        .spec = .{ .vector = 4 },
     });
 
     // Insert three 4-d vectors
@@ -100,9 +98,7 @@ test "hnsw delete excludes tombstoned vectors" {
         .id = 201,
         .table_id = 1,
         .column_idx = 0,
-        .kind = .vector,
-        .json_paths = &.{},
-        .vector_dim = 2,
+        .spec = .{ .vector = 2 },
     });
 
     const va: []const f32 = &.{ 1.0, 0.0 };
@@ -142,7 +138,7 @@ test "hnsw at_seq hides insertions newer than query seq" {
     defer stor.deinit();
 
     try stor.registerTable(.{ .table_id = 1, .columns = &.{.{ .col_type = .bytes, .nullable = false }} });
-    try stor.registerIndex(.{ .id = 203, .table_id = 1, .column_idx = 0, .kind = .vector, .json_paths = &.{}, .vector_dim = 2 });
+    try stor.registerIndex(.{ .id = 203, .table_id = 1, .column_idx = 0, .spec = .{ .vector = 2 } });
 
     const v: []const f32 = &.{ 1.0, 0.0 };
     const bv = try encodeVec(v, alloc);
@@ -170,7 +166,7 @@ test "hnsw at_seq sees insertion at or before query seq" {
     defer stor.deinit();
 
     try stor.registerTable(.{ .table_id = 1, .columns = &.{.{ .col_type = .bytes, .nullable = false }} });
-    try stor.registerIndex(.{ .id = 204, .table_id = 1, .column_idx = 0, .kind = .vector, .json_paths = &.{}, .vector_dim = 2 });
+    try stor.registerIndex(.{ .id = 204, .table_id = 1, .column_idx = 0, .spec = .{ .vector = 2 } });
 
     const v: []const f32 = &.{ 1.0, 0.0 };
     const bv = try encodeVec(v, alloc);
@@ -199,7 +195,7 @@ test "hnsw pruneDeleted preserves correct search results" {
     defer stor.deinit();
 
     try stor.registerTable(.{ .table_id = 1, .columns = &.{.{ .col_type = .bytes, .nullable = false }} });
-    try stor.registerIndex(.{ .id = 205, .table_id = 1, .column_idx = 0, .kind = .vector, .json_paths = &.{}, .vector_dim = 3 });
+    try stor.registerIndex(.{ .id = 205, .table_id = 1, .column_idx = 0, .spec = .{ .vector = 3 } });
 
     const va: []const f32 = &.{ 1.0, 0.0, 0.0 };
     const vb: []const f32 = &.{ 0.0, 1.0, 0.0 };
@@ -242,7 +238,7 @@ test "hnsw search empty index returns empty" {
     defer stor.deinit();
 
     try stor.registerTable(.{ .table_id = 1, .columns = &.{.{ .col_type = .bytes, .nullable = false }} });
-    try stor.registerIndex(.{ .id = 202, .table_id = 1, .column_idx = 0, .kind = .vector, .json_paths = &.{}, .vector_dim = 3 });
+    try stor.registerIndex(.{ .id = 202, .table_id = 1, .column_idx = 0, .spec = .{ .vector = 3 } });
 
     const query: []const f32 = &.{ 1.0, 0.0, 0.0 };
     const matches = try stor.vectorSearch(202, query, 5, 4, alloc);

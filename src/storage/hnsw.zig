@@ -65,8 +65,9 @@ pub const HnswIndex = struct {
     }
 
     /// Insert a vector associated with primary key pk at the given seq.
+    /// Caller must ensure vec.len == self.dim (validated at the storage boundary).
     pub fn insert(self: *HnswIndex, vec: []const f32, pk: []const u8, seq: Seq) !void {
-        if (vec.len != self.dim) return error.DimensionMismatch;
+        std.debug.assert(vec.len == self.dim);
 
         const node_id: u32 = @intCast(self.nodes.items.len);
         const ml: f64 = 1.0 / @log(@as(f64, @floatFromInt(self.M)));
@@ -383,4 +384,4 @@ fn candidateLessThan(_: void, a: Candidate, b: Candidate) bool {
     return a.dist < b.dist;
 }
 
-pub const HnswError = error{ DimensionMismatch, OutOfMemory };
+pub const HnswError = error{OutOfMemory};

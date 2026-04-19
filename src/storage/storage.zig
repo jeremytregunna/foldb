@@ -53,16 +53,19 @@ pub const IndexId = u32;
 pub const PkList = json_index_mod.PkList;
 pub const Match = hnsw_mod.Match;
 
-pub const IndexKind = enum { json_path, vector };
+/// Typed index specification — one variant per index kind, carrying only the fields that apply.
+pub const IndexSpec = union(enum) {
+    json_path: []const []const u8, // declared extraction paths
+    vector: u32,                   // vector dimension
+};
 
 /// Descriptor passed from gateway to storage when registering a specialty index.
+/// All fields are fully validated by the gateway before this type is constructed.
 pub const IndexDesc = struct {
     id: IndexId,
     table_id: TableId,
     column_idx: u32,
-    kind: IndexKind,
-    json_paths: []const []const u8,
-    vector_dim: u32,
+    spec: IndexSpec,
 };
 
 // Codec
@@ -188,27 +191,28 @@ pub const Storage = struct {
     }
 
     /// Register a specialty index (JSON path or vector). Backfills from existing rows.
+    /// Domain boundary — desc is fully validated by the gateway; all fields are trusted here.
     pub fn registerIndex(self: *Storage, desc: IndexDesc) !void {
         if (self.indexes.contains(desc.id)) return;
 
         const idx_dir = try std.fmt.allocPrint(self.alloc, "{s}/idx{d}", .{ self.dir, desc.id });
         defer self.alloc.free(idx_dir);
 
-        const entry: IndexEntry = switch (desc.kind) {
-            .json_path => blk: {
+        const entry: IndexEntry = switch (desc.spec) {
+            .json_path => |paths| blk: {
                 const idx = try json_index_mod.JsonPathIndex.init(
                     desc.id,
                     desc.table_id,
                     desc.column_idx,
-                    desc.json_paths,
+                    paths,
                     idx_dir,
                     self.alloc,
                 );
                 break :blk .{ .json = idx };
             },
-            .vector => blk: {
+            .vector => |dim| blk: {
                 const idx = hnsw_mod.HnswIndex.init(
-                    desc.vector_dim,
+                    dim,
                     desc.table_id,
                     desc.column_idx,
                     self.alloc,
@@ -232,7 +236,7 @@ pub const Storage = struct {
             self.alloc.free(rows);
         }
         for (rows) |row| {
-            try maintainEntry(entry, row.key, row.values, null, row.seq, self.alloc);
+            try maintainEntry(entry, row.key, .{ .insert = row.values }, row.seq, self.alloc);
         }
     }
 
@@ -306,9 +310,17 @@ pub const Storage = struct {
                     const entry = kv.value_ptr;
                     if (entry.tableId() != m.table_id) continue;
                     const old_row: ?Row = if (pre_images.len > i) pre_images[i] else null;
-                    const old_vals: ?[]const ColumnValue = if (old_row) |r| r.values else null;
-                    const new_vals: ?[]const ColumnValue = m.values;
-                    try maintainEntry(entry, m.key, new_vals, old_vals, at_seq, self.alloc);
+                    // Domain boundary — op is derived from the validated mutation kind;
+                    // each variant carries exactly the values that exist for that operation.
+                    const op: IndexOp = switch (m.kind) {
+                        .insert => .{ .insert = m.values.? },
+                        .delete => .{ .delete = if (old_row) |r| r.values else &.{} },
+                        .update => .{ .update = .{
+                            .old = if (old_row) |r| r.values else &.{},
+                            .new = m.values.?,
+                        } },
+                    };
+                    try maintainEntry(entry, m.key, op, at_seq, self.alloc);
                 }
             }
         }
@@ -417,47 +429,72 @@ pub const Storage = struct {
     }
 };
 
+/// Typed index maintenance operation — each variant carries exactly the values it needs.
+const IndexOp = union(enum) {
+    insert: []const ColumnValue,
+    delete: []const ColumnValue, // pre-image values
+    update: struct { old: []const ColumnValue, new: []const ColumnValue },
+};
+
 /// Dispatch index maintenance for a single row mutation.
+/// All inputs are fully validated; no optional value chains inside this function.
 fn maintainEntry(
     entry: *IndexEntry,
     row_key: []const u8,
-    new_vals: ?[]const ColumnValue,
-    old_vals: ?[]const ColumnValue,
+    op: IndexOp,
     at_seq: Seq,
     alloc: std.mem.Allocator,
 ) !void {
     switch (entry.*) {
-        .json => |*jidx| {
-            const new_json = jsonBytes(new_vals, jidx.column_idx);
-            const old_json = jsonBytes(old_vals, jidx.column_idx);
-            try jidx.maintain(row_key, new_json, old_json, at_seq);
+        .json => |*jidx| switch (op) {
+            .insert => |new_vals| {
+                const new_json = jsonBytes(new_vals, jidx.column_idx) orelse return;
+                try jidx.maintainInsert(row_key, new_json, at_seq);
+            },
+            .delete => |old_vals| {
+                const old_json = jsonBytes(old_vals, jidx.column_idx) orelse return;
+                try jidx.maintainDelete(row_key, old_json, at_seq);
+            },
+            .update => |upd| {
+                const new_json = jsonBytes(upd.new, jidx.column_idx) orelse return;
+                const old_json = jsonBytes(upd.old, jidx.column_idx) orelse return;
+                try jidx.maintainUpdate(row_key, new_json, old_json, at_seq);
+            },
         },
-        .vector => |*vidx| {
-            // Remove old vector if present
-            if (old_vals != null) {
+        .vector => |*vidx| switch (op) {
+            .insert => |new_vals| {
+                if (vidx.column_idx >= new_vals.len) return;
+                const raw = switch (new_vals[vidx.column_idx]) {
+                    .bytes => |b| b,
+                    .string => |s| s,
+                    else => return,
+                };
+                const vec = try vector_codec.decode(raw, alloc);
+                defer alloc.free(vec);
+                std.debug.assert(vec.len == vidx.dim);
+                try vidx.insert(vec, row_key, at_seq);
+            },
+            .delete => _ = vidx.markDeleted(row_key),
+            .update => |upd| {
                 _ = vidx.markDeleted(row_key);
-            }
-            // Insert new vector if present
-            if (new_vals) |nv| {
-                if (vidx.column_idx < nv.len) {
-                    const raw = switch (nv[vidx.column_idx]) {
-                        .bytes => |b| b,
-                        .string => |s| s,
-                        else => return,
-                    };
-                    const vec = try vector_codec.decode(raw, alloc);
-                    defer alloc.free(vec);
-                    try vidx.insert(vec, row_key, at_seq);
-                }
-            }
+                if (vidx.column_idx >= upd.new.len) return;
+                const raw = switch (upd.new[vidx.column_idx]) {
+                    .bytes => |b| b,
+                    .string => |s| s,
+                    else => return,
+                };
+                const vec = try vector_codec.decode(raw, alloc);
+                defer alloc.free(vec);
+                std.debug.assert(vec.len == vidx.dim);
+                try vidx.insert(vec, row_key, at_seq);
+            },
         },
     }
 }
 
-fn jsonBytes(vals: ?[]const ColumnValue, col_idx: u32) ?[]const u8 {
-    const v = vals orelse return null;
-    if (col_idx >= v.len) return null;
-    return switch (v[col_idx]) {
+fn jsonBytes(vals: []const ColumnValue, col_idx: u32) ?[]const u8 {
+    if (col_idx >= vals.len) return null;
+    return switch (vals[col_idx]) {
         .bytes => |b| b,
         .string => |s| s,
         else => null,

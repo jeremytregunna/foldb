@@ -64,53 +64,38 @@ pub const JsonPathIndex = struct {
         self.alloc.free(self.paths);
     }
 
-    /// Update the index for a single row change.
-    /// new_json: the new JSON value (null means row was deleted).
-    /// old_json: the previous JSON value (null means row was inserted).
-    pub fn maintain(
-        self: *JsonPathIndex,
-        row_key: []const u8,
-        new_json: ?[]const u8,
-        old_json: ?[]const u8,
-        at_seq: Seq,
-    ) !void {
-        // Remove old index entries
-        if (old_json) |oj| {
-            for (self.paths) |path| {
-                const raw = (try json_path_mod.extract(oj, path, self.alloc)) orelse continue;
-                defer self.alloc.free(raw);
-                const norm = try json_path_mod.normalizeValue(raw, self.alloc);
-                defer self.alloc.free(norm);
-                const idx_key = try encodeKey(path, norm, row_key, self.alloc);
-                defer self.alloc.free(idx_key);
-                const m = Mutation{
-                    .kind = .delete,
-                    .table_id = self.lsm.schema.table_id,
-                    .key = idx_key,
-                    .values = null,
-                };
-                try self.lsm.apply(&.{m}, at_seq);
-            }
+    /// Index a newly inserted row. json must be the row's JSON column bytes.
+    pub fn maintainInsert(self: *JsonPathIndex, row_key: []const u8, json: []const u8, at_seq: Seq) !void {
+        for (self.paths) |path| {
+            const raw = (try json_path_mod.extract(json, path, self.alloc)) orelse continue;
+            defer self.alloc.free(raw);
+            const norm = try json_path_mod.normalizeValue(raw, self.alloc);
+            defer self.alloc.free(norm);
+            const idx_key = try encodeKey(path, norm, row_key, self.alloc);
+            defer self.alloc.free(idx_key);
+            const m = Mutation{ .kind = .insert, .table_id = self.lsm.schema.table_id, .key = idx_key, .values = &.{} };
+            try self.lsm.apply(&.{m}, at_seq);
         }
+    }
 
-        // Insert new index entries
-        if (new_json) |nj| {
-            for (self.paths) |path| {
-                const raw = (try json_path_mod.extract(nj, path, self.alloc)) orelse continue;
-                defer self.alloc.free(raw);
-                const norm = try json_path_mod.normalizeValue(raw, self.alloc);
-                defer self.alloc.free(norm);
-                const idx_key = try encodeKey(path, norm, row_key, self.alloc);
-                defer self.alloc.free(idx_key);
-                const m = Mutation{
-                    .kind = .insert,
-                    .table_id = self.lsm.schema.table_id,
-                    .key = idx_key,
-                    .values = &.{},
-                };
-                try self.lsm.apply(&.{m}, at_seq);
-            }
+    /// Remove index entries for a deleted row. json must be the row's previous JSON column bytes.
+    pub fn maintainDelete(self: *JsonPathIndex, row_key: []const u8, json: []const u8, at_seq: Seq) !void {
+        for (self.paths) |path| {
+            const raw = (try json_path_mod.extract(json, path, self.alloc)) orelse continue;
+            defer self.alloc.free(raw);
+            const norm = try json_path_mod.normalizeValue(raw, self.alloc);
+            defer self.alloc.free(norm);
+            const idx_key = try encodeKey(path, norm, row_key, self.alloc);
+            defer self.alloc.free(idx_key);
+            const m = Mutation{ .kind = .delete, .table_id = self.lsm.schema.table_id, .key = idx_key, .values = null };
+            try self.lsm.apply(&.{m}, at_seq);
         }
+    }
+
+    /// Update index entries for a modified row.
+    pub fn maintainUpdate(self: *JsonPathIndex, row_key: []const u8, new_json: []const u8, old_json: []const u8, at_seq: Seq) !void {
+        try self.maintainDelete(row_key, old_json, at_seq);
+        try self.maintainInsert(row_key, new_json, at_seq);
     }
 
     /// Return primary keys where path equals value, as of at_seq.
