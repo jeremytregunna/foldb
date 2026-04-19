@@ -14,6 +14,7 @@ pub const vector_codec = @import("vector_codec.zig");
 pub const json_path = @import("json_path.zig");
 
 pub const SnapshotLogWriter = snapshot_mod.SnapshotLogWriter;
+pub const noop_snapshot_log_writer = snapshot_mod.noop_snapshot_log_writer;
 
 /// Called after each successful snapshot with the snapshot seq.
 /// Allows callers to trigger log truncation and idempotency cache eviction.
@@ -26,13 +27,22 @@ pub const PostSnapshotHook = struct {
     }
 };
 
+// This is the domain boundary — SnapshotPolicy fields are all non-optional.
+// Callers that do not need a log writer or post-snapshot callback use the
+// no-op defaults below; the core calls them unconditionally.
+fn noopPostSnapshotImpl(_: *anyopaque, _: Seq) void {}
+pub const noop_post_snapshot_hook = PostSnapshotHook{
+    .ptr = undefined,
+    .hookFn = &noopPostSnapshotImpl,
+};
+
 pub const SnapshotPolicy = struct {
     interval: u64,
     counter: u64 = 0,
     store: object_store_mod.ObjectStore,
-    log_writer: ?snapshot_mod.SnapshotLogWriter = null,
+    log_writer: snapshot_mod.SnapshotLogWriter = snapshot_mod.noop_snapshot_log_writer,
     partition_id: u32 = 0,
-    post_snapshot: ?PostSnapshotHook = null,
+    post_snapshot: PostSnapshotHook = noop_post_snapshot_hook,
 };
 
 // Core types
@@ -342,7 +352,7 @@ pub const Storage = struct {
                     manifest.deinit();
                 }
                 self.metrics.snapshots_taken.inc();
-                if (policy.post_snapshot) |hook| hook.call(at_seq);
+                policy.post_snapshot.call(at_seq);
             }
         }
     }

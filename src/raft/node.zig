@@ -33,6 +33,15 @@ const Message = rpc.Message;
 pub const ConfigChangeOp = log_mod.ConfigChangeOp;
 pub const ConfigChange = log_mod.ConfigChange;
 
+/// Carries all fields of an in-progress config change as a single unit.
+/// Replaces the three separate pending_config_* fields to enforce the invariant
+/// that op and peer_id are always present whenever a pending config exists.
+const PendingConfigChange = struct {
+    seq: Seq,
+    op: ConfigChangeOp,
+    peer_id: NodeId,
+};
+
 /// Effects the caller must process after each state machine step.
 pub const Output = union(enum) {
     /// Send a message to a peer node.
@@ -93,10 +102,9 @@ pub const RaftNode = struct {
     heartbeat_ticks: u32,
     prng: std.Random.Xoroshiro128,
     metrics: obs.RaftMetrics = .{},
-    /// Seq of the pending config_change entry (0 = none in progress).
-    pending_config_seq: Seq = 0,
-    pending_config_op: ?ConfigChangeOp = null,
-    pending_config_peer: NodeId = 0,
+    /// In-progress config change, set when a config_change entry is appended and
+    /// cleared when it commits or when the node steps down. Null means none pending.
+    pending_config: ?PendingConfigChange = null,
     /// During joint consensus (leader only): peer IDs in the new config (heap-owned).
     joint_config_peer_ids: ?[]NodeId = null,
     /// During joint consensus (leader only): PeerState for genuinely new nodes (heap-owned).
@@ -202,7 +210,7 @@ pub const RaftNode = struct {
         out: *std.ArrayList(Output),
     ) !?Seq {
         if (self.role != .leader) return null;
-        if (self.pending_config_seq != 0) return null;
+        if (self.pending_config != null) return null;
 
         // Build new peer ID list and PeerState for genuinely new nodes.
         const head = try log.head();
@@ -241,9 +249,7 @@ pub const RaftNode = struct {
         const entry = LogEntry.create(seq, self.current_term, .config_change, &cc_payload);
         try log.appendEntry(entry);
 
-        self.pending_config_seq = seq;
-        self.pending_config_op = op;
-        self.pending_config_peer = peer_id;
+        self.pending_config = .{ .seq = seq, .op = op, .peer_id = peer_id };
 
         try self.broadcastAppendEntries(log, out);
         return seq;
@@ -315,20 +321,17 @@ pub const RaftNode = struct {
                 if (our_term == entry.header.epoch) continue; // already have it
                 // Conflict: truncate and clear any pending config change at or after this seq.
                 try log.truncateSuffix(entry.header.seq);
-                if (self.pending_config_seq > 0 and self.pending_config_seq >= entry.header.seq) {
-                    self.pending_config_seq = 0;
-                    self.pending_config_op = null;
-                    self.pending_config_peer = 0;
+                if (self.pending_config) |pc| {
+                    if (pc.seq >= entry.header.seq) self.pending_config = null;
                 }
             }
             try log.appendEntry(entry);
             replicated += 1;
-            // Domain boundary — decode config_change payload from the replication stream.
-            if (entry.header.kind == .config_change and self.pending_config_seq == 0) {
+            // Domain boundary — decode config_change payload from the replication stream;
+            // only a fully-parsed PendingConfigChange crosses into domain state.
+            if (entry.header.kind == .config_change and self.pending_config == null) {
                 const cc = try ConfigChange.deserialize(entry.payload);
-                self.pending_config_seq = entry.header.seq;
-                self.pending_config_op = cc.op;
-                self.pending_config_peer = cc.node_id;
+                self.pending_config = .{ .seq = entry.header.seq, .op = cc.op, .peer_id = cc.node_id };
             }
         }
         if (replicated > 0) self.metrics.entries_replicated.add(replicated);
@@ -460,9 +463,7 @@ pub const RaftNode = struct {
         self.metrics.elections_started.inc();
         self.metrics.current_term.set(@intCast(self.current_term));
         // Abandon any in-progress config change — the new leader must re-propose it.
-        self.pending_config_seq = 0;
-        self.pending_config_op = null;
-        self.pending_config_peer = 0;
+        self.pending_config = null;
         if (self.joint_config_peer_ids) |ids| {
             self.allocator.free(ids);
             self.joint_config_peer_ids = null;
@@ -595,23 +596,19 @@ pub const RaftNode = struct {
 
     /// If a pending config change has now committed, emit apply_config and update peer list.
     fn maybeApplyConfig(self: *RaftNode, out: *std.ArrayList(Output)) !void {
-        if (self.pending_config_seq == 0) return;
-        if (self.commit_index < self.pending_config_seq) return;
-
-        const op = self.pending_config_op.?;
-        const peer_id = self.pending_config_peer;
+        // This is the domain boundary — all data past this point is validated.
+        const pc = self.pending_config orelse return;
+        if (self.commit_index < pc.seq) return;
 
         try out.append(self.allocator, .{ .apply_config = .{
-            .seq = self.pending_config_seq,
-            .op = op,
-            .peer_id = peer_id,
+            .seq = pc.seq,
+            .op = pc.op,
+            .peer_id = pc.peer_id,
         } });
 
-        try self.applyConfigChangeInternal(op, peer_id);
+        try self.applyConfigChangeInternal(pc.op, pc.peer_id);
 
-        self.pending_config_seq = 0;
-        self.pending_config_op = null;
-        self.pending_config_peer = 0;
+        self.pending_config = null;
     }
 
     /// Update peer list to reflect committed config change.

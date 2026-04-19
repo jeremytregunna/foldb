@@ -164,7 +164,7 @@ test "snapshot_round_trip" {
     }
 
     const at_seq: u64 = seq - 1;
-    var manifest = try storage.takeSnapshot(&lsm, at_seq, 1, obj_store.objectStore(), null, alloc);
+    var manifest = try storage.takeSnapshot(&lsm, at_seq, 1, obj_store.objectStore(), storage.noop_snapshot_log_writer, alloc);
     defer manifest.deinit();
 
     try testing.expect(manifest.seq == at_seq);

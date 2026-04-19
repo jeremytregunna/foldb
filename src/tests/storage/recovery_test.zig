@@ -205,7 +205,7 @@ test "recovery: snapshot + log replay" {
     try src_lsm.flushMemtable();
 
     const snap_seq: u64 = pre_snap_keys.len;
-    var manifest = try storage_mod.takeSnapshot(&src_lsm, snap_seq, 0, obj_store.objectStore(), null, alloc);
+    var manifest = try storage_mod.takeSnapshot(&src_lsm, snap_seq, 0, obj_store.objectStore(), storage_mod.noop_snapshot_log_writer, alloc);
     defer manifest.deinit();
 
     // Build a log with entries after the snapshot

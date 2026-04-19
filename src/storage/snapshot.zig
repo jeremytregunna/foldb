@@ -21,6 +21,14 @@ pub const SnapshotLogWriter = struct {
     }
 };
 
+// This is the domain boundary — callers that do not need log write-back pass
+// noop_snapshot_log_writer instead of null. The core always calls write unconditionally.
+fn noopSnapshotWriteImpl(_: *anyopaque, _: []const u8, _: u64, _: u32, _: std.mem.Allocator) anyerror!void {}
+pub const noop_snapshot_log_writer = SnapshotLogWriter{
+    .ptr = undefined,
+    .writeFn = &noopSnapshotWriteImpl,
+};
+
 const MANIFEST_MAGIC: [4]u8 = .{ 'F', 'S', 'N', 'P' };
 const MANIFEST_VERSION: u32 = 1;
 
@@ -113,12 +121,14 @@ pub fn manifestFromBytes(data: []const u8, manifest_key: []const u8, alloc: std.
     };
 }
 
+// This is the domain boundary — all inputs to takeSnapshot are validated and
+// fully resolved before entry; log_writer is never null (use noop_snapshot_log_writer).
 pub fn takeSnapshot(
     lsm: *LSM,
     at_seq: u64,
     partition_id: u32,
     store: ObjectStore,
-    log_writer: ?SnapshotLogWriter,
+    log_writer: SnapshotLogWriter,
     alloc: std.mem.Allocator,
 ) !SnapshotManifest {
     // Flush memtable first
@@ -170,9 +180,7 @@ pub fn takeSnapshot(
 
     try store.put(manifest_key, manifest_bytes);
 
-    if (log_writer) |lw| {
-        try lw.write(manifest.manifest_key, at_seq, partition_id, alloc);
-    }
+    try log_writer.write(manifest.manifest_key, at_seq, partition_id, alloc);
 
     return manifest;
 }

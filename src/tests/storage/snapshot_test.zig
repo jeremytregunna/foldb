@@ -145,7 +145,7 @@ test "take_and_restore" {
     try lsm.flushMemtable();
 
     const at_seq = seq - 1;
-    var manifest = try storage.takeSnapshot(&lsm, at_seq, 0, obj_store.objectStore(), null, alloc);
+    var manifest = try storage.takeSnapshot(&lsm, at_seq, 0, obj_store.objectStore(), storage.noop_snapshot_log_writer, alloc);
     defer manifest.deinit();
 
     try testing.expect(manifest.sstable_keys.len > 0);
