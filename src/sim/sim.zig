@@ -8,6 +8,7 @@ pub const NetworkSim = @import("network.zig").NetworkSim;
 pub const NetworkConfig = @import("network.zig").NetworkConfig;
 pub const DiskSim = @import("disk.zig").DiskSim;
 pub const DiskConfig = @import("disk.zig").DiskConfig;
+pub const workload = @import("workload.zig");
 
 /// Called at comptime to verify the sim harness exposes the required interface.
 /// Same-seed determinism relies on VirtualClock and SimScheduler being the sole

@@ -647,6 +647,45 @@ pub fn build(b: *std.Build) void {
     gateway_module.addImport("cdc.zig", cdc_module);
     gateway_module.addImport("errors.zig", errors_module);
 
+    // Sim determinism property test
+    const sim_determinism_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sim/determinism_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sim_determinism_test_module.addImport("sim.zig", sim_module);
+    sim_determinism_test_module.addImport("gateway.zig", gateway_module);
+    sim_determinism_test_module.addImport("storage.zig", storage_module);
+    sim_determinism_test_module.addImport("sequencer.zig", sequencer_module);
+    const sim_determinism_tests = b.addTest(.{ .root_module = sim_determinism_test_module });
+    const run_sim_determinism_tests = b.addRunArtifact(sim_determinism_tests);
+
+    // Sim recovery property test
+    const sim_recovery_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sim/recovery_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sim_recovery_test_module.addImport("sim.zig", sim_module);
+    sim_recovery_test_module.addImport("gateway.zig", gateway_module);
+    sim_recovery_test_module.addImport("storage.zig", storage_module);
+    sim_recovery_test_module.addImport("sequencer.zig", sequencer_module);
+    const sim_recovery_tests = b.addTest(.{ .root_module = sim_recovery_test_module });
+    const run_sim_recovery_tests = b.addRunArtifact(sim_recovery_tests);
+
+    // Sim disk fault recovery test
+    const sim_disk_fault_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sim/disk_fault_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sim_disk_fault_test_module.addImport("sim.zig", sim_module);
+    sim_disk_fault_test_module.addImport("gateway.zig", gateway_module);
+    sim_disk_fault_test_module.addImport("storage.zig", storage_module);
+    sim_disk_fault_test_module.addImport("sequencer.zig", sequencer_module);
+    const sim_disk_fault_tests = b.addTest(.{ .root_module = sim_disk_fault_test_module });
+    const run_sim_disk_fault_tests = b.addRunArtifact(sim_disk_fault_tests);
+
     // Net sub-modules (wire protocol layer)
     const net_frame_module = b.createModule(.{
         .root_source_file = b.path("src/net/frame.zig"),
@@ -883,7 +922,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_net_codec_tests.step);
     test_step.dependOn(&run_errors_tests.step);
 
-    // DST seed sweep executable
+    // Raft consensus seed sweep executable
     const dst_sweep_module = b.createModule(.{
         .root_source_file = b.path("src/cmd/dst_sweep.zig"),
         .target = target,
@@ -892,7 +931,7 @@ pub fn build(b: *std.Build) void {
     dst_sweep_module.addImport("raft.zig", raft_module);
 
     const dst_sweep_exe = b.addExecutable(.{
-        .name = "dst-sweep",
+        .name = "raft-sweep",
         .root_module = dst_sweep_module,
     });
     b.installArtifact(dst_sweep_exe);
@@ -900,7 +939,7 @@ pub fn build(b: *std.Build) void {
     const run_dst_sweep = b.addRunArtifact(dst_sweep_exe);
     if (b.args) |bargs| run_dst_sweep.addArgs(bargs);
 
-    const dst_sweep_step = b.step("dst-sweep", "Run DST seed sweep (pass -- --seeds N)");
+    const dst_sweep_step = b.step("raft-sweep", "Run Raft consensus seed sweep (pass -- --seeds N)");
     dst_sweep_step.dependOn(&run_dst_sweep.step);
 
     // Deterministic simulation tests
@@ -913,4 +952,7 @@ pub fn build(b: *std.Build) void {
     dst_step.dependOn(&run_log_replay_tests.step);
     dst_step.dependOn(&run_gateway_replay_tests.step);
     dst_step.dependOn(&run_cross_partition_tests.step);
+    dst_step.dependOn(&run_sim_determinism_tests.step);
+    dst_step.dependOn(&run_sim_recovery_tests.step);
+    dst_step.dependOn(&run_sim_disk_fault_tests.step);
 }

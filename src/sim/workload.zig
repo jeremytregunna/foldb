@@ -1,0 +1,110 @@
+/// Seeded SQL workload generator for deterministic simulation tests.
+///
+/// Produces a reproducible sequence of typed operations against a single table.
+/// The caller registers SQL templates once and drives ops through the gateway.
+/// Same seed → same op sequence → same final state.
+const std = @import("std");
+const SimScheduler = @import("scheduler.zig").SimScheduler;
+
+pub const TABLE_DDL =
+    "CREATE TABLE sim_kv (id INT64 NOT NULL, value INT64 NOT NULL, PRIMARY KEY (id))";
+
+pub const INSERT_SQL = "INSERT INTO sim_kv (id, value) VALUES ($1, $2)";
+pub const UPDATE_SQL = "UPDATE sim_kv SET value = $2 WHERE id = $1";
+pub const DELETE_SQL = "DELETE FROM sim_kv WHERE id = $1";
+pub const SELECT_SQL = "SELECT id, value FROM sim_kv WHERE id = $1";
+pub const SCAN_SQL   = "SELECT id, value FROM sim_kv";
+
+pub const OpKind = enum { insert, update, delete, select };
+
+pub const Op = struct {
+    kind: OpKind,
+    id: i64,
+    value: i64, // used by insert and update; ignored for delete/select
+};
+
+pub const Workload = struct {
+    ops: []Op,
+    alloc: std.mem.Allocator,
+
+    pub fn deinit(self: *Workload) void {
+        self.alloc.free(self.ops);
+    }
+};
+
+/// Generate `n_ops` operations from `sched`. The live key set is tracked so
+/// updates and deletes only target keys that actually exist.
+pub fn generate(sched: *SimScheduler, n_ops: usize, alloc: std.mem.Allocator) !Workload {
+    const ops = try alloc.alloc(Op, n_ops);
+    errdefer alloc.free(ops);
+
+    // Track which ids are live so we can generate valid updates/deletes.
+    var live = std.AutoHashMap(i64, void).init(alloc);
+    defer live.deinit();
+
+    // Pool of ids to draw from — keeps keys in a bounded range for interesting
+    // overlap between inserts, updates, and deletes.
+    const id_range: i64 = @intCast(@max(n_ops / 4, 4));
+
+    for (ops) |*op| {
+        const live_count = live.count();
+
+        // Weight: prefer inserts when table is sparse, more variety when populated.
+        const roll = sched.random().uintLessThan(u8, 100);
+        const kind: OpKind = if (live_count == 0 or roll < 40)
+            .insert
+        else if (roll < 60)
+            .update
+        else if (roll < 75)
+            .delete
+        else
+            .select;
+
+        switch (kind) {
+            .insert => {
+                const id = sched.random().intRangeLessThan(i64, 1, id_range + 1);
+                const value = sched.random().int(i64);
+                // Avoid PK conflict: if id already live, treat as update.
+                op.* = .{ .kind = if (live.contains(id)) .update else .insert, .id = id, .value = value };
+                try live.put(id, {});
+            },
+            .update => {
+                const id = randomLiveKey(sched, &live) orelse blk: {
+                    // No live keys — fall back to insert.
+                    const fid = sched.random().intRangeLessThan(i64, 1, id_range + 1);
+                    try live.put(fid, {});
+                    break :blk fid;
+                };
+                const value = sched.random().int(i64);
+                op.* = .{ .kind = if (live.contains(id)) .update else .insert, .id = id, .value = value };
+                try live.put(id, {});
+            },
+            .delete => {
+                const id = randomLiveKey(sched, &live) orelse blk: {
+                    const fid = sched.random().intRangeLessThan(i64, 1, id_range + 1);
+                    break :blk fid;
+                };
+                op.* = .{ .kind = .delete, .id = id, .value = 0 };
+                _ = live.remove(id);
+            },
+            .select => {
+                const id = sched.random().intRangeLessThan(i64, 1, id_range + 1);
+                op.* = .{ .kind = .select, .id = id, .value = 0 };
+            },
+        }
+    }
+
+    return .{ .ops = ops, .alloc = alloc };
+}
+
+fn randomLiveKey(sched: *SimScheduler, live: *std.AutoHashMap(i64, void)) ?i64 {
+    const count = live.count();
+    if (count == 0) return null;
+    var target = sched.random().uintLessThan(usize, count);
+    var it = live.keyIterator();
+    while (it.next()) |key| {
+        if (target == 0) return key.*;
+        target -= 1;
+    }
+    return null;
+}
