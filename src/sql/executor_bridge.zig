@@ -290,7 +290,7 @@ pub const SqlExecutor = struct {
             .filter => |f| {
                 var inner: std.ArrayList([]const ?ColumnValue) = .empty;
                 defer {
-                    for (inner.items) |r| ctx.alloc.free(r);
+                    for (inner.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
                     inner.deinit(ctx.alloc);
                 }
                 try self.executeScan(f.input, ctx, &inner);
@@ -299,7 +299,7 @@ pub const SqlExecutor = struct {
                     row_ctx.row = row;
                     const v = try evalExpr(f.predicate, row_ctx);
                     if (v.toBool() orelse false) {
-                        const r = try ctx.alloc.dupe(?ColumnValue, row);
+                        const r = try SqlExecutor.dupeRow(row, ctx.alloc);
                         try out.append(ctx.alloc, r);
                     }
                 }
@@ -307,7 +307,7 @@ pub const SqlExecutor = struct {
             .project => |p| {
                 var inner: std.ArrayList([]const ?ColumnValue) = .empty;
                 defer {
-                    for (inner.items) |r| ctx.alloc.free(r);
+                    for (inner.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
                     inner.deinit(ctx.alloc);
                 }
                 try self.executeScan(p.input, ctx, &inner);
@@ -325,7 +325,7 @@ pub const SqlExecutor = struct {
             .limit => |l| {
                 var inner: std.ArrayList([]const ?ColumnValue) = .empty;
                 defer {
-                    for (inner.items) |r| ctx.alloc.free(r);
+                    for (inner.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
                     inner.deinit(ctx.alloc);
                 }
                 try self.executeScan(l.input, ctx, &inner);
@@ -347,7 +347,7 @@ pub const SqlExecutor = struct {
                 for (inner.items, 0..) |row, i| {
                     if (i < offset_val) continue;
                     if (taken >= limit_val) break;
-                    const r = try ctx.alloc.dupe(?ColumnValue, row);
+                    const r = try SqlExecutor.dupeRow(row, ctx.alloc);
                     try out.append(ctx.alloc, r);
                     taken += 1;
                 }
@@ -355,7 +355,7 @@ pub const SqlExecutor = struct {
             .sort => |s| {
                 var inner: std.ArrayList([]const ?ColumnValue) = .empty;
                 defer {
-                    for (inner.items) |r| ctx.alloc.free(r);
+                    for (inner.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
                     inner.deinit(ctx.alloc);
                 }
                 try self.executeScan(s.input, ctx, &inner);
@@ -398,7 +398,7 @@ pub const SqlExecutor = struct {
                     sorted[j] = key;
                 }
                 for (sorted) |r| {
-                    try out.append(ctx.alloc, try ctx.alloc.dupe(?ColumnValue, r));
+                    try out.append(ctx.alloc, try SqlExecutor.dupeRow(r, ctx.alloc));
                 }
             },
             .empty => {}, // no rows
@@ -410,7 +410,7 @@ pub const SqlExecutor = struct {
             .window => |w| {
                 var inner: std.ArrayList([]const ?ColumnValue) = .empty;
                 defer {
-                    for (inner.items) |r| ctx.alloc.free(r);
+                    for (inner.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
                     inner.deinit(ctx.alloc);
                 }
                 try self.executeScan(w.input, ctx, &inner);
@@ -434,7 +434,8 @@ pub const SqlExecutor = struct {
 
                 for (inner.items, 0..) |row, ri| {
                     const aug = try ctx.alloc.alloc(?ColumnValue, row.len + w.fns.len);
-                    @memcpy(aug[0..row.len], row);
+                    errdefer ctx.alloc.free(aug);
+                    for (row, 0..) |v, i| aug[i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
                     @memcpy(aug[row.len..], win_results[ri]);
                     try out.append(ctx.alloc, aug);
                 }
@@ -445,12 +446,12 @@ pub const SqlExecutor = struct {
             .hash_join => |j| {
                 var left_rows: std.ArrayList([]const ?ColumnValue) = .empty;
                 defer {
-                    for (left_rows.items) |r| ctx.alloc.free(r);
+                    for (left_rows.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
                     left_rows.deinit(ctx.alloc);
                 }
                 var right_rows: std.ArrayList([]const ?ColumnValue) = .empty;
                 defer {
-                    for (right_rows.items) |r| ctx.alloc.free(r);
+                    for (right_rows.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
                     right_rows.deinit(ctx.alloc);
                 }
                 try self.executeScan(j.left, ctx, &left_rows);
@@ -461,22 +462,27 @@ pub const SqlExecutor = struct {
                 for (left_rows.items) |lr| {
                     var matched = false;
                     for (right_rows.items) |rr| {
+                        // shallow combined for condition eval only
                         const combined = try ctx.alloc.alloc(?ColumnValue, lr.len + rr.len);
                         @memcpy(combined[0..lr.len], lr);
                         @memcpy(combined[lr.len..], rr);
                         var join_ctx = ctx;
                         join_ctx.row = combined;
                         const passes = (try evalExpr(j.condition, join_ctx)).toBool() orelse false;
+                        ctx.alloc.free(combined);
                         if (passes) {
                             matched = true;
-                            try out.append(ctx.alloc, combined);
-                        } else {
-                            ctx.alloc.free(combined);
+                            const owned = try ctx.alloc.alloc(?ColumnValue, lr.len + rr.len);
+                            errdefer ctx.alloc.free(owned);
+                            for (lr, 0..) |v, i| owned[i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
+                            for (rr, 0..) |v, i| owned[lr.len + i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
+                            try out.append(ctx.alloc, owned);
                         }
                     }
                     if (!matched and (j.kind == .left)) {
                         const padded = try ctx.alloc.alloc(?ColumnValue, lr.len + right_width);
-                        @memcpy(padded[0..lr.len], lr);
+                        errdefer ctx.alloc.free(padded);
+                        for (lr, 0..) |v, i| padded[i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
                         for (padded[lr.len..]) |*v| v.* = null;
                         try out.append(ctx.alloc, padded);
                     }
@@ -499,9 +505,11 @@ pub const SqlExecutor = struct {
                             }
                         }
                         if (!any_match) {
-                            const padded = try ctx.alloc.alloc(?ColumnValue, left_rows.items[0].len + rr.len);
-                            for (padded[0..left_rows.items[0].len]) |*v| v.* = null;
-                            @memcpy(padded[left_rows.items[0].len..], rr);
+                            const left_width = if (left_rows.items.len > 0) left_rows.items[0].len else 0;
+                            const padded = try ctx.alloc.alloc(?ColumnValue, left_width + rr.len);
+                            errdefer ctx.alloc.free(padded);
+                            for (padded[0..left_width]) |*v| v.* = null;
+                            for (rr, 0..) |v, i| padded[left_width + i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
                             try out.append(ctx.alloc, padded);
                         }
                     }
@@ -511,7 +519,7 @@ pub const SqlExecutor = struct {
             .hash_agg => |ha| {
                 var inner: std.ArrayList([]const ?ColumnValue) = .empty;
                 defer {
-                    for (inner.items) |r| ctx.alloc.free(r);
+                    for (inner.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
                     inner.deinit(ctx.alloc);
                 }
                 try self.executeScan(ha.input, ctx, &inner);
@@ -524,7 +532,7 @@ pub const SqlExecutor = struct {
                 var groups: std.ArrayList(GroupRow) = .empty;
                 defer {
                     for (groups.items) |g| {
-                        ctx.alloc.free(g.key);
+                        SqlExecutor.freeRowValues(g.key, ctx.alloc);
                         ctx.alloc.free(g.accums);
                     }
                     groups.deinit(ctx.alloc);
@@ -549,7 +557,7 @@ pub const SqlExecutor = struct {
                     }
 
                     if (found_group) |g| {
-                        ctx.alloc.free(key);
+                        SqlExecutor.freeRowValues(key, ctx.alloc);
                         for (ha.agg_exprs, g.accums) |ae, *acc| {
                             try acc.update(ae, row_ctx);
                         }
@@ -573,7 +581,8 @@ pub const SqlExecutor = struct {
 
                 for (groups.items) |g| {
                     const result_row = try ctx.alloc.alloc(?ColumnValue, ha.group_keys.len + ha.agg_exprs.len);
-                    @memcpy(result_row[0..ha.group_keys.len], g.key);
+                    errdefer ctx.alloc.free(result_row);
+                    for (g.key, 0..) |v, i| result_row[i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
                     for (ha.agg_exprs, g.accums, 0..) |ae, acc, i| {
                         const v = acc.toValue(ae.fn_name);
                         result_row[ha.group_keys.len + i] = planValueToColumnValue(v, ctx.alloc) catch null;
@@ -663,7 +672,7 @@ pub const SqlExecutor = struct {
         while (iter.next() catch null) |row| {
             // Convert row to nullable values for filter evaluation
             const row_vals = try self.rowToValues(row, pkColumnIds(tbl), ctx.alloc);
-            defer ctx.alloc.free(row_vals);
+            defer SqlExecutor.freeRowValues(row_vals, ctx.alloc);
 
             var row_ctx = ctx;
             row_ctx.row = row_vals;
@@ -718,7 +727,7 @@ pub const SqlExecutor = struct {
         while (iter.next() catch null) |row| {
             if (del.filter) |f| {
                 const row_vals = try self.rowToValues(row, &.{}, ctx.alloc);
-                defer ctx.alloc.free(row_vals);
+                defer SqlExecutor.freeRowValues(row_vals, ctx.alloc);
                 var row_ctx = ctx;
                 row_ctx.row = row_vals;
                 const v = try evalExpr(f, row_ctx);
@@ -904,7 +913,7 @@ pub const SqlExecutor = struct {
         // Collect source rows
         var source_rows: std.ArrayList([]const ?ColumnValue) = .empty;
         defer {
-            for (source_rows.items) |r| ctx.alloc.free(r);
+            for (source_rows.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
             source_rows.deinit(ctx.alloc);
         }
         try self.executeScan(m.source, ctx, &source_rows);
@@ -915,7 +924,7 @@ pub const SqlExecutor = struct {
         defer {
             for (target_data.items) |td| {
                 ctx.alloc.free(td.key);
-                ctx.alloc.free(td.vals);
+                SqlExecutor.freeRowValues(td.vals, ctx.alloc);
             }
             target_data.deinit(ctx.alloc);
         }
@@ -1037,6 +1046,23 @@ pub const SqlExecutor = struct {
                 }
             }
         }
+    }
+
+    fn freeRowValues(vals: []const ?ColumnValue, alloc: std.mem.Allocator) void {
+        for (vals) |v| if (v) |cv| cv.freeIfOwned(alloc);
+        alloc.free(vals);
+    }
+
+    fn dupeRow(row: []const ?ColumnValue, alloc: std.mem.Allocator) ![]const ?ColumnValue {
+        const copy = try alloc.alloc(?ColumnValue, row.len);
+        errdefer alloc.free(copy);
+        var duped: usize = 0;
+        errdefer for (copy[0..duped]) |v| if (v) |cv| cv.freeIfOwned(alloc);
+        for (row, 0..) |v, i| {
+            copy[i] = if (v) |cv| try cv.dupe(alloc) else null;
+            duped += 1;
+        }
+        return copy;
     }
 
     fn rowToValues(

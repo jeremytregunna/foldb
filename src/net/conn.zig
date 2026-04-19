@@ -5,6 +5,7 @@ const frame = @import("frame.zig");
 const codec = @import("codec.zig");
 const msg = @import("messages.zig");
 const gateway_mod = @import("gateway.zig");
+const errors = @import("errors.zig");
 
 const FrameHeader = frame.FrameHeader;
 const Kind = frame.Kind;
@@ -316,7 +317,11 @@ pub const Conn = struct {
                     else => .server_error,
                 };
                 var emsg_buf: [256]u8 = undefined;
-                const emsg = std.fmt.bufPrint(&emsg_buf, "DDL failed: {s}", .{@errorName(e)}) catch "DDL failed";
+                const detail = self.gw.lastDetail();
+                const emsg = if (detail.len > 0)
+                    std.fmt.bufPrint(&emsg_buf, "DDL failed: {s}", .{detail}) catch "DDL failed"
+                else
+                    std.fmt.bufPrint(&emsg_buf, "DDL failed: {s}", .{errors.humanize(e)}) catch "DDL failed";
                 self.sendStreamError(stream_id, code, emsg);
                 return;
             };
@@ -341,7 +346,11 @@ pub const Conn = struct {
                 else => .server_error,
             };
             var emsg_buf: [256]u8 = undefined;
-            const emsg = std.fmt.bufPrint(&emsg_buf, "register failed: {s}", .{@errorName(e)}) catch "register failed";
+            const detail = self.gw.lastDetail();
+            const emsg = if (detail.len > 0)
+                std.fmt.bufPrint(&emsg_buf, "register failed: {s}", .{detail}) catch "register failed"
+            else
+                std.fmt.bufPrint(&emsg_buf, "register failed: {s}", .{errors.humanize(e)}) catch "register failed";
             self.sendStreamError(stream_id, code, emsg);
             return;
         };
@@ -386,7 +395,9 @@ pub const Conn = struct {
         if (self.gw.isSelectQuery(hash)) {
             const sel_result = self.gw.querySelect(hash, params, &.{}) catch |e| {
                 const code = gatewayErrToCode(e);
-                self.sendStreamError(stream_id, code, "query failed");
+                var emsg_buf: [256]u8 = undefined;
+                const emsg = std.fmt.bufPrint(&emsg_buf, "query failed: {s}", .{errors.humanize(e)}) catch "query failed";
+                self.sendStreamError(stream_id, code, emsg);
                 return;
             };
             try self.sendResultSet(stream_id, sel_result);
@@ -399,7 +410,7 @@ pub const Conn = struct {
         const exec_result = self.gw.execute(io, hash, params, &.{}) catch |e| {
             const code = gatewayErrToCode(e);
             var emsg_buf: [256]u8 = undefined;
-            const emsg = std.fmt.bufPrint(&emsg_buf, "execute failed: {s}", .{@errorName(e)}) catch "execute failed";
+            const emsg = std.fmt.bufPrint(&emsg_buf, "execute failed: {s}", .{errors.humanize(e)}) catch "execute failed";
             self.sendStreamError(stream_id, code, emsg);
             return;
         };

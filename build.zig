@@ -597,6 +597,23 @@ pub fn build(b: *std.Build) void {
     // Wire sequencer into lib.zig now that it exists
     lib_module.addImport("sequencer.zig", sequencer_module);
 
+    // Errors module (centralized human-readable error messages)
+    const errors_module = b.createModule(.{
+        .root_source_file = b.path("src/errors.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Errors tests
+    const errors_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/errors_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    errors_test_module.addImport("errors.zig", errors_module);
+    const errors_tests = b.addTest(.{ .root_module = errors_test_module });
+    const run_errors_tests = b.addRunArtifact(errors_tests);
+
     // Gateway module
     const gateway_module = b.createModule(.{
         .root_source_file = b.path("src/gateway/gateway.zig"),
@@ -616,6 +633,7 @@ pub fn build(b: *std.Build) void {
     gateway_module.addImport("ast.zig", sql_module);
     gateway_module.addImport("types.zig", executor_module);
     gateway_module.addImport("cdc.zig", cdc_module);
+    gateway_module.addImport("errors.zig", errors_module);
 
     // Net sub-modules (wire protocol layer)
     const net_frame_module = b.createModule(.{
@@ -647,6 +665,7 @@ pub fn build(b: *std.Build) void {
     net_conn_module.addImport("codec.zig", net_codec_module);
     net_conn_module.addImport("messages.zig", net_messages_module);
     net_conn_module.addImport("gateway.zig", gateway_module);
+    net_conn_module.addImport("errors.zig", errors_module);
 
     const net_server_module = b.createModule(.{
         .root_source_file = b.path("src/net/server.zig"),
@@ -849,6 +868,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_seq_tests.step);
     test_step.dependOn(&run_net_frame_tests.step);
     test_step.dependOn(&run_net_codec_tests.step);
+    test_step.dependOn(&run_errors_tests.step);
 
     // DST seed sweep executable
     const dst_sweep_module = b.createModule(.{

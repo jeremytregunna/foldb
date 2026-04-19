@@ -1,5 +1,6 @@
 /// Foldb Gateway: client-facing entry point for query registration, execution, and CDC.
 const std = @import("std");
+const errors = @import("errors.zig");
 
 const sql_mod = @import("sql.zig");
 const storage_mod = @import("storage.zig");
@@ -105,6 +106,10 @@ pub const Gateway = struct {
     client_seq: u64,
     alloc: std.mem.Allocator,
     metrics: obs.GatewayMetrics = .{},
+    /// Last error detail set by gateway operations (table/column context).
+    /// Reset at the start of each operation that may set it.
+    error_detail: [256]u8 = undefined,
+    error_detail_len: usize = 0,
 
     /// Initialize and heap-allocate a Gateway. Caller owns the pointer; call `deinit` to free.
     pub fn init(
@@ -173,6 +178,7 @@ pub const Gateway = struct {
     /// Register a SQL query and return its hash with schema version.
     /// Idempotent: registering the same SQL twice returns the same hash.
     pub fn register(self: *Gateway, sql: []const u8) !RegisterResult {
+        self.error_detail_len = 0;
         const hash = try self.registry.register(sql);
         self.metrics.queries_registered.inc();
         return .{
@@ -335,8 +341,20 @@ pub const Gateway = struct {
         };
     }
 
+    /// Set a human-readable detail string for the last error (table/column context).
+    fn setDetail(self: *Gateway, comptime fmt: []const u8, args: anytype) void {
+        const s = std.fmt.bufPrint(&self.error_detail, fmt, args) catch &self.error_detail;
+        self.error_detail_len = s.len;
+    }
+
+    /// Return the detail string set by the last failing operation, or "" if none.
+    pub fn lastDetail(self: *const Gateway) []const u8 {
+        return self.error_detail[0..self.error_detail_len];
+    }
+
     /// Apply a DDL statement to the schema and propagate to storage.
     pub fn applyDdl(self: *Gateway, sql: []const u8) !void {
+        self.error_detail_len = 0;
         var arena = std.heap.ArenaAllocator.init(self.alloc);
         defer arena.deinit();
 
@@ -345,7 +363,15 @@ pub const Gateway = struct {
         if (parsed.stmts.len == 0) return;
         const stmt = parsed.stmts[0];
 
-        try self.registry.applyDdl(stmt);
+        self.registry.applyDdl(stmt) catch |e| {
+            switch (stmt) {
+                .create_table => |ct| self.setDetail("'{s}': {s}", .{ ct.name, errors.humanize(e) }),
+                .create_index => |ci| self.setDetail("'{s}' on '{s}': {s}", .{ ci.name, ci.table, errors.humanize(e) }),
+                .alter_table => |at| self.setDetail("'{s}': {s}", .{ at.table, errors.humanize(e) }),
+                else => self.setDetail("{s}", .{errors.humanize(e)}),
+            }
+            return e;
+        };
 
         switch (stmt) {
             .create_table => |ct| {
