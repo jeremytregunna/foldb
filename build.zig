@@ -549,6 +549,18 @@ pub fn build(b: *std.Build) void {
     const sql_replay_tests = b.addTest(.{ .root_module = sql_replay_test_module });
     const run_sql_replay_tests = b.addRunArtifact(sql_replay_tests);
 
+    // SQL FK enforcement tests
+    const sql_fk_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sql/fk_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sql_fk_test_module.addImport("sql.zig", sql_module);
+    sql_fk_test_module.addImport("executor.zig", executor_module);
+    sql_fk_test_module.addImport("storage.zig", storage_module);
+    const sql_fk_tests = b.addTest(.{ .root_module = sql_fk_test_module });
+    const run_sql_fk_tests = b.addRunArtifact(sql_fk_tests);
+
     // SQL planner tests
     const sql_planner_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/sql/planner_test.zig"),
@@ -861,6 +873,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_sql_schema_tests.step);
     test_step.dependOn(&run_sql_planner_tests.step);
     test_step.dependOn(&run_sql_executor_expr_tests.step);
+    test_step.dependOn(&run_sql_fk_tests.step);
     test_step.dependOn(&run_cdc_tests.step);
     test_step.dependOn(&run_gateway_tests.step);
     test_step.dependOn(&run_seq_epoch_tests.step);

@@ -522,3 +522,69 @@ test "parse handles hex byte literals" {
     defer arena.deinit();
     _ = try parse("SELECT x'deadbeef' FROM users", arena.allocator());
 }
+
+// ─── FK constraint parsing ────────────────────────────────────────────────────
+
+test "parse CREATE TABLE with CONSTRAINT FOREIGN KEY" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const q = try parse(
+        "CREATE TABLE orders (id INT64 NOT NULL, user_id INT64 NOT NULL, PRIMARY KEY (id), CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+        arena.allocator(),
+    );
+    const ct = q.stmts[0].create_table;
+    try std.testing.expectEqual(@as(usize, 1), ct.foreign_keys.len);
+    const fk = ct.foreign_keys[0];
+    try std.testing.expectEqualStrings("fk_user", fk.name.?);
+    try std.testing.expectEqual(@as(usize, 1), fk.columns.len);
+    try std.testing.expectEqualStrings("user_id", fk.columns[0]);
+    try std.testing.expectEqualStrings("users", fk.ref_table);
+    try std.testing.expectEqual(@as(usize, 1), fk.ref_columns.len);
+    try std.testing.expectEqualStrings("id", fk.ref_columns[0]);
+}
+
+test "parse CREATE TABLE with bare FOREIGN KEY" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const q = try parse(
+        "CREATE TABLE orders (id INT64 NOT NULL, user_id INT64 NOT NULL, PRIMARY KEY (id), FOREIGN KEY (user_id) REFERENCES users(id))",
+        arena.allocator(),
+    );
+    const ct = q.stmts[0].create_table;
+    try std.testing.expectEqual(@as(usize, 1), ct.foreign_keys.len);
+    const fk = ct.foreign_keys[0];
+    try std.testing.expect(fk.name == null);
+    try std.testing.expectEqualStrings("user_id", fk.columns[0]);
+    try std.testing.expectEqualStrings("users", fk.ref_table);
+}
+
+test "parse CREATE TABLE with multiple FK constraints" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const q = try parse(
+        \\CREATE TABLE line_items (
+        \\  id INT64 NOT NULL,
+        \\  order_id INT64 NOT NULL,
+        \\  product_id INT64 NOT NULL,
+        \\  PRIMARY KEY (id),
+        \\  CONSTRAINT fk_order FOREIGN KEY (order_id) REFERENCES orders(id),
+        \\  CONSTRAINT fk_product FOREIGN KEY (product_id) REFERENCES products(id)
+        \\)
+        ,
+        arena.allocator(),
+    );
+    const ct = q.stmts[0].create_table;
+    try std.testing.expectEqual(@as(usize, 2), ct.foreign_keys.len);
+    try std.testing.expectEqualStrings("fk_order", ct.foreign_keys[0].name.?);
+    try std.testing.expectEqualStrings("fk_product", ct.foreign_keys[1].name.?);
+}
+
+test "parse CREATE TABLE without FK has empty foreign_keys" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const q = try parse(
+        "CREATE TABLE simple (id INT64 NOT NULL, PRIMARY KEY (id))",
+        arena.allocator(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), q.stmts[0].create_table.foreign_keys.len);
+}

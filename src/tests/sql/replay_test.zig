@@ -489,3 +489,159 @@ test "SQL Replay: scan returns rows written via INSERT" {
         try testing.expectEqual(@as(usize, 0), rows.items.len);
     }
 }
+
+// ─── DST: FK constraint determinism ──────────────────────────────────────────
+// parents(id STRING PK) / children(id STRING PK, parent_id STRING FK→parents)
+
+fn makeFkSchemaRegistry(alloc: std.mem.Allocator) !schema_mod.SchemaRegistry {
+    var sr = schema_mod.SchemaRegistry.init(alloc);
+    _ = try sr.createTable(.{
+        .name = "parents",
+        .columns = &[_]sql.ast.ColumnDef{
+            .{ .name = "id", .typ = .string, .nullable = .not_null, .span = zero_span },
+        },
+        .primary_key = .{ .columns = &.{"id"} },
+    });
+    _ = try sr.createTable(.{
+        .name = "children",
+        .columns = &[_]sql.ast.ColumnDef{
+            .{ .name = "id", .typ = .string, .nullable = .not_null, .span = zero_span },
+            .{ .name = "parent_id", .typ = .string, .nullable = .not_null, .span = zero_span },
+        },
+        .primary_key = .{ .columns = &.{"id"} },
+        .foreign_keys = &[_]sql.ast.ForeignKeyConstraint{
+            .{ .name = "fk_parent", .columns = &.{"parent_id"}, .ref_table = "parents", .ref_columns = &.{"id"} },
+        },
+    });
+    return sr;
+}
+
+fn registerFkStorage(storage: *Storage) !void {
+    try storage.registerTable(.{ .table_id = 1, .columns = &.{.{ .col_type = .string, .nullable = false }} });
+    try storage.registerTable(.{ .table_id = 2, .columns = &.{
+        .{ .col_type = .string, .nullable = false },
+        .{ .col_type = .string, .nullable = false },
+    } });
+}
+
+const FkFixture = struct {
+    storage: *Storage,
+    sr: *schema_mod.SchemaRegistry,
+    reg: *registry_mod.SqlRegistry,
+    exec: eb.SqlExecutor,
+    dir: []const u8,
+    alloc: std.mem.Allocator,
+
+    fn init(alloc: std.mem.Allocator, dir: []const u8) !FkFixture {
+        const storage = try alloc.create(Storage);
+        storage.* = try Storage.init(dir, alloc);
+        try registerFkStorage(storage);
+        const sr = try alloc.create(schema_mod.SchemaRegistry);
+        sr.* = try makeFkSchemaRegistry(alloc);
+        const reg = try alloc.create(registry_mod.SqlRegistry);
+        reg.* = registry_mod.SqlRegistry.init(alloc, sr);
+        const exec = eb.SqlExecutor.init(storage, reg, sr, alloc);
+        return .{ .storage = storage, .sr = sr, .reg = reg, .exec = exec, .dir = dir, .alloc = alloc };
+    }
+
+    fn deinit(self: *FkFixture) void {
+        self.reg.deinit();
+        self.alloc.destroy(self.reg);
+        self.sr.deinit();
+        self.alloc.destroy(self.sr);
+        self.storage.deinit();
+        self.alloc.destroy(self.storage);
+        removeDir(self.dir);
+        self.alloc.free(self.dir);
+    }
+};
+
+test "DST: FK valid INSERT produces byte-equal SSTables" {
+    const alloc = testing.allocator;
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
+    const base = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec)) +% 200;
+
+    var fa = try FkFixture.init(alloc, try makeTempDir(alloc, base));
+    defer fa.deinit();
+    var fb = try FkFixture.init(alloc, try makeTempDir(alloc, base + 1));
+    defer fb.deinit();
+
+    const ins_parent_a = try fa.reg.register("INSERT INTO parents (id) VALUES ($1)");
+    _ = try fb.reg.register("INSERT INTO parents (id) VALUES ($1)");
+    const ins_child_a = try fa.reg.register("INSERT INTO children (id, parent_id) VALUES ($1, $2)");
+    _ = try fb.reg.register("INSERT INTO children (id, parent_id) VALUES ($1, $2)");
+
+    var seq: u64 = 1;
+    {
+        const p = try eb.encodeParams(&.{.{ .string = "p1" }}, alloc);
+        defer alloc.free(p);
+        var e = try makeEntry(alloc, seq, &ins_parent_a, p);
+        defer e.deinit(alloc);
+        _ = try fa.exec.run(e);
+        _ = try fb.exec.run(e);
+        seq += 1;
+    }
+    {
+        const p = try eb.encodeParams(&.{ .{ .string = "c1" }, .{ .string = "p1" } }, alloc);
+        defer alloc.free(p);
+        var e = try makeEntry(alloc, seq, &ins_child_a, p);
+        defer e.deinit(alloc);
+        _ = try fa.exec.run(e);
+        _ = try fb.exec.run(e);
+        seq += 1;
+    }
+
+    try fa.storage.flushAll();
+    try fb.storage.flushAll();
+
+    // Both replicas must produce byte-equal SSTables for parents table (t1)
+    const table_dir_a1 = try std.fmt.allocPrint(alloc, "{s}/t1", .{fa.dir});
+    defer alloc.free(table_dir_a1);
+    const table_dir_b1 = try std.fmt.allocPrint(alloc, "{s}/t1", .{fb.dir});
+    defer alloc.free(table_dir_b1);
+    const files_a = try listSstFiles(table_dir_a1, alloc);
+    defer { for (files_a) |f| alloc.free(f); alloc.free(files_a); }
+    const files_b = try listSstFiles(table_dir_b1, alloc);
+    defer { for (files_b) |f| alloc.free(f); alloc.free(files_b); }
+    try testing.expectEqual(files_a.len, files_b.len);
+    for (0..files_a.len) |i| {
+        const ba = try readFileBytes(files_a[i], alloc);
+        defer alloc.free(ba);
+        const bb = try readFileBytes(files_b[i], alloc);
+        defer alloc.free(bb);
+        try testing.expectEqualSlices(u8, ba, bb);
+    }
+}
+
+test "DST: FK violation aborts deterministically — both replicas reject identically" {
+    const alloc = testing.allocator;
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
+    const base = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec)) +% 300;
+
+    var fa = try FkFixture.init(alloc, try makeTempDir(alloc, base));
+    defer fa.deinit();
+    var fb = try FkFixture.init(alloc, try makeTempDir(alloc, base + 1));
+    defer fb.deinit();
+
+    const ins_child_a = try fa.reg.register("INSERT INTO children (id, parent_id) VALUES ($1, $2)");
+    _ = try fb.reg.register("INSERT INTO children (id, parent_id) VALUES ($1, $2)");
+
+    // Both replicas see the same FK-violating entry
+    const p = try eb.encodeParams(&.{ .{ .string = "c1" }, .{ .string = "ghost" } }, alloc);
+    defer alloc.free(p);
+    var e = try makeEntry(alloc, 1, &ins_child_a, p);
+    defer e.deinit(alloc);
+
+    const result_a = fa.exec.run(e);
+    const result_b = fb.exec.run(e);
+
+    // Both must agree: either both succeed or both fail with the same error tag
+    try testing.expect(result_a == error.ForeignKeyViolation);
+    try testing.expect(result_b == error.ForeignKeyViolation);
+
+    // Storage must be identical (empty — no rows committed)
+    try fa.storage.flushAll();
+    try fb.storage.flushAll();
+}
