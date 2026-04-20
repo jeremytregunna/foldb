@@ -46,7 +46,7 @@ Keyed by `(client_id, client_seq_num)`, not payload content.
 
 ## Relation to Other Subsystems
 
-- **Raft** (`seq_raft/`): The sequencer wraps a RaftNode used exclusively for replicating EpochDecisions. On single-node deployments it immediately becomes leader.
+- **Raft** (`src/raft/`): The sequencer wraps a RaftNode used exclusively for replicating EpochDecisions. On single-node deployments it immediately becomes leader.
 - **Partition logs** (`log_p0/`, `log_p1/`, ...): Intent payloads are written here at the assigned seq, after Raft replication of the ordering decision.
 - **Gateway**: Validates and authorizes intents before submission. The sequencer input boundary is `submitBytes()`.
 - **Executor**: Reads from partition logs using the seq order established by the sequencer.

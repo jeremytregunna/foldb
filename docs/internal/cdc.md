@@ -8,7 +8,8 @@ Captures before-images prior to storage apply, then dispatches `CdcEvent` object
 
 ## Guarantees
 
-- **At-least-once delivery**: Every committed transaction produces exactly one `CdcEvent` per subscription. Consumers must handle re-delivery idempotently.
+- **Exactly-once in-process delivery**: Every committed transaction produces exactly one `CdcEvent` per subscription. Events are removed from the queue when dequeued via `next()` and are never re-delivered within a process lifetime.
+- **At-most-once across restarts**: Events not yet consumed are lost on shutdown — the queue is not persisted. The `cursor` field is a building block for future replay-from-log resumption but that mechanism is not yet implemented.
 - **Total ordering within a subscription**: Events are queued in sequence order and dequeued FIFO.
 - **Complete transaction effects**: All mutations from a single committed transaction are batched into one `CdcEvent` containing multiple `CdcEffect` entries.
 - **Causality**: Before-images are captured at `seq - 1` (pre-mutation state) before `storage.apply()`. Events are dispatched only after apply succeeds.

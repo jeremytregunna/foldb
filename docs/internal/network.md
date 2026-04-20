@@ -35,8 +35,8 @@ Header fields: `stream_id`, `payload_len`, `version`, `kind`, `flags`.
 |---|---|
 | `more` (bit 0) | Continuation frame follows |
 | `final` (bit 1) | End of stream |
-| `trace` (bit 3) | 16-byte trace extension present |
 | `compressed` (bit 2) | Reserved |
+| `trace` (bit 3) | 16-byte trace extension present |
 
 ## Streams
 
@@ -82,7 +82,7 @@ Self-describing: a tag byte identifies the type, followed by fixed-width or leng
 - Does not implement compression — flag bit reserved, not yet enforced.
 - Does not pool or reuse connections on the server side — each connection is a one-shot task.
 - Does not retry failed requests.
-- Does not handle authentication credentials beyond passing them to the gateway auth handler.
+- Does not enforce authentication credentials — the auth protocol (Hello/Auth/AuthOk) is handled entirely within the network layer (`conn.zig`), but credential validation is currently deferred (all credentials accepted).
 
 ## Source Files
 

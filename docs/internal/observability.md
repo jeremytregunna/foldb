@@ -26,7 +26,7 @@ Every `TxnIntent` is assigned a trace ID at the gateway. Spans cover the full pa
 
 ## Covered Subsystems
 
-Seven domain metric structs covering: sequencer progress, executor throughput, storage I/O, log append/read rates, CDC lag, replication latency (p50/p99/p99.9), and network throughput.
+Seven domain metric structs: `LogMetrics` (append/read rates), `StorageMetrics` (I/O, compaction, cache), `ExecutorMetrics` (throughput, lag), `SequencerMetrics` (progress, epoch sizing), `GatewayMetrics` (query throughput, nondeterminism resolution), `RaftMetrics` (replication latency p50/p99/p99.9, leadership), `CdcMetrics` (event lag, subscription count).
 
 ## What Observability Does Not Do
 

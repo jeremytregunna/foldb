@@ -21,7 +21,7 @@ The log is partitioned into N **log partitions** (default 64, configurable at cl
 ## Invariants
 
 - `appendEntry()` requires `seq == current_seq + 1`. Violation returns `SeqOutOfOrder`.
-- `appendEntryAt()` permits `seq > current_seq` (for Raft replication gaps) but `current_seq` always reflects the highest written sequence.
+- `appendEntryAt()` requires `seq > current_seq`; `current_seq` jumps to the written seq, which may leave a real gap in the sequence space. Used by data partition logs driven by the sequencer, not by Raft followers (which use `appendEntry()` and receive entries contiguously).
 - Sealed segments are immutable. Only the active (current) segment accepts writes.
 - A segment seals automatically at 10,000 entries and a new one is created.
 - `seal()` is idempotent. Once sealed, no further appends are accepted.
@@ -67,7 +67,7 @@ The spec defines a `subscribe(from: Seq) !Subscription` API for streaming ordere
 
 ## Observability
 
-Metrics: `entries_appended`, `bytes_appended`, `entries_read`, `bytes_read`, `current_seq`, `segments_rotated`, `truncations`.
+Metrics: `entries_appended`, `bytes_appended`, `entries_read`, `bytes_read`, `current_seq`, `segments_rotated`, `truncations`, `fsync_count`, `lag`, `append_latency`.
 
 ## Source Files
 
