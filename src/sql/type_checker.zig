@@ -90,7 +90,10 @@ pub const TypeChecker = struct {
             for (fk.columns) |col_name| {
                 var found = false;
                 for (stmt.columns) |col| {
-                    if (std.ascii.eqlIgnoreCase(col.name, col_name)) { found = true; break; }
+                    if (std.ascii.eqlIgnoreCase(col.name, col_name)) {
+                        found = true;
+                        break;
+                    }
                 }
                 if (!found) return error.ColumnNotFound;
             }

@@ -13,7 +13,7 @@ pub const INSERT_SQL = "INSERT INTO sim_kv (id, value) VALUES ($1, $2)";
 pub const UPDATE_SQL = "UPDATE sim_kv SET value = $2 WHERE id = $1";
 pub const DELETE_SQL = "DELETE FROM sim_kv WHERE id = $1";
 pub const SELECT_SQL = "SELECT id, value FROM sim_kv WHERE id = $1";
-pub const SCAN_SQL   = "SELECT id, value FROM sim_kv";
+pub const SCAN_SQL = "SELECT id, value FROM sim_kv";
 
 pub const OpKind = enum { insert, update, delete, select };
 

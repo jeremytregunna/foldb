@@ -879,7 +879,6 @@ fn gatewayErrToCode(e: anyerror) msg.ErrorCode {
     };
 }
 
-
 fn isDdl(sql: []const u8) bool {
     const s = std.mem.trimStart(u8, sql, " \t\r\n");
     var end: usize = 0;

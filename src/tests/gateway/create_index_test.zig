@@ -53,7 +53,10 @@ fn removeDirRecursive(path: []const u8) void {
 
 test "CREATE INDEX ORDERED: index created and queries still work" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
 
@@ -73,7 +76,10 @@ test "CREATE INDEX ORDERED: index created and queries still work" {
 
 test "CREATE INDEX HASH: index created and queries still work" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
 
@@ -93,7 +99,10 @@ test "CREATE INDEX HASH: index created and queries still work" {
 
 test "CREATE INDEX: duplicate index name is rejected" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
 
@@ -105,7 +114,10 @@ test "CREATE INDEX: duplicate index name is rejected" {
 
 test "CREATE INDEX: non-existent table is rejected" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
 

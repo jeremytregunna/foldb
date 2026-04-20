@@ -53,7 +53,10 @@ fn removeDirRecursive(path: []const u8) void {
 
 test "ALTER TABLE ADD COLUMN: new column readable on subsequent inserts" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
 
@@ -73,7 +76,10 @@ test "ALTER TABLE ADD COLUMN: new column readable on subsequent inserts" {
 
 test "ALTER TABLE ADD COLUMN: existing rows return null for new column" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
 
@@ -95,7 +101,10 @@ test "ALTER TABLE ADD COLUMN: existing rows return null for new column" {
 
 test "ALTER TABLE DROP COLUMN: column no longer accessible" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
 
@@ -109,7 +118,10 @@ test "ALTER TABLE DROP COLUMN: column no longer accessible" {
 
 test "ALTER TABLE ADD COLUMN: duplicate column name is rejected" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
 

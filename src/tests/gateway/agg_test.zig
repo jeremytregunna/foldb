@@ -256,7 +256,7 @@ test "FILTER: ARRAY_AGG with FILTER collects only matching values" {
     try testing.expectEqual(@as(usize, 1), rs.rows.len);
     const arr = rs.rows[0][0].?.bytes;
     try testing.expect(std.mem.indexOf(u8, arr, "10") != null); // score=10 included
-    try testing.expect(std.mem.indexOf(u8, arr, "8") != null);  // score=8 included
+    try testing.expect(std.mem.indexOf(u8, arr, "8") != null); // score=8 included
     // score=3 should not be present — check it's absent as a standalone token
     // "[3," or ",3," or ",3]" would indicate presence; "3" alone could be in "10"
     try testing.expect(std.mem.indexOf(u8, arr, "3,") == null);

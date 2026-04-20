@@ -118,7 +118,10 @@ test "sim: recovery — all committed data survives clean shutdown" {
     const id: u64 = 1001;
 
     const dir = try makeTempDir("clean", id, alloc);
-    defer { removeDirRecursive(dir); alloc.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        alloc.free(dir);
+    }
 
     var sched = sim.SimScheduler.init(0xFEED_FACE);
     var workload = try wl.generate(&sched, 80, alloc);
@@ -164,7 +167,10 @@ test "sim: recovery — schema and flushed data survive crash" {
     const id: u64 = 1002;
 
     const dir = try makeTempDir("crash", id, alloc);
-    defer { removeDirRecursive(dir); alloc.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        alloc.free(dir);
+    }
 
     // Insert rows 1..10, flush (durable batch), then insert rows 11..20 without flush.
     // Use page_allocator for the crash phase — intentional leak, no deinit.

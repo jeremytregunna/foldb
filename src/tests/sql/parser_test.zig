@@ -636,7 +636,7 @@ test "parse CREATE TABLE with multiple FK constraints" {
         \\  CONSTRAINT fk_order FOREIGN KEY (order_id) REFERENCES orders(id),
         \\  CONSTRAINT fk_product FOREIGN KEY (product_id) REFERENCES products(id)
         \\)
-        ,
+    ,
         arena.allocator(),
     );
     const ct = q.stmts[0].create_table;

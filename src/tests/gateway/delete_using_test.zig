@@ -167,7 +167,7 @@ test "DELETE USING: two USING tables cross-product — only row matching both is
 
     const del = (try gw.register(
         "DELETE FROM products USING banned_cats, banned_regions " ++
-        "WHERE products.cat_id = banned_cats.id AND products.region_id = banned_regions.id",
+            "WHERE products.cat_id = banned_cats.id AND products.region_id = banned_regions.id",
     )).hash;
     const r = try gw.execute(std.testing.io, del, &.{}, &.{});
     try testing.expectEqual(@as(u64, 1), r.rows_affected);

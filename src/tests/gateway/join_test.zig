@@ -82,9 +82,7 @@ test "INNER JOIN: only rows with matching dept_id returned" {
     const s = try setupGateway();
     defer teardown(s.gw, s.dir);
 
-    const q = (try s.gw.register(
-        "SELECT employees.id FROM employees INNER JOIN departments ON employees.dept_id = departments.id"
-    )).hash;
+    const q = (try s.gw.register("SELECT employees.id FROM employees INNER JOIN departments ON employees.dept_id = departments.id")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
     defer rs.deinit();
 
@@ -96,9 +94,7 @@ test "LEFT JOIN: all employees returned, unmatched get null dept" {
     const s = try setupGateway();
     defer teardown(s.gw, s.dir);
 
-    const q = (try s.gw.register(
-        "SELECT employees.id FROM employees LEFT JOIN departments ON employees.dept_id = departments.id"
-    )).hash;
+    const q = (try s.gw.register("SELECT employees.id FROM employees LEFT JOIN departments ON employees.dept_id = departments.id")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
     defer rs.deinit();
 
@@ -110,9 +106,7 @@ test "RIGHT JOIN: all departments returned, unmatched get null employee" {
     const s = try setupGateway();
     defer teardown(s.gw, s.dir);
 
-    const q = (try s.gw.register(
-        "SELECT departments.id FROM employees RIGHT JOIN departments ON employees.dept_id = departments.id"
-    )).hash;
+    const q = (try s.gw.register("SELECT departments.id FROM employees RIGHT JOIN departments ON employees.dept_id = departments.id")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
     defer rs.deinit();
 
@@ -124,9 +118,7 @@ test "FULL JOIN: all employees and all departments, NULLs where no match" {
     const s = try setupGateway();
     defer teardown(s.gw, s.dir);
 
-    const q = (try s.gw.register(
-        "SELECT employees.id FROM employees FULL JOIN departments ON employees.dept_id = departments.id"
-    )).hash;
+    const q = (try s.gw.register("SELECT employees.id FROM employees FULL JOIN departments ON employees.dept_id = departments.id")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
     defer rs.deinit();
 
@@ -140,9 +132,7 @@ test "FULL JOIN: unmatched right row has null left column" {
     const s = try setupGateway();
     defer teardown(s.gw, s.dir);
 
-    const q = (try s.gw.register(
-        "SELECT employees.id, departments.id FROM employees FULL JOIN departments ON employees.dept_id = departments.id"
-    )).hash;
+    const q = (try s.gw.register("SELECT employees.id, departments.id FROM employees FULL JOIN departments ON employees.dept_id = departments.id")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
     defer rs.deinit();
 
@@ -161,9 +151,7 @@ test "CROSS JOIN: produces cartesian product" {
     const s = try setupGateway();
     defer teardown(s.gw, s.dir);
 
-    const q = (try s.gw.register(
-        "SELECT employees.id FROM employees CROSS JOIN departments"
-    )).hash;
+    const q = (try s.gw.register("SELECT employees.id FROM employees CROSS JOIN departments")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
     defer rs.deinit();
 
@@ -177,9 +165,7 @@ test "LEFT JOIN: unmatched left row has null right-side column" {
     const s = try setupGateway();
     defer teardown(s.gw, s.dir);
 
-    const q = (try s.gw.register(
-        "SELECT employees.id, departments.budget FROM employees LEFT JOIN departments ON employees.dept_id = departments.id"
-    )).hash;
+    const q = (try s.gw.register("SELECT employees.id, departments.budget FROM employees LEFT JOIN departments ON employees.dept_id = departments.id")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
     defer rs.deinit();
 
@@ -198,9 +184,7 @@ test "LEFT JOIN: matched rows have non-null right-side column" {
     const s = try setupGateway();
     defer teardown(s.gw, s.dir);
 
-    const q = (try s.gw.register(
-        "SELECT employees.id, departments.budget FROM employees LEFT JOIN departments ON employees.dept_id = departments.id"
-    )).hash;
+    const q = (try s.gw.register("SELECT employees.id, departments.budget FROM employees LEFT JOIN departments ON employees.dept_id = departments.id")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
     defer rs.deinit();
 
@@ -217,9 +201,7 @@ test "RIGHT JOIN: unmatched right row has null left-side column" {
     const s = try setupGateway();
     defer teardown(s.gw, s.dir);
 
-    const q = (try s.gw.register(
-        "SELECT employees.id, departments.id FROM employees RIGHT JOIN departments ON employees.dept_id = departments.id"
-    )).hash;
+    const q = (try s.gw.register("SELECT employees.id, departments.id FROM employees RIGHT JOIN departments ON employees.dept_id = departments.id")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
     defer rs.deinit();
 
@@ -238,9 +220,7 @@ test "CROSS JOIN: column values from both tables present in each row" {
     const s = try setupGateway();
     defer teardown(s.gw, s.dir);
 
-    const q = (try s.gw.register(
-        "SELECT employees.id, departments.budget FROM employees CROSS JOIN departments"
-    )).hash;
+    const q = (try s.gw.register("SELECT employees.id, departments.budget FROM employees CROSS JOIN departments")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
     defer rs.deinit();
 
@@ -256,7 +236,10 @@ test "CROSS JOIN: column values from both tables present in each row" {
 
 test "chained INNER JOINs across three tables" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
 
@@ -273,9 +256,7 @@ test "chained INNER JOINs across three tables" {
     _ = try gw.execute(std.testing.io, ins_b, &.{ .{ .int64 = 10 }, .{ .int64 = 100 } }, &.{});
     _ = try gw.execute(std.testing.io, ins_c, &.{ .{ .int64 = 100 }, .{ .int64 = 42 } }, &.{});
 
-    const q = (try gw.register(
-        "SELECT a.id, c.val FROM a INNER JOIN b ON a.b_id = b.id INNER JOIN c ON b.c_id = c.id"
-    )).hash;
+    const q = (try gw.register("SELECT a.id, c.val FROM a INNER JOIN b ON a.b_id = b.id INNER JOIN c ON b.c_id = c.id")).hash;
     var rs = try gw.querySelect(q, &.{}, &.{});
     defer rs.deinit();
 
@@ -291,9 +272,7 @@ test "INNER JOIN with WHERE filter post-join" {
     const s = try setupGateway();
     defer teardown(s.gw, s.dir);
 
-    const q = (try s.gw.register(
-        "SELECT employees.id FROM employees INNER JOIN departments ON employees.dept_id = departments.id WHERE departments.budget > 600"
-    )).hash;
+    const q = (try s.gw.register("SELECT employees.id FROM employees INNER JOIN departments ON employees.dept_id = departments.id WHERE departments.budget > 600")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
     defer rs.deinit();
 
@@ -305,9 +284,7 @@ test "INNER JOIN with WHERE excludes all rows below threshold" {
     const s = try setupGateway();
     defer teardown(s.gw, s.dir);
 
-    const q = (try s.gw.register(
-        "SELECT employees.id FROM employees INNER JOIN departments ON employees.dept_id = departments.id WHERE departments.budget > 9999"
-    )).hash;
+    const q = (try s.gw.register("SELECT employees.id FROM employees INNER JOIN departments ON employees.dept_id = departments.id WHERE departments.budget > 9999")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
     defer rs.deinit();
 
@@ -318,9 +295,7 @@ test "INNER JOIN with GROUP BY and COUNT" {
     const s = try setupGateway();
     defer teardown(s.gw, s.dir);
 
-    const q = (try s.gw.register(
-        "SELECT departments.id, COUNT(*) FROM employees INNER JOIN departments ON employees.dept_id = departments.id GROUP BY departments.id"
-    )).hash;
+    const q = (try s.gw.register("SELECT departments.id, COUNT(*) FROM employees INNER JOIN departments ON employees.dept_id = departments.id GROUP BY departments.id")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
     defer rs.deinit();
 
@@ -334,9 +309,7 @@ test "LEFT JOIN with ORDER BY returns rows in order" {
     const s = try setupGateway();
     defer teardown(s.gw, s.dir);
 
-    const q = (try s.gw.register(
-        "SELECT employees.id FROM employees LEFT JOIN departments ON employees.dept_id = departments.id ORDER BY employees.id"
-    )).hash;
+    const q = (try s.gw.register("SELECT employees.id FROM employees LEFT JOIN departments ON employees.dept_id = departments.id ORDER BY employees.id")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
     defer rs.deinit();
 
@@ -350,7 +323,10 @@ test "LEFT JOIN with ORDER BY returns rows in order" {
 
 test "JOIN USING: matches rows by shared column name" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
 
@@ -376,7 +352,10 @@ test "JOIN USING: matches rows by shared column name" {
 
 test "LEFT JOIN USING: unmatched left row preserved with null right side" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
 

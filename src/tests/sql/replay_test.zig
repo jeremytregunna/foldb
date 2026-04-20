@@ -601,9 +601,15 @@ test "DST: FK valid INSERT produces byte-equal SSTables" {
     const table_dir_b1 = try std.fmt.allocPrint(alloc, "{s}/t1", .{fb.dir});
     defer alloc.free(table_dir_b1);
     const files_a = try listSstFiles(table_dir_a1, alloc);
-    defer { for (files_a) |f| alloc.free(f); alloc.free(files_a); }
+    defer {
+        for (files_a) |f| alloc.free(f);
+        alloc.free(files_a);
+    }
     const files_b = try listSstFiles(table_dir_b1, alloc);
-    defer { for (files_b) |f| alloc.free(f); alloc.free(files_b); }
+    defer {
+        for (files_b) |f| alloc.free(f);
+        alloc.free(files_b);
+    }
     try testing.expectEqual(files_a.len, files_b.len);
     for (0..files_a.len) |i| {
         const ba = try readFileBytes(files_a[i], alloc);

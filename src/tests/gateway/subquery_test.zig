@@ -81,7 +81,11 @@ fn setupGateway() !struct { gw: *Gateway, dir: []const u8 } {
 
 test "subquery: EXISTS returns true when subquery has rows" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     const q = (try s.gw.register(
         \\SELECT id FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE user_id = 1)
@@ -93,7 +97,11 @@ test "subquery: EXISTS returns true when subquery has rows" {
 
 test "subquery: EXISTS returns false when subquery has no rows" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     // user_id = 99 has no orders — EXISTS is false for all rows
     const q = (try s.gw.register(
@@ -106,7 +114,11 @@ test "subquery: EXISTS returns false when subquery has no rows" {
 
 test "subquery: NOT EXISTS filters correctly" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     // Same non-matching subquery — NOT EXISTS is true for all rows
     const q = (try s.gw.register(
@@ -119,7 +131,11 @@ test "subquery: NOT EXISTS filters correctly" {
 
 test "subquery: IN (subquery) filters rows" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     // Users who have orders: user 1 and user 2
     const q = (try s.gw.register(
@@ -132,7 +148,11 @@ test "subquery: IN (subquery) filters rows" {
 
 test "subquery: NOT IN (subquery) filters rows" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     // Users who have NO orders: user 3 only
     const q = (try s.gw.register(
@@ -146,7 +166,11 @@ test "subquery: NOT IN (subquery) filters rows" {
 
 test "subquery: scalar subquery in SELECT list" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     // Return total order count alongside each user — subquery is uncorrelated,
     // same value (3) for every row.
@@ -162,7 +186,11 @@ test "subquery: scalar subquery in SELECT list" {
 
 test "subquery: scalar subquery in WHERE clause" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     // Select orders whose amount exceeds the minimum (20).
     // MIN returns the same type as its input (int64), avoiding int/float comparison.
@@ -177,7 +205,11 @@ test "subquery: scalar subquery in WHERE clause" {
 
 test "subquery: EXISTS on empty table returns false for all outer rows" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     // Delete all orders first via a fresh gateway with an empty table.
     // Easier: query against a non-existent user_id subset.
@@ -194,7 +226,11 @@ test "subquery: EXISTS on empty table returns false for all outer rows" {
 
 test "subquery: scalar COUNT returns 0 when subquery matches no rows" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     // COUNT of orders for user 99 (none) should equal 0.
     // WHERE 0 = 0 is always true, so all users are returned.
@@ -208,7 +244,11 @@ test "subquery: scalar COUNT returns 0 when subquery matches no rows" {
 
 test "subquery: IN with empty subquery result returns no rows" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     // No orders belong to user 99, so the IN set is empty — no user matches.
     const q = (try s.gw.register(
@@ -221,7 +261,11 @@ test "subquery: IN with empty subquery result returns no rows" {
 
 test "subquery: NOT IN with empty subquery result returns all rows" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     const q = (try s.gw.register(
         \\SELECT id FROM users WHERE id NOT IN (SELECT user_id FROM orders WHERE user_id = 99)
@@ -233,7 +277,11 @@ test "subquery: NOT IN with empty subquery result returns all rows" {
 
 test "subquery: multiple subqueries in same WHERE clause" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     // Users whose id is in the orders user_id set AND whose id is NOT in the
     // set of user_ids who placed orders with user_id = 2.
@@ -252,7 +300,11 @@ test "subquery: multiple subqueries in same WHERE clause" {
 
 test "subquery: nested subquery — IN containing scalar subquery in WHERE" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     // Users whose id is among order user_ids where amount > min(amount).
     // min(amount) = 20; orders with amount > 20: user_id=1 (amounts 50, 80).
@@ -270,7 +322,11 @@ test "subquery: nested subquery — IN containing scalar subquery in WHERE" {
 
 test "subquery: scalar subquery in SELECT list returns NULL when source empty" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     // MIN on a filtered set with no matching rows returns NULL.
     const q = (try s.gw.register(
@@ -286,7 +342,11 @@ test "subquery: scalar subquery in SELECT list returns NULL when source empty" {
 
 test "subquery: ASSERT with scalar COUNT subquery passes when condition met" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     // This transaction inserts a new order only if user 3 has fewer than 5 orders.
     // User 3 currently has 0 orders, so the ASSERT passes.
@@ -309,7 +369,11 @@ test "subquery: ASSERT with scalar COUNT subquery passes when condition met" {
 
 test "subquery: ASSERT with scalar COUNT subquery aborts when condition fails" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     // User 1 has 2 orders. Require count < 1 — should abort.
     const txn = (try s.gw.register(

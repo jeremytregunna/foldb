@@ -115,8 +115,7 @@ test "Bytes round-trip" {
 }
 
 test "UUID round-trip (BE preserved)" {
-    const uuid = [16]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10 };
+    const uuid = [16]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10 };
     const v = try roundTrip(testing.allocator, .{ .uuid = uuid });
     try testing.expectEqualSlices(u8, &uuid, &v.uuid);
 }
@@ -143,8 +142,10 @@ test "JSON round-trip" {
 }
 
 test "Vector f32 round-trip" {
-    const data = [_]u8{ 0x00, 0x00, 0x80, 0x3F, // 1.0f32 LE
-        0x00, 0x00, 0x00, 0x40 }; // 2.0f32 LE
+    const data = [_]u8{
+        0x00, 0x00, 0x80, 0x3F, // 1.0f32 LE
+        0x00, 0x00, 0x00, 0x40,
+    }; // 2.0f32 LE
     const vec = Vector{ .element_type = .f32, .dim = 2, .data = &data };
     const v = try roundTrip(testing.allocator, .{ .vector = vec });
     defer testing.allocator.free(v.vector.data);

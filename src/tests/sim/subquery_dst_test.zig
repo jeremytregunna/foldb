@@ -138,9 +138,15 @@ fn hashResultSet(gw: *Gateway, hash: [32]u8) ![32]u8 {
 
 fn runSubqueryDeterminismTest(seed: u64, n_ops: usize, alloc: std.mem.Allocator) !void {
     const dir_a = try makeTempDir("det_a", seed, alloc);
-    defer { removeDirRecursive(dir_a); alloc.free(dir_a); }
+    defer {
+        removeDirRecursive(dir_a);
+        alloc.free(dir_a);
+    }
     const dir_b = try makeTempDir("det_b", seed, alloc);
-    defer { removeDirRecursive(dir_b); alloc.free(dir_b); }
+    defer {
+        removeDirRecursive(dir_b);
+        alloc.free(dir_b);
+    }
 
     var clock = sim.VirtualClock.zero();
     const gw_a = try Gateway.init(dir_a, alloc, .{ .clock = clockSourceFrom(&clock) });
@@ -148,8 +154,10 @@ fn runSubqueryDeterminismTest(seed: u64, n_ops: usize, alloc: std.mem.Allocator)
     const gw_b = try Gateway.init(dir_b, alloc, .{ .clock = clockSourceFrom(&clock) });
     defer gw_b.deinit();
 
-    try gw_a.applyDdl(USERS_DDL); try gw_a.applyDdl(ORDERS_DDL);
-    try gw_b.applyDdl(USERS_DDL); try gw_b.applyDdl(ORDERS_DDL);
+    try gw_a.applyDdl(USERS_DDL);
+    try gw_a.applyDdl(ORDERS_DDL);
+    try gw_b.applyDdl(USERS_DDL);
+    try gw_b.applyDdl(ORDERS_DDL);
 
     const seed_a = (try gw_a.register(SEED_USER_SQL)).hash;
     const seed_b = (try gw_b.register(SEED_USER_SQL)).hash;
@@ -179,11 +187,11 @@ fn runSubqueryDeterminismTest(seed: u64, n_ops: usize, alloc: std.mem.Allocator)
 
         _ = gw_a.execute(std.testing.io, ins_a, &.{
             .{ .int64 = order_id }, .{ .int64 = user_id },
-            .{ .int64 = amount }, .{ .int64 = cap },
+            .{ .int64 = amount },   .{ .int64 = cap },
         }, &.{}) catch {};
         _ = gw_b.execute(std.testing.io, ins_b, &.{
             .{ .int64 = order_id }, .{ .int64 = user_id },
-            .{ .int64 = amount }, .{ .int64 = cap },
+            .{ .int64 = amount },   .{ .int64 = cap },
         }, &.{}) catch {};
         clock.advance(1);
     }
@@ -212,7 +220,10 @@ test "dst: subquery determinism — identical workload with COUNT ASSERT produce
 test "dst: subquery crash recovery — COUNT-guarded inserts survive log replay" {
     const alloc = testing.allocator;
     const dir = try makeTempDir("crash", 0xB0BB_DEAF, alloc);
-    defer { removeDirRecursive(dir); alloc.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        alloc.free(dir);
+    }
 
     // Phase 1: seed + commit transactions, crash without flush.
     {
@@ -276,7 +287,10 @@ test "dst: subquery crash recovery — COUNT-guarded inserts survive log replay"
 test "dst: subquery ASSERT abort leaves no state after crash recovery" {
     const alloc = testing.allocator;
     const dir = try makeTempDir("abort", 0xAB04_DEAD, alloc);
-    defer { removeDirRecursive(dir); alloc.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        alloc.free(dir);
+    }
 
     {
         const gw = try Gateway.init(dir, std.heap.page_allocator, .{});

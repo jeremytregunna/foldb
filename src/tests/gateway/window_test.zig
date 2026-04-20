@@ -104,7 +104,7 @@ test "LAG: returns previous row value within partition" {
     const r2 = rowById(rs.rows, 0, 2).?;
     const r3 = rowById(rs.rows, 0, 3).?;
 
-    try testing.expect(r1[1] == null);           // first row has no previous
+    try testing.expect(r1[1] == null); // first row has no previous
     try testing.expectEqual(@as(i64, 100), r2[1].?.int64); // previous of row 2 = row 1
     try testing.expectEqual(@as(i64, 200), r3[1].?.int64); // previous of row 3 = row 2
 }

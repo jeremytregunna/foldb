@@ -155,9 +155,15 @@ fn hashScan(gw: *Gateway, scan_hash: [32]u8, alloc: std.mem.Allocator) ![32]u8 {
 
 fn runDeterminismTest(seed: u64, n_ops: usize, alloc: std.mem.Allocator) !void {
     const dir_a = try makeTempDir("a", seed, alloc);
-    defer { removeDirRecursive(dir_a); alloc.free(dir_a); }
+    defer {
+        removeDirRecursive(dir_a);
+        alloc.free(dir_a);
+    }
     const dir_b = try makeTempDir("b", seed, alloc);
-    defer { removeDirRecursive(dir_b); alloc.free(dir_b); }
+    defer {
+        removeDirRecursive(dir_b);
+        alloc.free(dir_b);
+    }
 
     // Shared virtual clock — both nodes see the same logical time.
     var clock = sim.VirtualClock.zero();

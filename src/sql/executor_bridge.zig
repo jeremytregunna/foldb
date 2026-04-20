@@ -1023,7 +1023,7 @@ pub const SqlExecutor = struct {
                         var offset = target_vals.len;
                         for (using_rows.items, indices) |bucket, idx| {
                             const uv = bucket.items[idx];
-                            @memcpy(combined[offset..offset + uv.len], uv);
+                            @memcpy(combined[offset .. offset + uv.len], uv);
                             offset += uv.len;
                         }
                         var row_ctx = ctx;
@@ -1032,7 +1032,10 @@ pub const SqlExecutor = struct {
                             const v = try evalExpr(f, row_ctx);
                             break :v v.toBool() orelse false;
                         } else true;
-                        if (passes_filter) { found = true; break; }
+                        if (passes_filter) {
+                            found = true;
+                            break;
+                        }
 
                         // Advance counters (right-to-left carry).
                         var k: usize = n_using;
@@ -1103,7 +1106,10 @@ pub const SqlExecutor = struct {
                         break;
                     }
                 }
-                if (!found) { all_found = false; break; }
+                if (!found) {
+                    all_found = false;
+                    break;
+                }
             }
             if (!all_found) continue;
 
@@ -1144,8 +1150,14 @@ pub const SqlExecutor = struct {
             for (fk.ref_columns, 0..) |ref_col_id, i| {
                 const col_pos: usize = for (parent_tbl.columns, 0..) |col, ci| {
                     if (col.id == ref_col_id) break ci;
-                } else { parent_ok = false; break; };
-                if (col_pos >= parent_row.values.len) { parent_ok = false; break; }
+                } else {
+                    parent_ok = false;
+                    break;
+                };
+                if (col_pos >= parent_row.values.len) {
+                    parent_ok = false;
+                    break;
+                }
                 parent_ref_vals[i] = parent_row.values[col_pos];
             }
             if (!parent_ok) continue;
@@ -1158,9 +1170,18 @@ pub const SqlExecutor = struct {
                 for (fk.columns, 0..) |fk_col_id, i| {
                     const col_pos: usize = for (child_tbl.columns, 0..) |col, ci| {
                         if (col.id == fk_col_id) break ci;
-                    } else { matches = false; break; };
-                    if (col_pos >= child_row.values.len) { matches = false; break; }
-                    if (!child_row.values[col_pos].eql(parent_ref_vals[i])) { matches = false; break; }
+                    } else {
+                        matches = false;
+                        break;
+                    };
+                    if (col_pos >= child_row.values.len) {
+                        matches = false;
+                        break;
+                    }
+                    if (!child_row.values[col_pos].eql(parent_ref_vals[i])) {
+                        matches = false;
+                        break;
+                    }
                 }
                 if (matches) {
                     if (ibfk.fk.name) |n| {
@@ -2027,21 +2048,45 @@ fn evalBinary(
             else => error.TypeMismatch,
         },
         .contains => blk: {
-            const ls = switch (lv) { .bytes_val => |b| b, .string_val => |s| s, else => break :blk plan_mod.Value.null_val };
-            const rs = switch (rv) { .bytes_val => |b| b, .string_val => |s| s, else => break :blk plan_mod.Value.null_val };
+            const ls = switch (lv) {
+                .bytes_val => |b| b,
+                .string_val => |s| s,
+                else => break :blk plan_mod.Value.null_val,
+            };
+            const rs = switch (rv) {
+                .bytes_val => |b| b,
+                .string_val => |s| s,
+                else => break :blk plan_mod.Value.null_val,
+            };
             break :blk .{ .bool_val = jsonContains(ls, rs, ctx.alloc) };
         },
         .contained => blk: {
-            const ls = switch (lv) { .bytes_val => |b| b, .string_val => |s| s, else => break :blk plan_mod.Value.null_val };
-            const rs = switch (rv) { .bytes_val => |b| b, .string_val => |s| s, else => break :blk plan_mod.Value.null_val };
+            const ls = switch (lv) {
+                .bytes_val => |b| b,
+                .string_val => |s| s,
+                else => break :blk plan_mod.Value.null_val,
+            };
+            const rs = switch (rv) {
+                .bytes_val => |b| b,
+                .string_val => |s| s,
+                else => break :blk plan_mod.Value.null_val,
+            };
             break :blk .{ .bool_val = jsonContains(rs, ls, ctx.alloc) };
         },
         .arrow => blk: {
-            const json = switch (lv) { .bytes_val => |b| b, .string_val => |s| s, else => break :blk plan_mod.Value.null_val };
+            const json = switch (lv) {
+                .bytes_val => |b| b,
+                .string_val => |s| s,
+                else => break :blk plan_mod.Value.null_val,
+            };
             break :blk jsonFieldAccess(json, rv, false, ctx.alloc);
         },
         .darrow => blk: {
-            const json = switch (lv) { .bytes_val => |b| b, .string_val => |s| s, else => break :blk plan_mod.Value.null_val };
+            const json = switch (lv) {
+                .bytes_val => |b| b,
+                .string_val => |s| s,
+                else => break :blk plan_mod.Value.null_val,
+            };
             break :blk jsonFieldAccess(json, rv, true, ctx.alloc);
         },
         .bit_and => switch (lv) {
@@ -2131,7 +2176,10 @@ fn jsonContains(left: []const u8, right: []const u8, alloc: std.mem.Allocator) b
 fn jsonValueContains(left: std.json.Value, right: std.json.Value) bool {
     return switch (right) {
         .object => |ro| {
-            const lo = switch (left) { .object => |o| o, else => return false };
+            const lo = switch (left) {
+                .object => |o| o,
+                else => return false,
+            };
             var it = ro.iterator();
             while (it.next()) |entry| {
                 const lv = lo.get(entry.key_ptr.*) orelse return false;
@@ -2140,22 +2188,43 @@ fn jsonValueContains(left: std.json.Value, right: std.json.Value) bool {
             return true;
         },
         .array => |ra| {
-            const la = switch (left) { .array => |a| a, else => return false };
+            const la = switch (left) {
+                .array => |a| a,
+                else => return false,
+            };
             for (ra.items) |rv| {
                 var found = false;
                 for (la.items) |lv| {
-                    if (jsonValueContains(lv, rv)) { found = true; break; }
+                    if (jsonValueContains(lv, rv)) {
+                        found = true;
+                        break;
+                    }
                 }
                 if (!found) return false;
             }
             return true;
         },
         .null => left == .null,
-        .bool => |b| switch (left) { .bool => |lb| lb == b, else => false },
-        .integer => |n| switch (left) { .integer => |ln| ln == n, else => false },
-        .float => |f| switch (left) { .float => |lf| lf == f, else => false },
-        .string => |s| switch (left) { .string => |ls| std.mem.eql(u8, ls, s), else => false },
-        .number_string => |s| switch (left) { .number_string => |ls| std.mem.eql(u8, ls, s), else => false },
+        .bool => |b| switch (left) {
+            .bool => |lb| lb == b,
+            else => false,
+        },
+        .integer => |n| switch (left) {
+            .integer => |ln| ln == n,
+            else => false,
+        },
+        .float => |f| switch (left) {
+            .float => |lf| lf == f,
+            else => false,
+        },
+        .string => |s| switch (left) {
+            .string => |ls| std.mem.eql(u8, ls, s),
+            else => false,
+        },
+        .number_string => |s| switch (left) {
+            .number_string => |ls| std.mem.eql(u8, ls, s),
+            else => false,
+        },
     };
 }
 
@@ -2950,16 +3019,52 @@ fn serializeRowKey(row: []const ?ColumnValue, alloc: std.mem.Allocator) ![]const
             try buf.append(alloc, 1);
             switch (cv) {
                 .bool_t => |b| try buf.append(alloc, if (b) 1 else 0),
-                .int8 => |v| { var tmp: [1]u8 = undefined; std.mem.writeInt(i8, &tmp, v, .little); try buf.appendSlice(alloc, &tmp); },
-                .int16 => |v| { var tmp: [2]u8 = undefined; std.mem.writeInt(i16, &tmp, v, .little); try buf.appendSlice(alloc, &tmp); },
-                .int32 => |v| { var tmp: [4]u8 = undefined; std.mem.writeInt(i32, &tmp, v, .little); try buf.appendSlice(alloc, &tmp); },
-                .int64 => |v| { var tmp: [8]u8 = undefined; std.mem.writeInt(i64, &tmp, v, .little); try buf.appendSlice(alloc, &tmp); },
+                .int8 => |v| {
+                    var tmp: [1]u8 = undefined;
+                    std.mem.writeInt(i8, &tmp, v, .little);
+                    try buf.appendSlice(alloc, &tmp);
+                },
+                .int16 => |v| {
+                    var tmp: [2]u8 = undefined;
+                    std.mem.writeInt(i16, &tmp, v, .little);
+                    try buf.appendSlice(alloc, &tmp);
+                },
+                .int32 => |v| {
+                    var tmp: [4]u8 = undefined;
+                    std.mem.writeInt(i32, &tmp, v, .little);
+                    try buf.appendSlice(alloc, &tmp);
+                },
+                .int64 => |v| {
+                    var tmp: [8]u8 = undefined;
+                    std.mem.writeInt(i64, &tmp, v, .little);
+                    try buf.appendSlice(alloc, &tmp);
+                },
                 .uint8 => |v| try buf.append(alloc, v),
-                .uint16 => |v| { var tmp: [2]u8 = undefined; std.mem.writeInt(u16, &tmp, v, .little); try buf.appendSlice(alloc, &tmp); },
-                .uint32 => |v| { var tmp: [4]u8 = undefined; std.mem.writeInt(u32, &tmp, v, .little); try buf.appendSlice(alloc, &tmp); },
-                .uint64 => |v| { var tmp: [8]u8 = undefined; std.mem.writeInt(u64, &tmp, v, .little); try buf.appendSlice(alloc, &tmp); },
-                .float32 => |v| { var tmp: [4]u8 = undefined; std.mem.writeInt(u32, &tmp, @bitCast(v), .little); try buf.appendSlice(alloc, &tmp); },
-                .float64 => |v| { var tmp: [8]u8 = undefined; std.mem.writeInt(u64, &tmp, @bitCast(v), .little); try buf.appendSlice(alloc, &tmp); },
+                .uint16 => |v| {
+                    var tmp: [2]u8 = undefined;
+                    std.mem.writeInt(u16, &tmp, v, .little);
+                    try buf.appendSlice(alloc, &tmp);
+                },
+                .uint32 => |v| {
+                    var tmp: [4]u8 = undefined;
+                    std.mem.writeInt(u32, &tmp, v, .little);
+                    try buf.appendSlice(alloc, &tmp);
+                },
+                .uint64 => |v| {
+                    var tmp: [8]u8 = undefined;
+                    std.mem.writeInt(u64, &tmp, v, .little);
+                    try buf.appendSlice(alloc, &tmp);
+                },
+                .float32 => |v| {
+                    var tmp: [4]u8 = undefined;
+                    std.mem.writeInt(u32, &tmp, @bitCast(v), .little);
+                    try buf.appendSlice(alloc, &tmp);
+                },
+                .float64 => |v| {
+                    var tmp: [8]u8 = undefined;
+                    std.mem.writeInt(u64, &tmp, @bitCast(v), .little);
+                    try buf.appendSlice(alloc, &tmp);
+                },
                 .string => |s| {
                     var tmp: [4]u8 = undefined;
                     std.mem.writeInt(u32, &tmp, @intCast(s.len), .little);

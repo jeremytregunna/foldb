@@ -62,7 +62,7 @@ fn removeDirRecursive(path: []const u8) void {
 // ---- Schema ----
 
 const ACCOUNTS_DDL = "CREATE TABLE accounts (id INT64 NOT NULL, balance INT64 NOT NULL, PRIMARY KEY (id))";
-const EVENTS_DDL   = "CREATE TABLE events (id INT64 NOT NULL, kind INT64 NOT NULL, PRIMARY KEY (id))";
+const EVENTS_DDL = "CREATE TABLE events (id INT64 NOT NULL, kind INT64 NOT NULL, PRIMARY KEY (id))";
 
 // ---- Tests ----
 
@@ -70,7 +70,10 @@ test "txn: named params resolve to positional indices" {
     // Verify that $name inside a TRANSACTION block resolves to its declared position,
     // producing the same hash as the equivalent $N form.
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
 
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
@@ -94,7 +97,10 @@ test "txn: named params resolve to positional indices" {
 
 test "txn: multi-statement block applies all mutations atomically" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
 
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
@@ -128,7 +134,10 @@ test "txn: ASSERT pass — mutations are applied" {
     // ASSERT evaluates a pure expression using declared params.
     // When it passes, the mutations in the block are applied.
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
 
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
@@ -156,7 +165,10 @@ test "txn: ASSERT pass — mutations are applied" {
 test "txn: ASSERT fail — no mutations applied" {
     // When ASSERT fails, the entire block is aborted and no mutations reach storage.
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
 
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
@@ -185,7 +197,10 @@ test "txn: ASSERT fail — no mutations applied" {
 test "txn: ASSERT fail aborts all prior mutations in block" {
     // Both updates must be absent if the trailing ASSERT fails.
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
 
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
@@ -220,7 +235,10 @@ test "txn: ASSERT fail aborts all prior mutations in block" {
 
 test "txn: multi-table transaction writes to both tables atomically" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
 
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
@@ -258,7 +276,10 @@ test "txn: optimistic concurrency — ASSERT on caller-supplied precondition" {
     // The client reads the current balance, passes it as expected_balance, and
     // the ASSERT ensures no concurrent write changed it between the read and commit.
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
 
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();

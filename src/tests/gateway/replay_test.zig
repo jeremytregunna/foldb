@@ -379,9 +379,15 @@ test "Gateway Replay: JOIN queries produce identical results on two instances" {
     const base = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
 
     const dir_a = try makeTempDir(alloc, base + 30);
-    defer { removeDir(dir_a); alloc.free(dir_a); }
+    defer {
+        removeDir(dir_a);
+        alloc.free(dir_a);
+    }
     const dir_b = try makeTempDir(alloc, base + 31);
-    defer { removeDir(dir_b); alloc.free(dir_b); }
+    defer {
+        removeDir(dir_b);
+        alloc.free(dir_b);
+    }
 
     const gw_a = try Gateway.init(dir_a, alloc, .{});
     defer gw_a.deinit();
@@ -390,8 +396,10 @@ test "Gateway Replay: JOIN queries produce identical results on two instances" {
 
     const users_ddl = "CREATE TABLE users (id INT64 NOT NULL, dept_id INT64 NOT NULL, PRIMARY KEY (id))";
     const depts_ddl = "CREATE TABLE depts (id INT64 NOT NULL, budget INT64 NOT NULL, PRIMARY KEY (id))";
-    try gw_a.applyDdl(users_ddl); try gw_b.applyDdl(users_ddl);
-    try gw_a.applyDdl(depts_ddl); try gw_b.applyDdl(depts_ddl);
+    try gw_a.applyDdl(users_ddl);
+    try gw_b.applyDdl(users_ddl);
+    try gw_a.applyDdl(depts_ddl);
+    try gw_b.applyDdl(depts_ddl);
 
     // Register all queries on both instances; hashes must match
     const ins_u_a = (try gw_a.register("INSERT INTO users (id, dept_id) VALUES ($1, $2)")).hash;
@@ -419,13 +427,13 @@ test "Gateway Replay: JOIN queries produce identical results on two instances" {
     try testing.expectEqualSlices(u8, &cross_a, &cross_b);
 
     // Apply identical data to both
-    const user_rows = [_][2]i64{ .{1, 10}, .{2, 10}, .{3, 99} };
+    const user_rows = [_][2]i64{ .{ 1, 10 }, .{ 2, 10 }, .{ 3, 99 } };
     for (user_rows) |r| {
         const p = [_]ColumnValue{ .{ .int64 = r[0] }, .{ .int64 = r[1] } };
         _ = try gw_a.execute(std.testing.io, ins_u_a, &p, &.{});
         _ = try gw_b.execute(std.testing.io, ins_u_b, &p, &.{});
     }
-    const dept_rows = [_][2]i64{ .{10, 1000}, .{20, 500} };
+    const dept_rows = [_][2]i64{ .{ 10, 1000 }, .{ 20, 500 } };
     for (dept_rows) |r| {
         const p = [_]ColumnValue{ .{ .int64 = r[0] }, .{ .int64 = r[1] } };
         _ = try gw_a.execute(std.testing.io, ins_d_a, &p, &.{});

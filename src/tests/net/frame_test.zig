@@ -71,11 +71,7 @@ test "Kind is non-exhaustive: unknown values don't match known tags" {
     // 0x04 (reserved) should not match any named tag
     const reserved: Kind = @enumFromInt(0x04);
     const is_known = switch (reserved) {
-        .hello, .auth, .auth_ok, .goodbye, .ping, .pong,
-        .register, .registered, .execute, .read_at,
-        .rows_begin, .rows_batch, .exec_ok,
-        .subscribe, .cdc_event, .ack_cdc, .unsubscribe,
-        .subscribe_ack, .cancel, .err => true,
+        .hello, .auth, .auth_ok, .goodbye, .ping, .pong, .register, .registered, .execute, .read_at, .rows_begin, .rows_batch, .exec_ok, .subscribe, .cdc_event, .ack_cdc, .unsubscribe, .subscribe_ack, .cancel, .err => true,
         _ => false,
     };
     try testing.expect(!is_known);

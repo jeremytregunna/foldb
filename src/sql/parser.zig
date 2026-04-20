@@ -14,7 +14,7 @@ pub const ParseError = error{
     UnsupportedSyntax,
     AmbiguousColumnRef,
     MissingNullability, // column in CREATE TABLE lacks NULL/NOT NULL
-    UnknownParam,       // $name not found in TRANSACTION param list
+    UnknownParam, // $name not found in TRANSACTION param list
     OutOfMemory,
 } || lex_mod.LexError;
 

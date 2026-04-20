@@ -66,7 +66,7 @@ pub const Match = hnsw_mod.Match;
 /// Typed index specification — one variant per index kind, carrying only the fields that apply.
 pub const IndexSpec = union(enum) {
     json_path: []const []const u8, // declared extraction paths
-    vector: u32,                   // vector dimension
+    vector: u32, // vector dimension
 };
 
 /// Descriptor passed from gateway to storage when registering a specialty index.

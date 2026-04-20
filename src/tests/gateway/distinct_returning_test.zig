@@ -73,7 +73,11 @@ fn setupGateway() !struct { gw: *Gateway, dir: []const u8 } {
 
 test "distinct: SELECT DISTINCT deduplicates rows" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     const q = (try s.gw.register("SELECT DISTINCT item_id FROM tags")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
@@ -85,7 +89,11 @@ test "distinct: SELECT DISTINCT deduplicates rows" {
 
 test "distinct: SELECT DISTINCT on single column with all unique values returns same count" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     const q = (try s.gw.register("SELECT DISTINCT id FROM tags")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
@@ -97,7 +105,11 @@ test "distinct: SELECT DISTINCT on single column with all unique values returns 
 
 test "distinct: SELECT DISTINCT on multi-column tuple" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     const q = (try s.gw.register("SELECT DISTINCT item_id, tag FROM tags")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
@@ -109,7 +121,11 @@ test "distinct: SELECT DISTINCT on multi-column tuple" {
 
 test "distinct: SELECT without DISTINCT returns all rows including duplicates" {
     const s = try setupGateway();
-    defer { s.gw.deinit(); removeDirRecursive(s.dir); testing.allocator.free(s.dir); }
+    defer {
+        s.gw.deinit();
+        removeDirRecursive(s.dir);
+        testing.allocator.free(s.dir);
+    }
 
     const q = (try s.gw.register("SELECT item_id FROM tags")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
@@ -123,14 +139,15 @@ test "distinct: SELECT without DISTINCT returns all rows including duplicates" {
 
 test "returning: INSERT RETURNING returns the inserted row values" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
     try gw.applyDdl(TAGS_DDL);
 
-    const ins = (try gw.register(
-        "INSERT INTO tags (id, item_id, tag) VALUES ($1, $2, $3) RETURNING id, tag"
-    )).hash;
+    const ins = (try gw.register("INSERT INTO tags (id, item_id, tag) VALUES ($1, $2, $3) RETURNING id, tag")).hash;
     const result = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 7 }, .{ .int64 = 99 }, .{ .int64 = 42 } }, &.{});
     try testing.expectEqual(@as(u64, 1), result.rows_affected);
     try testing.expect(result.result_set != null);
@@ -138,27 +155,31 @@ test "returning: INSERT RETURNING returns the inserted row values" {
     var rs = result.result_set.?;
     defer rs.deinit();
     try testing.expectEqual(@as(usize, 1), rs.rows.len);
-    try testing.expectEqual(@as(i64, 7), rs.rows[0][0].?.int64);  // id
+    try testing.expectEqual(@as(i64, 7), rs.rows[0][0].?.int64); // id
     try testing.expectEqual(@as(i64, 42), rs.rows[0][1].?.int64); // tag
 }
 
 test "returning: INSERT without RETURNING returns null result_set" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
     try gw.applyDdl(TAGS_DDL);
 
-    const ins = (try gw.register(
-        "INSERT INTO tags (id, item_id, tag) VALUES ($1, $2, $3)"
-    )).hash;
+    const ins = (try gw.register("INSERT INTO tags (id, item_id, tag) VALUES ($1, $2, $3)")).hash;
     const result = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 2 }, .{ .int64 = 3 } }, &.{});
     try testing.expect(result.result_set == null);
 }
 
 test "returning: UPDATE RETURNING returns updated row values" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
     try gw.applyDdl(TAGS_DDL);
@@ -166,9 +187,7 @@ test "returning: UPDATE RETURNING returns updated row values" {
     const ins = (try gw.register("INSERT INTO tags (id, item_id, tag) VALUES ($1, $2, $3)")).hash;
     _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 5 }, .{ .int64 = 10 } }, &.{});
 
-    const upd = (try gw.register(
-        "UPDATE tags SET tag = 99 WHERE id = 1 RETURNING id, tag"
-    )).hash;
+    const upd = (try gw.register("UPDATE tags SET tag = 99 WHERE id = 1 RETURNING id, tag")).hash;
     const result = try gw.execute(std.testing.io, upd, &.{}, &.{});
     try testing.expectEqual(@as(u64, 1), result.rows_affected);
     try testing.expect(result.result_set != null);
@@ -176,13 +195,16 @@ test "returning: UPDATE RETURNING returns updated row values" {
     var rs = result.result_set.?;
     defer rs.deinit();
     try testing.expectEqual(@as(usize, 1), rs.rows.len);
-    try testing.expectEqual(@as(i64, 1), rs.rows[0][0].?.int64);   // id
-    try testing.expectEqual(@as(i64, 99), rs.rows[0][1].?.int64);  // tag (new value)
+    try testing.expectEqual(@as(i64, 1), rs.rows[0][0].?.int64); // id
+    try testing.expectEqual(@as(i64, 99), rs.rows[0][1].?.int64); // tag (new value)
 }
 
 test "returning: DELETE RETURNING returns the deleted row values" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
     try gw.applyDdl(TAGS_DDL);
@@ -190,9 +212,7 @@ test "returning: DELETE RETURNING returns the deleted row values" {
     const ins = (try gw.register("INSERT INTO tags (id, item_id, tag) VALUES ($1, $2, $3)")).hash;
     _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 5 }, .{ .int64 = 77 } }, &.{});
 
-    const del = (try gw.register(
-        "DELETE FROM tags WHERE id = 1 RETURNING id, tag"
-    )).hash;
+    const del = (try gw.register("DELETE FROM tags WHERE id = 1 RETURNING id, tag")).hash;
     const result = try gw.execute(std.testing.io, del, &.{}, &.{});
     try testing.expectEqual(@as(u64, 1), result.rows_affected);
     try testing.expect(result.result_set != null);
@@ -200,22 +220,26 @@ test "returning: DELETE RETURNING returns the deleted row values" {
     var rs = result.result_set.?;
     defer rs.deinit();
     try testing.expectEqual(@as(usize, 1), rs.rows.len);
-    try testing.expectEqual(@as(i64, 1), rs.rows[0][0].?.int64);   // id
-    try testing.expectEqual(@as(i64, 77), rs.rows[0][1].?.int64);  // tag
+    try testing.expectEqual(@as(i64, 1), rs.rows[0][0].?.int64); // id
+    try testing.expectEqual(@as(i64, 77), rs.rows[0][1].?.int64); // tag
 }
 
 test "returning: RETURNING column names match aliases" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
     try gw.applyDdl(TAGS_DDL);
 
-    const ins = (try gw.register(
-        "INSERT INTO tags (id, item_id, tag) VALUES ($1, $2, $3) RETURNING id AS row_id, tag AS t"
-    )).hash;
+    const ins = (try gw.register("INSERT INTO tags (id, item_id, tag) VALUES ($1, $2, $3) RETURNING id AS row_id, tag AS t")).hash;
     const result = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 5 }, .{ .int64 = 9 }, .{ .int64 = 3 } }, &.{});
-    defer { var opt_rs = result.result_set; if (opt_rs) |*rs| rs.deinit(); }
+    defer {
+        var opt_rs = result.result_set;
+        if (opt_rs) |*rs| rs.deinit();
+    }
     try testing.expect(result.result_set != null);
     const rs = result.result_set.?;
     try testing.expectEqualStrings("row_id", rs.columns[0]);
@@ -226,7 +250,10 @@ test "returning: RETURNING column names match aliases" {
 
 test "distinct: SELECT DISTINCT treats two NULLs as equal (deduplicates them)" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
     try gw.applyDdl("CREATE TABLE nullable_tbl (id INT64 NOT NULL, v INT64, PRIMARY KEY (id))");
@@ -245,7 +272,10 @@ test "distinct: SELECT DISTINCT treats two NULLs as equal (deduplicates them)" {
 
 test "distinct: SELECT DISTINCT on empty table returns no rows" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
     try gw.applyDdl(TAGS_DDL);
@@ -260,7 +290,10 @@ test "distinct: SELECT DISTINCT on empty table returns no rows" {
 
 test "returning: UPDATE affecting multiple rows returns all updated rows" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
     try gw.applyDdl(TAGS_DDL);
@@ -270,9 +303,7 @@ test "returning: UPDATE affecting multiple rows returns all updated rows" {
     _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 2 }, .{ .int64 = 1 }, .{ .int64 = 5 } }, &.{});
     _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 3 }, .{ .int64 = 2 }, .{ .int64 = 5 } }, &.{});
 
-    const upd = (try gw.register(
-        "UPDATE tags SET tag = 99 WHERE item_id = 1 RETURNING id"
-    )).hash;
+    const upd = (try gw.register("UPDATE tags SET tag = 99 WHERE item_id = 1 RETURNING id")).hash;
     const result = try gw.execute(std.testing.io, upd, &.{}, &.{});
     try testing.expectEqual(@as(u64, 2), result.rows_affected);
     try testing.expect(result.result_set != null);
@@ -283,7 +314,10 @@ test "returning: UPDATE affecting multiple rows returns all updated rows" {
 
 test "returning: DELETE affecting multiple rows returns all deleted rows" {
     const dir = try makeTempDir();
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
     const gw = try Gateway.init(dir, testing.allocator, .{});
     defer gw.deinit();
     try gw.applyDdl(TAGS_DDL);
@@ -292,9 +326,7 @@ test "returning: DELETE affecting multiple rows returns all deleted rows" {
     _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 7 }, .{ .int64 = 1 } }, &.{});
     _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 2 }, .{ .int64 = 7 }, .{ .int64 = 2 } }, &.{});
 
-    const del = (try gw.register(
-        "DELETE FROM tags WHERE item_id = 7 RETURNING id, tag"
-    )).hash;
+    const del = (try gw.register("DELETE FROM tags WHERE item_id = 7 RETURNING id, tag")).hash;
     const result = try gw.execute(std.testing.io, del, &.{}, &.{});
     try testing.expectEqual(@as(u64, 2), result.rows_affected);
     try testing.expect(result.result_set != null);

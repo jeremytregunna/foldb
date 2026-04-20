@@ -139,9 +139,15 @@ fn hashScan(gw: *Gateway, scan_hash: [32]u8) ![32]u8 {
 
 fn runTxnDeterminismTest(seed: u64, n_transfers: usize, alloc: std.mem.Allocator) !void {
     const dir_a = try makeTempDir("det_a", seed, alloc);
-    defer { removeDirRecursive(dir_a); alloc.free(dir_a); }
+    defer {
+        removeDirRecursive(dir_a);
+        alloc.free(dir_a);
+    }
     const dir_b = try makeTempDir("det_b", seed, alloc);
-    defer { removeDirRecursive(dir_b); alloc.free(dir_b); }
+    defer {
+        removeDirRecursive(dir_b);
+        alloc.free(dir_b);
+    }
 
     var clock = sim.VirtualClock.zero();
     const opts_a = Gateway.Options{ .clock = clockSourceFrom(&clock) };
@@ -206,7 +212,10 @@ test "dst: txn determinism — identical transfer workload produces identical st
 test "dst: txn crash recovery — committed transaction blocks survive log replay" {
     const alloc = testing.allocator;
     const dir = try makeTempDir("crash", 0xC4A5_5000, alloc);
-    defer { removeDirRecursive(dir); alloc.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        alloc.free(dir);
+    }
 
     // Phase 1: commit transfers without flushing, then crash.
     {

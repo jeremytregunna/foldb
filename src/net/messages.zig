@@ -450,7 +450,7 @@ pub const WireCdcEffect = struct {
     key: []const u8,
     op: CdcOp,
     before: []const TypedValue, // len=0 if absent
-    after: []const TypedValue,  // len=0 if absent
+    after: []const TypedValue, // len=0 if absent
 };
 
 pub fn encodeCdcEffect(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, e: WireCdcEffect) !void {

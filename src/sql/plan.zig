@@ -520,10 +520,16 @@ pub const Planner = struct {
                         var left_pos: ?u32 = null;
                         var right_pos: ?u32 = null;
                         for (self.scope.items[0..right_scope_start]) |e| {
-                            if (std.ascii.eqlIgnoreCase(e.col_name, col_name)) { left_pos = e.position; break; }
+                            if (std.ascii.eqlIgnoreCase(e.col_name, col_name)) {
+                                left_pos = e.position;
+                                break;
+                            }
                         }
                         for (self.scope.items[right_scope_start..]) |e| {
-                            if (std.ascii.eqlIgnoreCase(e.col_name, col_name)) { right_pos = e.position; break; }
+                            if (std.ascii.eqlIgnoreCase(e.col_name, col_name)) {
+                                right_pos = e.position;
+                                break;
+                            }
                         }
                         if (left_pos == null or right_pos == null) return error.ColumnNotFound;
                         const lc = try self.arena.create(PlanExpr);

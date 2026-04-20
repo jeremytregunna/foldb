@@ -82,7 +82,10 @@ fn removeDirRecursive(path: []const u8) void {
 
 fn runDiskFaultTest(seed: u64, fault_rate: f64, alloc: std.mem.Allocator) !void {
     const dir = try makeTempDir("f", seed, alloc);
-    defer { removeDirRecursive(dir); alloc.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        alloc.free(dir);
+    }
 
     var disk_sim = sim.DiskSim.init(seed, sim.DiskConfig{ .fault_rate = fault_rate });
     const hook = faultHookFrom(&disk_sim);
@@ -167,7 +170,10 @@ test "sim: disk fault recovery — durable rows survive faulted flush (multi-see
 test "sim: disk fault recovery — no faults, all rows survive" {
     // fault_rate=0.0: verify baseline (no faults means all 20 rows present).
     const dir = try makeTempDir("nofault", 42, testing.allocator);
-    defer { removeDirRecursive(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
 
     var disk_sim = sim.DiskSim.init(42, sim.DiskConfig{ .fault_rate = 0.0 });
     const hook = faultHookFrom(&disk_sim);
