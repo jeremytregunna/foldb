@@ -712,6 +712,19 @@ pub fn build(b: *std.Build) void {
     const sim_disk_fault_tests = b.addTest(.{ .root_module = sim_disk_fault_test_module });
     const run_sim_disk_fault_tests = b.addRunArtifact(sim_disk_fault_tests);
 
+    // Sim OCC DST test
+    const sim_occ_dst_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sim/occ_dst_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sim_occ_dst_test_module.addImport("sim.zig", sim_module);
+    sim_occ_dst_test_module.addImport("executor.zig", executor_module);
+    sim_occ_dst_test_module.addImport("storage.zig", storage_module);
+    sim_occ_dst_test_module.addImport("log.zig", log_module);
+    const sim_occ_dst_tests = b.addTest(.{ .root_module = sim_occ_dst_test_module });
+    const run_sim_occ_dst_tests = b.addRunArtifact(sim_occ_dst_tests);
+
     // Net sub-modules (wire protocol layer)
     const net_frame_module = b.createModule(.{
         .root_source_file = b.path("src/net/frame.zig"),
@@ -1141,4 +1154,5 @@ pub fn build(b: *std.Build) void {
     dst_step.dependOn(&run_sim_disk_fault_tests.step);
     dst_step.dependOn(&run_sim_txn_dst_tests.step);
     dst_step.dependOn(&run_sim_subquery_dst_tests.step);
+    dst_step.dependOn(&run_sim_occ_dst_tests.step);
 }
