@@ -48,8 +48,10 @@ pub const PartitionSet = struct {
     pub fn init(storages: []*Storage, alloc: std.mem.Allocator) !PartitionSet {
         const execs = try alloc.alloc(Executor, storages.len);
         errdefer alloc.free(execs);
+        const pc: PartitionId = @intCast(storages.len);
         for (storages, 0..) |s, i| {
             execs[i] = Executor.init(s, alloc);
+            execs[i].partition_count = pc;
         }
         return .{ .executors = execs, .alloc = alloc };
     }

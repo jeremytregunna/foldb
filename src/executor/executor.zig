@@ -88,6 +88,9 @@ pub const Executor = struct {
     registry: QueryRegistry,
     committed_seq: Seq,
     alloc: std.mem.Allocator,
+    /// Number of storage partitions; used to validate write_set_hint against actual mutations.
+    /// Must match the sequencer's partition_count. Defaults to 1 (single-partition).
+    partition_count: PartitionId = 1,
     /// Optional log reference for notifying snapshot advancement.
     log: ?*Log = null,
     /// Optional CDC manager for change-data-capture event dispatch.
