@@ -305,6 +305,11 @@ pub const TypeChecker = struct {
                     if (!t.eql(.bool)) return error.TypeMismatch;
                     return .bool;
                 },
+                .bit_not => {
+                    const t = try self.inferExpr(u.expr, ctx);
+                    if (!t.isInteger()) return error.TypeMismatch;
+                    return t;
+                },
             },
 
             .is_null, .is_not_null => |inner| {
@@ -478,6 +483,11 @@ pub const TypeChecker = struct {
                 // JSON field access
                 if (!lt.eql(.json)) return error.TypeMismatch;
                 return if (op == .darrow) .string else .json;
+            },
+            .bit_and, .bit_or, .bit_xor, .shl, .shr => {
+                if (!lt.isInteger() or !rt.isInteger()) return error.TypeMismatch;
+                if (!lt.eql(rt) and rt != .null_type and lt != .null_type) return error.ImplicitTypeCoercion;
+                return lt;
             },
         }
     }

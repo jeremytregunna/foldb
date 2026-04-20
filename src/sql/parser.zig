@@ -1123,7 +1123,7 @@ pub const Parser = struct {
     }
 
     fn parseIsExpr(self: *Parser) ParseError!*ast.Expr {
-        const left = try self.parseAdditiveExpr();
+        const left = try self.parseBitOrExpr();
         if (try self.eat(.kw_is)) {
             const negated = try self.eat(.kw_not);
             if ((try self.peekKind()) == .lit_null) {
@@ -1134,7 +1134,7 @@ pub const Parser = struct {
             }
             if (try self.eat(.kw_distinct)) {
                 _ = try self.expect(.kw_from);
-                const right = try self.parseAdditiveExpr();
+                const right = try self.parseBitOrExpr();
                 const e = try self.arenaAlloc(ast.Expr);
                 e.* = if (negated)
                     .{ .is_not_distinct = .{ .left = left, .right = right } }
@@ -1143,6 +1143,57 @@ pub const Parser = struct {
                 return e;
             }
             return error.UnexpectedToken;
+        }
+        return left;
+    }
+
+    fn parseBitOrExpr(self: *Parser) ParseError!*ast.Expr {
+        var left = try self.parseBitXorExpr();
+        while (try self.eat(.op_pipe)) {
+            const right = try self.parseBitXorExpr();
+            const e = try self.arenaAlloc(ast.Expr);
+            e.* = .{ .binary = .{ .op = .bit_or, .left = left, .right = right } };
+            left = e;
+        }
+        return left;
+    }
+
+    fn parseBitXorExpr(self: *Parser) ParseError!*ast.Expr {
+        var left = try self.parseBitAndExpr();
+        while (try self.eat(.op_hat)) {
+            const right = try self.parseBitAndExpr();
+            const e = try self.arenaAlloc(ast.Expr);
+            e.* = .{ .binary = .{ .op = .bit_xor, .left = left, .right = right } };
+            left = e;
+        }
+        return left;
+    }
+
+    fn parseBitAndExpr(self: *Parser) ParseError!*ast.Expr {
+        var left = try self.parseShiftExpr();
+        while (try self.eat(.op_amp)) {
+            const right = try self.parseShiftExpr();
+            const e = try self.arenaAlloc(ast.Expr);
+            e.* = .{ .binary = .{ .op = .bit_and, .left = left, .right = right } };
+            left = e;
+        }
+        return left;
+    }
+
+    fn parseShiftExpr(self: *Parser) ParseError!*ast.Expr {
+        var left = try self.parseAdditiveExpr();
+        while (true) {
+            const k = try self.peekKind();
+            const op: ast.BinOp = switch (k) {
+                .op_lshift => .shl,
+                .op_rshift => .shr,
+                else => break,
+            };
+            _ = try self.advance();
+            const right = try self.parseAdditiveExpr();
+            const e = try self.arenaAlloc(ast.Expr);
+            e.* = .{ .binary = .{ .op = op, .left = left, .right = right } };
+            left = e;
         }
         return left;
     }
@@ -1192,6 +1243,12 @@ pub const Parser = struct {
             const inner = try self.parseUnaryExpr();
             const e = try self.arenaAlloc(ast.Expr);
             e.* = .{ .unary = .{ .op = .neg, .expr = inner } };
+            return e;
+        }
+        if (try self.eat(.op_tilde)) {
+            const inner = try self.parseUnaryExpr();
+            const e = try self.arenaAlloc(ast.Expr);
+            e.* = .{ .unary = .{ .op = .bit_not, .expr = inner } };
             return e;
         }
         return self.parseCastExpr();

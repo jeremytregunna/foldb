@@ -111,9 +111,14 @@ pub const BinOp = enum {
     contained, // <@
     arrow, // ->  (JSON field access, returns JSON)
     darrow, // ->> (JSON field access, returns text)
+    bit_and, // &
+    bit_or, // |
+    bit_xor, // ^
+    shl, // <<
+    shr, // >>
 };
 
-pub const UnaryOp = enum { neg, not };
+pub const UnaryOp = enum { neg, not, bit_not };
 
 pub const NondetKind = enum { now, random, uuid_v7 };
 

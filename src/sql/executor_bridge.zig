@@ -1512,6 +1512,13 @@ fn evalExpr(e: *plan_mod.PlanExpr, ctx: EvalCtx) SqlExecError!plan_mod.Value {
                 const v = try evalExpr(u.expr, ctx);
                 return .{ .bool_val = !(v.toBool() orelse return error.TypeMismatch) };
             },
+            .bit_not => {
+                const v = try evalExpr(u.expr, ctx);
+                return switch (v) {
+                    .int_val => |n| .{ .int_val = ~n },
+                    else => error.TypeMismatch,
+                };
+            },
         },
 
         .is_null => |inner| blk: {
@@ -1707,6 +1714,41 @@ fn evalBinary(
         },
         .contains, .contained => .null_val, // JSON ops - simplified
         .arrow, .darrow => .null_val, // JSON ops - simplified
+        .bit_and => switch (lv) {
+            .int_val => |a| switch (rv) {
+                .int_val => |b| .{ .int_val = a & b },
+                else => error.TypeMismatch,
+            },
+            else => error.TypeMismatch,
+        },
+        .bit_or => switch (lv) {
+            .int_val => |a| switch (rv) {
+                .int_val => |b| .{ .int_val = a | b },
+                else => error.TypeMismatch,
+            },
+            else => error.TypeMismatch,
+        },
+        .bit_xor => switch (lv) {
+            .int_val => |a| switch (rv) {
+                .int_val => |b| .{ .int_val = a ^ b },
+                else => error.TypeMismatch,
+            },
+            else => error.TypeMismatch,
+        },
+        .shl => switch (lv) {
+            .int_val => |a| switch (rv) {
+                .int_val => |b| .{ .int_val = a << @as(u6, @truncate(@as(u64, @bitCast(b)))) },
+                else => error.TypeMismatch,
+            },
+            else => error.TypeMismatch,
+        },
+        .shr => switch (lv) {
+            .int_val => |a| switch (rv) {
+                .int_val => |b| .{ .int_val = a >> @as(u6, @truncate(@as(u64, @bitCast(b)))) },
+                else => error.TypeMismatch,
+            },
+            else => error.TypeMismatch,
+        },
     };
 }
 
