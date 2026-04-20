@@ -20,6 +20,9 @@ const type_conv = @import("type_conv.zig");
 const agg_helpers = @import("agg_helpers.zig");
 const params_codec = @import("params_codec.zig");
 const key_encode = @import("key_encode.zig");
+const eval_expr_mod = @import("eval_expr.zig");
+const window_exec_mod = @import("window_exec.zig");
+const agg_accum_mod = @import("agg_accum.zig");
 
 // Aliases so internal call sites remain unchanged
 const columnValueToPlanValue = type_conv.columnValueToPlanValue;
@@ -40,6 +43,10 @@ const buildVirtualRow = key_encode.buildVirtualRow;
 const serializeRowKey = key_encode.serializeRowKey;
 pub const encodeParams = params_codec.encodeParams;
 pub const decodeParams = params_codec.decodeParams;
+const EvalCtx = eval_expr_mod.EvalCtx;
+const evalExpr = eval_expr_mod.evalExpr;
+const freeRowValues = eval_expr_mod.freeRowValues;
+const AggAccum = agg_accum_mod.AggAccum;
 
 pub const Storage = storage_mod.Storage;
 pub const Row = storage_mod.Row;
@@ -58,18 +65,7 @@ pub const ExecResult = union(enum) {
 };
 pub const AbortCode = executor_mod.AbortCode;
 
-pub const SqlExecError = error{
-    ConstraintViolation,
-    ForeignKeyViolation,
-    TableNotFound,
-    ColumnNotFound,
-    TypeMismatch,
-    DivisionByZero,
-    IntegerOverflow,
-    NullViolation,
-    AssertionFailed,
-    OutOfMemory,
-};
+pub const SqlExecError = eval_expr_mod.SqlExecError;
 
 /// Result of executing a SELECT plan.
 pub const ResultSet = struct {
@@ -88,17 +84,6 @@ pub const ResultSet = struct {
         for (self.columns) |name| self.alloc.free(name);
         self.alloc.free(self.columns);
     }
-};
-
-/// Context passed to expression evaluator during plan execution.
-const EvalCtx = struct {
-    executor: *SqlExecutor,
-    params: []const ColumnValue,
-    nondet: []const ResolvedValue,
-    seq: Seq,
-    row: ?[]const ?ColumnValue, // current row being evaluated
-    schema: *const schema_mod.SchemaRegistry,
-    alloc: std.mem.Allocator,
 };
 
 /// High-level SQL executor wrapping the storage and SQL registry.
@@ -201,7 +186,7 @@ pub const SqlExecutor = struct {
         var returning_rows: std.ArrayList([]const ?ColumnValue) = .empty;
         defer {
             if (!has_returning) {
-                for (returning_rows.items) |r| SqlExecutor.freeRowValues(r, self.alloc);
+                for (returning_rows.items) |r| freeRowValues(r, self.alloc);
                 returning_rows.deinit(self.alloc);
             }
         }
@@ -241,7 +226,8 @@ pub const SqlExecutor = struct {
         alloc: std.mem.Allocator,
     ) SqlExecError!std.ArrayList([]const ?ColumnValue) {
         const ctx = EvalCtx{
-            .executor = self,
+            .scan_fn = &executeScanShim,
+            .executor_ctx = self,
             .params = params,
             .nondet = nondet,
             .seq = seq,
@@ -294,7 +280,8 @@ pub const SqlExecutor = struct {
         }
 
         const ctx = EvalCtx{
-            .executor = self,
+            .scan_fn = &executeScanShim,
+            .executor_ctx = self,
             .params = params,
             .nondet = nondet,
             .seq = seq,
@@ -372,7 +359,7 @@ pub const SqlExecutor = struct {
             .filter => |f| {
                 var inner: std.ArrayList([]const ?ColumnValue) = .empty;
                 defer {
-                    for (inner.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
+                    for (inner.items) |r| freeRowValues(r, ctx.alloc);
                     inner.deinit(ctx.alloc);
                 }
                 try self.executeScan(f.input, ctx, &inner);
@@ -389,7 +376,7 @@ pub const SqlExecutor = struct {
             .project => |p| {
                 var inner: std.ArrayList([]const ?ColumnValue) = .empty;
                 defer {
-                    for (inner.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
+                    for (inner.items) |r| freeRowValues(r, ctx.alloc);
                     inner.deinit(ctx.alloc);
                 }
                 try self.executeScan(p.input, ctx, &inner);
@@ -415,7 +402,7 @@ pub const SqlExecutor = struct {
                         const gop = try seen.getOrPut(key);
                         if (gop.found_existing) {
                             ctx.alloc.free(key);
-                            SqlExecutor.freeRowValues(projected, ctx.alloc);
+                            freeRowValues(projected, ctx.alloc);
                             continue;
                         }
                     }
@@ -425,7 +412,7 @@ pub const SqlExecutor = struct {
             .limit => |l| {
                 var inner: std.ArrayList([]const ?ColumnValue) = .empty;
                 defer {
-                    for (inner.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
+                    for (inner.items) |r| freeRowValues(r, ctx.alloc);
                     inner.deinit(ctx.alloc);
                 }
                 try self.executeScan(l.input, ctx, &inner);
@@ -455,7 +442,7 @@ pub const SqlExecutor = struct {
             .sort => |s| {
                 var inner: std.ArrayList([]const ?ColumnValue) = .empty;
                 defer {
-                    for (inner.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
+                    for (inner.items) |r| freeRowValues(r, ctx.alloc);
                     inner.deinit(ctx.alloc);
                 }
                 try self.executeScan(s.input, ctx, &inner);
@@ -510,7 +497,7 @@ pub const SqlExecutor = struct {
             .window => |w| {
                 var inner: std.ArrayList([]const ?ColumnValue) = .empty;
                 defer {
-                    for (inner.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
+                    for (inner.items) |r| freeRowValues(r, ctx.alloc);
                     inner.deinit(ctx.alloc);
                 }
                 try self.executeScan(w.input, ctx, &inner);
@@ -529,7 +516,7 @@ pub const SqlExecutor = struct {
                 }
 
                 for (w.fns, 0..) |wf, fi| {
-                    try self.computeWindowFnForAll(wf, inner.items, win_results, fi, ctx);
+                    try window_exec_mod.computeWindowFnForAll(wf, inner.items, win_results, fi, ctx);
                 }
 
                 for (inner.items, 0..) |row, ri| {
@@ -546,12 +533,12 @@ pub const SqlExecutor = struct {
             .hash_join => |j| {
                 var left_rows: std.ArrayList([]const ?ColumnValue) = .empty;
                 defer {
-                    for (left_rows.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
+                    for (left_rows.items) |r| freeRowValues(r, ctx.alloc);
                     left_rows.deinit(ctx.alloc);
                 }
                 var right_rows: std.ArrayList([]const ?ColumnValue) = .empty;
                 defer {
-                    for (right_rows.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
+                    for (right_rows.items) |r| freeRowValues(r, ctx.alloc);
                     right_rows.deinit(ctx.alloc);
                 }
                 try self.executeScan(j.left, ctx, &left_rows);
@@ -614,7 +601,7 @@ pub const SqlExecutor = struct {
             .hash_agg => |ha| {
                 var inner: std.ArrayList([]const ?ColumnValue) = .empty;
                 defer {
-                    for (inner.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
+                    for (inner.items) |r| freeRowValues(r, ctx.alloc);
                     inner.deinit(ctx.alloc);
                 }
                 try self.executeScan(ha.input, ctx, &inner);
@@ -627,7 +614,7 @@ pub const SqlExecutor = struct {
                 var groups: std.ArrayList(GroupRow) = .empty;
                 defer {
                     for (groups.items) |g| {
-                        SqlExecutor.freeRowValues(g.key, ctx.alloc);
+                        freeRowValues(g.key, ctx.alloc);
                         for (g.accums) |*acc| acc.deinit(ctx.alloc);
                         ctx.alloc.free(g.accums);
                     }
@@ -653,7 +640,7 @@ pub const SqlExecutor = struct {
                     }
 
                     if (found_group) |g| {
-                        SqlExecutor.freeRowValues(key, ctx.alloc);
+                        freeRowValues(key, ctx.alloc);
                         for (ha.agg_exprs, g.accums) |ae, *acc| {
                             try acc.update(ae, row_ctx);
                         }
@@ -867,7 +854,7 @@ pub const SqlExecutor = struct {
         // Pre-load FROM table rows if a FROM clause was specified.
         var from_rows: std.ArrayList([]const ?ColumnValue) = .empty;
         defer {
-            for (from_rows.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
+            for (from_rows.items) |r| freeRowValues(r, ctx.alloc);
             from_rows.deinit(ctx.alloc);
         }
         if (upd.from_table_id) |from_id| {
@@ -883,7 +870,7 @@ pub const SqlExecutor = struct {
 
         while (iter.next() catch null) |row| {
             const row_vals = try self.rowToValues(row, pkColumnIds(tbl), ctx.alloc);
-            defer SqlExecutor.freeRowValues(row_vals, ctx.alloc);
+            defer freeRowValues(row_vals, ctx.alloc);
 
             // Build eval row: target cols, then FROM cols (if any).
             // For no-FROM case we avoid the allocation.
@@ -983,7 +970,7 @@ pub const SqlExecutor = struct {
         var using_rows: std.ArrayList(std.ArrayList([]const ?ColumnValue)) = .empty;
         defer {
             for (using_rows.items) |*bucket| {
-                for (bucket.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
+                for (bucket.items) |r| freeRowValues(r, ctx.alloc);
                 bucket.deinit(ctx.alloc);
             }
             using_rows.deinit(ctx.alloc);
@@ -1014,7 +1001,7 @@ pub const SqlExecutor = struct {
                 try self.rowToValues(row, &.{}, ctx.alloc)
             else
                 null;
-            defer if (row_vals) |rv| SqlExecutor.freeRowValues(rv, ctx.alloc);
+            defer if (row_vals) |rv| freeRowValues(rv, ctx.alloc);
 
             // Apply WHERE (with USING join if present).
             if (del.filter != null or del.using_table_ids.len > 0) {
@@ -1221,233 +1208,6 @@ pub const SqlExecutor = struct {
         }
     }
 
-    fn computeWindowFnForAll(
-        self: *SqlExecutor,
-        wf: plan_mod.WindowFnSpec,
-        rows: []const []const ?ColumnValue,
-        results: [][]?ColumnValue,
-        fn_idx: usize,
-        ctx: EvalCtx,
-    ) SqlExecError!void {
-        _ = self;
-
-        // Group rows into partitions by evaluating partition_by expressions
-        const PartKey = struct { vals: []?ColumnValue, indices: std.ArrayList(usize) };
-        var parts: std.ArrayList(PartKey) = .empty;
-        defer {
-            for (parts.items) |*p| {
-                ctx.alloc.free(p.vals);
-                p.indices.deinit(ctx.alloc);
-            }
-            parts.deinit(ctx.alloc);
-        }
-
-        for (rows, 0..) |row, ri| {
-            var row_ctx = ctx;
-            row_ctx.row = row;
-            const pk = try ctx.alloc.alloc(?ColumnValue, wf.partition_by.len);
-            for (wf.partition_by, 0..) |pb, i| {
-                const v = evalExpr(pb, row_ctx) catch .null_val;
-                pk[i] = planValueToColumnValue(v, ctx.alloc) catch null;
-            }
-
-            var found: ?*PartKey = null;
-            for (parts.items) |*p| {
-                if (aggKeyEquals(p.vals, pk)) {
-                    found = p;
-                    break;
-                }
-            }
-            if (found) |p| {
-                ctx.alloc.free(pk);
-                try p.indices.append(ctx.alloc, ri);
-            } else {
-                var idx_list: std.ArrayList(usize) = .empty;
-                try idx_list.append(ctx.alloc, ri);
-                try parts.append(ctx.alloc, .{ .vals = pk, .indices = idx_list });
-            }
-        }
-
-        // For each partition, sort by order_by, then assign window fn values
-        for (parts.items) |*p| {
-            const indices = p.indices.items;
-            var sorted = try ctx.alloc.dupe(usize, indices);
-            defer ctx.alloc.free(sorted);
-
-            // Stable insertion sort by order_by keys
-            for (1..sorted.len) |i| {
-                const key_idx = sorted[i];
-                var j: usize = i;
-                while (j > 0) {
-                    var ctx_a = ctx;
-                    var ctx_b = ctx;
-                    ctx_a.row = rows[sorted[j - 1]];
-                    ctx_b.row = rows[key_idx];
-                    const swap = blk: {
-                        for (wf.order_by) |sk| {
-                            const va = evalExpr(sk.expr, ctx_a) catch break :blk false;
-                            const vb = evalExpr(sk.expr, ctx_b) catch break :blk false;
-                            if (!va.eql(vb)) break :blk if (sk.asc) vb.lessThan(va) else va.lessThan(vb);
-                        }
-                        break :blk false;
-                    };
-                    if (!swap) break;
-                    sorted[j] = sorted[j - 1];
-                    j -= 1;
-                }
-                sorted[j] = key_idx;
-            }
-
-            if (std.ascii.eqlIgnoreCase(wf.fn_name, "row_number")) {
-                for (sorted, 0..) |ri, pos| {
-                    results[ri][fn_idx] = .{ .int64 = @intCast(pos + 1) };
-                }
-            } else if (std.ascii.eqlIgnoreCase(wf.fn_name, "rank")) {
-                var rank: i64 = 1;
-                var count: i64 = 0;
-                var prev_order_vals: ?[]plan_mod.Value = null;
-                defer if (prev_order_vals) |pv| ctx.alloc.free(pv);
-                for (sorted) |ri| {
-                    count += 1;
-                    var row_ctx = ctx;
-                    row_ctx.row = rows[ri];
-                    const cur = try ctx.alloc.alloc(plan_mod.Value, wf.order_by.len);
-                    defer ctx.alloc.free(cur);
-                    for (wf.order_by, 0..) |sk, i| {
-                        cur[i] = evalExpr(sk.expr, row_ctx) catch .null_val;
-                    }
-                    if (prev_order_vals) |pv| {
-                        var same = true;
-                        for (cur, pv) |cv, pval| {
-                            if (!cv.eql(pval)) {
-                                same = false;
-                                break;
-                            }
-                        }
-                        if (!same) {
-                            rank = count;
-                            ctx.alloc.free(pv);
-                            prev_order_vals = try ctx.alloc.dupe(plan_mod.Value, cur);
-                        }
-                    } else {
-                        prev_order_vals = try ctx.alloc.dupe(plan_mod.Value, cur);
-                    }
-                    results[ri][fn_idx] = .{ .int64 = rank };
-                }
-            } else if (std.ascii.eqlIgnoreCase(wf.fn_name, "dense_rank")) {
-                var rank: i64 = 0;
-                var prev_order_vals: ?[]plan_mod.Value = null;
-                defer if (prev_order_vals) |pv| ctx.alloc.free(pv);
-                for (sorted) |ri| {
-                    var row_ctx = ctx;
-                    row_ctx.row = rows[ri];
-                    const cur = try ctx.alloc.alloc(plan_mod.Value, wf.order_by.len);
-                    defer ctx.alloc.free(cur);
-                    for (wf.order_by, 0..) |sk, i| {
-                        cur[i] = evalExpr(sk.expr, row_ctx) catch .null_val;
-                    }
-                    if (prev_order_vals) |pv| {
-                        var same = true;
-                        for (cur, pv) |cv, pval| {
-                            if (!cv.eql(pval)) {
-                                same = false;
-                                break;
-                            }
-                        }
-                        if (!same) {
-                            rank += 1;
-                            ctx.alloc.free(pv);
-                            prev_order_vals = try ctx.alloc.dupe(plan_mod.Value, cur);
-                        }
-                    } else {
-                        rank = 1;
-                        prev_order_vals = try ctx.alloc.dupe(plan_mod.Value, cur);
-                    }
-                    results[ri][fn_idx] = .{ .int64 = rank };
-                }
-            } else if (std.ascii.eqlIgnoreCase(wf.fn_name, "lag") or
-                std.ascii.eqlIgnoreCase(wf.fn_name, "lead"))
-            {
-                const is_lead = std.ascii.eqlIgnoreCase(wf.fn_name, "lead");
-                for (sorted, 0..) |ri, pos| {
-                    // Evaluate offset (arg[1], default 1)
-                    const offset: usize = if (wf.args.len > 1) blk: {
-                        var row_ctx = ctx;
-                        row_ctx.row = rows[ri];
-                        const ov = evalExpr(wf.args[1], row_ctx) catch break :blk 1;
-                        break :blk switch (ov) {
-                            .int_val => |n| if (n >= 0) @intCast(n) else 1,
-                            else => 1,
-                        };
-                    } else 1;
-
-                    const src_pos: ?usize = if (is_lead) blk: {
-                        const fwd = pos + offset;
-                        break :blk if (fwd < sorted.len) fwd else null;
-                    } else blk: {
-                        break :blk if (pos >= offset) pos - offset else null;
-                    };
-
-                    if (src_pos) |sp| {
-                        var row_ctx = ctx;
-                        row_ctx.row = rows[sorted[sp]];
-                        const v = evalExpr(wf.args[0], row_ctx) catch continue;
-                        results[ri][fn_idx] = planValueToColumnValue(v, ctx.alloc) catch null;
-                    } else if (wf.args.len > 2) {
-                        var row_ctx = ctx;
-                        row_ctx.row = rows[ri];
-                        const dv = evalExpr(wf.args[2], row_ctx) catch continue;
-                        results[ri][fn_idx] = planValueToColumnValue(dv, ctx.alloc) catch null;
-                    }
-                    // else: out of bounds with no default — leave null
-                }
-            } else if (std.ascii.eqlIgnoreCase(wf.fn_name, "first_value")) {
-                if (sorted.len == 0 or wf.args.len == 0) continue;
-                var row_ctx = ctx;
-                row_ctx.row = rows[sorted[0]];
-                const v = evalExpr(wf.args[0], row_ctx) catch continue;
-                const cv = planValueToColumnValue(v, ctx.alloc) catch null;
-                for (sorted) |ri| {
-                    results[ri][fn_idx] = if (cv) |c| c.dupe(ctx.alloc) catch null else null;
-                }
-                if (cv) |c| c.freeIfOwned(ctx.alloc);
-            } else if (std.ascii.eqlIgnoreCase(wf.fn_name, "last_value")) {
-                if (sorted.len == 0 or wf.args.len == 0) continue;
-                var row_ctx = ctx;
-                row_ctx.row = rows[sorted[sorted.len - 1]];
-                const v = evalExpr(wf.args[0], row_ctx) catch continue;
-                const cv = planValueToColumnValue(v, ctx.alloc) catch null;
-                for (sorted) |ri| {
-                    results[ri][fn_idx] = if (cv) |c| c.dupe(ctx.alloc) catch null else null;
-                }
-                if (cv) |c| c.freeIfOwned(ctx.alloc);
-            } else if (std.ascii.eqlIgnoreCase(wf.fn_name, "nth_value")) {
-                if (sorted.len == 0 or wf.args.len < 2) continue;
-                // Evaluate n from args[1] (1-indexed, constant across partition)
-                var row_ctx0 = ctx;
-                row_ctx0.row = rows[sorted[0]];
-                const n: usize = blk: {
-                    const nv = evalExpr(wf.args[1], row_ctx0) catch break :blk 0;
-                    break :blk switch (nv) {
-                        .int_val => |iv| if (iv >= 1) @as(usize, @intCast(iv - 1)) else 0,
-                        else => 0,
-                    };
-                };
-                const cv: ?ColumnValue = if (n < sorted.len) blk: {
-                    var row_ctx = ctx;
-                    row_ctx.row = rows[sorted[n]];
-                    const v = evalExpr(wf.args[0], row_ctx) catch break :blk null;
-                    break :blk planValueToColumnValue(v, ctx.alloc) catch null;
-                } else null;
-                for (sorted) |ri| {
-                    results[ri][fn_idx] = if (cv) |c| c.dupe(ctx.alloc) catch null else null;
-                }
-                if (cv) |c| c.freeIfOwned(ctx.alloc);
-            }
-            // Unknown window functions leave result as null
-        }
-    }
-
     fn executeMerge(
         self: *SqlExecutor,
         m: plan_mod.MergePlan,
@@ -1459,7 +1219,7 @@ pub const SqlExecutor = struct {
         // Collect source rows
         var source_rows: std.ArrayList([]const ?ColumnValue) = .empty;
         defer {
-            for (source_rows.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
+            for (source_rows.items) |r| freeRowValues(r, ctx.alloc);
             source_rows.deinit(ctx.alloc);
         }
         try self.executeScan(m.source, ctx, &source_rows);
@@ -1470,7 +1230,7 @@ pub const SqlExecutor = struct {
         defer {
             for (target_data.items) |td| {
                 ctx.alloc.free(td.key);
-                SqlExecutor.freeRowValues(td.vals, ctx.alloc);
+                freeRowValues(td.vals, ctx.alloc);
             }
             target_data.deinit(ctx.alloc);
         }
@@ -1594,11 +1354,6 @@ pub const SqlExecutor = struct {
         }
     }
 
-    fn freeRowValues(vals: []const ?ColumnValue, alloc: std.mem.Allocator) void {
-        for (vals) |v| if (v) |cv| cv.freeIfOwned(alloc);
-        alloc.free(vals);
-    }
-
     fn dupeRow(row: []const ?ColumnValue, alloc: std.mem.Allocator) ![]const ?ColumnValue {
         const copy = try alloc.alloc(?ColumnValue, row.len);
         errdefer alloc.free(copy);
@@ -1632,755 +1387,14 @@ pub const SqlExecutor = struct {
     }
 };
 
-// ─── Aggregate accumulator ────────────────────────────────────────────────────
-
-const AggAccum = struct {
-    count: i64 = 0,
-    sum_int: i64 = 0,
-    sum_float: f64 = 0.0,
-    is_float: bool = false,
-    min: ?plan_mod.Value = null,
-    max: ?plan_mod.Value = null,
-    collected: std.ArrayListUnmanaged(plan_mod.Value) = .empty,
-    separator: ?[]const u8 = null,
-
-    fn deinit(self: *AggAccum, alloc: std.mem.Allocator) void {
-        for (self.collected.items) |v| freePlanValue(v, alloc);
-        self.collected.deinit(alloc);
-        if (self.separator) |s| alloc.free(s);
-    }
-
-    fn update(self: *AggAccum, ae: plan_mod.AggExpr, row_ctx: EvalCtx) SqlExecError!void {
-        if (ae.filter) |f| {
-            const fv = try evalExpr(f, row_ctx);
-            const passes = switch (fv) {
-                .bool_val => |b| b,
-                else => false,
-            };
-            if (!passes) return;
-        }
-
-        const val = if (ae.arg) |arg| try evalExpr(arg, row_ctx) else .null_val;
-        const fn_name = ae.fn_name;
-
-        if (std.ascii.eqlIgnoreCase(fn_name, "count")) {
-            if (ae.arg == null or val != .null_val) self.count += 1;
-        } else if (std.ascii.eqlIgnoreCase(fn_name, "sum") or
-            std.ascii.eqlIgnoreCase(fn_name, "avg"))
-        {
-            if (val != .null_val) {
-                self.count += 1;
-                switch (val) {
-                    .int_val => |n| self.sum_int += n,
-                    .float_val => |f| {
-                        self.sum_float += f;
-                        self.is_float = true;
-                    },
-                    else => {},
-                }
-            }
-        } else if (std.ascii.eqlIgnoreCase(fn_name, "min")) {
-            if (val != .null_val) {
-                if (self.min == null or val.lessThan(self.min.?)) self.min = val;
-            }
-        } else if (std.ascii.eqlIgnoreCase(fn_name, "max")) {
-            if (val != .null_val) {
-                if (self.max == null or self.max.?.lessThan(val)) self.max = val;
-            }
-        } else if (std.ascii.eqlIgnoreCase(fn_name, "array_agg")) {
-            if (val != .null_val) {
-                const duped = try dupePlanValue(val, row_ctx.alloc);
-                try self.collected.append(row_ctx.alloc, duped);
-            }
-        } else if (std.ascii.eqlIgnoreCase(fn_name, "string_agg")) {
-            if (val != .null_val) {
-                const duped = try dupePlanValue(val, row_ctx.alloc);
-                try self.collected.append(row_ctx.alloc, duped);
-                if (self.separator == null) {
-                    if (ae.separator) |sep_expr| {
-                        const sv = try evalExpr(sep_expr, row_ctx);
-                        if (sv == .string_val) {
-                            self.separator = try row_ctx.alloc.dupe(u8, sv.string_val);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn toValue(self: AggAccum, ae: plan_mod.AggExpr, alloc: std.mem.Allocator) !plan_mod.Value {
-        const fn_name = ae.fn_name;
-        if (std.ascii.eqlIgnoreCase(fn_name, "count")) {
-            return .{ .int_val = self.count };
-        } else if (std.ascii.eqlIgnoreCase(fn_name, "sum")) {
-            if (self.is_float) return .{ .float_val = self.sum_float };
-            return .{ .int_val = self.sum_int };
-        } else if (std.ascii.eqlIgnoreCase(fn_name, "avg")) {
-            if (self.count == 0) return .null_val;
-            const total: f64 = if (self.is_float) self.sum_float else @floatFromInt(self.sum_int);
-            return .{ .float_val = total / @as(f64, @floatFromInt(self.count)) };
-        } else if (std.ascii.eqlIgnoreCase(fn_name, "min")) {
-            return self.min orelse .null_val;
-        } else if (std.ascii.eqlIgnoreCase(fn_name, "max")) {
-            return self.max orelse .null_val;
-        } else if (std.ascii.eqlIgnoreCase(fn_name, "array_agg")) {
-            return .{ .bytes_val = try serializeArrayAgg(self.collected.items, alloc) };
-        } else if (std.ascii.eqlIgnoreCase(fn_name, "string_agg")) {
-            return .{ .string_val = try buildStringAgg(self.collected.items, self.separator orelse "", alloc) };
-        }
-        return .null_val;
-    }
-};
-
-// ─── Expression evaluator ─────────────────────────────────────────────────────
-
-fn evalExpr(e: *plan_mod.PlanExpr, ctx: EvalCtx) SqlExecError!plan_mod.Value {
-    return switch (e.*) {
-        .null_literal => .null_val,
-        .bool_literal => |v| .{ .bool_val = v },
-        .int_literal => |v| .{ .int_val = v },
-        .uint_literal => |v| .{ .uint_val = v },
-        .float_literal => |v| .{ .float_val = v },
-        .string_literal => |v| .{ .string_val = v },
-        .bytes_literal => |v| .{ .bytes_val = v },
-
-        .param => |i| {
-            if (i >= ctx.params.len) return error.TypeMismatch;
-            return columnValueToPlanValue(ctx.params[i]);
-        },
-
-        .nondet => |i| {
-            if (i >= ctx.nondet.len) return .null_val;
-            return switch (ctx.nondet[i]) {
-                .now => |ts| .{ .int_val = ts },
-                .random => |b| .{ .bytes_val = &b },
-                .uuid_v7 => |b| .{ .bytes_val = &b },
-            };
-        },
-
-        .column => |idx| {
-            const row = ctx.row orelse return .null_val;
-            if (idx >= row.len) return .null_val;
-            const cv = row[idx] orelse return .null_val;
-            return columnValueToPlanValue(cv);
-        },
-
-        .fn_call => |f| try evalBuiltin(f.name, f.args, ctx),
-
-        .binary => |b| try evalBinary(b.op, b.left, b.right, ctx),
-
-        .unary => |u| switch (u.op) {
-            .neg => {
-                const v = try evalExpr(u.expr, ctx);
-                return switch (v) {
-                    .int_val => |n| .{ .int_val = -n },
-                    .float_val => |n| .{ .float_val = -n },
-                    else => error.TypeMismatch,
-                };
-            },
-            .not => {
-                const v = try evalExpr(u.expr, ctx);
-                return .{ .bool_val = !(v.toBool() orelse return error.TypeMismatch) };
-            },
-            .bit_not => {
-                const v = try evalExpr(u.expr, ctx);
-                return switch (v) {
-                    .int_val => |n| .{ .int_val = ~n },
-                    else => error.TypeMismatch,
-                };
-            },
-        },
-
-        .is_null => |inner| blk: {
-            const v = try evalExpr(inner, ctx);
-            break :blk .{ .bool_val = v == .null_val };
-        },
-        .is_not_null => |inner| blk: {
-            const v = try evalExpr(inner, ctx);
-            break :blk .{ .bool_val = v != .null_val };
-        },
-
-        .cast => |c| {
-            const v = try evalExpr(c.expr, ctx);
-            return castValue(v, c.to) catch error.TypeMismatch;
-        },
-
-        .case_searched => |cs| blk: {
-            for (cs.whens) |w| {
-                const cond = try evalExpr(w.cond, ctx);
-                if (cond.toBool() orelse false) {
-                    break :blk try evalExpr(w.result, ctx);
-                }
-            }
-            if (cs.else_expr) |ee| break :blk try evalExpr(ee, ctx);
-            break :blk .null_val;
-        },
-
-        .table_column => |tc| {
-            // In a join context, the combined row has left then right columns.
-            // table_idx and col_idx were set by the planner; for M5 we treat the
-            // absolute position as table_idx * table_width + col_idx — but since
-            // the planner now emits .column for resolved refs, this path is only
-            // hit for unresolved cases. Return null safely.
-            _ = tc;
-            return .null_val;
-        },
-
-        .scalar_subquery => |sub| {
-            var rows: std.ArrayList([]const ?ColumnValue) = .empty;
-            defer {
-                for (rows.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
-                rows.deinit(ctx.alloc);
-            }
-            try ctx.executor.executeScan(sub, ctx, &rows);
-            if (rows.items.len == 0 or rows.items[0].len == 0) return .null_val;
-            const cv = rows.items[0][0] orelse return .null_val;
-            return columnValueToPlanValue(cv);
-        },
-
-        .exists_subquery => |sub| {
-            var rows: std.ArrayList([]const ?ColumnValue) = .empty;
-            defer {
-                for (rows.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
-                rows.deinit(ctx.alloc);
-            }
-            try ctx.executor.executeScan(sub, ctx, &rows);
-            return .{ .bool_val = rows.items.len > 0 };
-        },
-
-        .not_exists_subquery => |sub| {
-            var rows: std.ArrayList([]const ?ColumnValue) = .empty;
-            defer {
-                for (rows.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
-                rows.deinit(ctx.alloc);
-            }
-            try ctx.executor.executeScan(sub, ctx, &rows);
-            return .{ .bool_val = rows.items.len == 0 };
-        },
-
-        .in_subquery => |s| {
-            const lhs = try evalExpr(s.expr, ctx);
-            var rows: std.ArrayList([]const ?ColumnValue) = .empty;
-            defer {
-                for (rows.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
-                rows.deinit(ctx.alloc);
-            }
-            try ctx.executor.executeScan(s.plan, ctx, &rows);
-            for (rows.items) |row| {
-                if (row.len == 0) continue;
-                const cv = row[0] orelse continue;
-                if (lhs.eql(columnValueToPlanValue(cv))) return .{ .bool_val = true };
-            }
-            return .{ .bool_val = false };
-        },
-
-        .not_in_subquery => |s| {
-            const lhs = try evalExpr(s.expr, ctx);
-            var rows: std.ArrayList([]const ?ColumnValue) = .empty;
-            defer {
-                for (rows.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
-                rows.deinit(ctx.alloc);
-            }
-            try ctx.executor.executeScan(s.plan, ctx, &rows);
-            for (rows.items) |row| {
-                if (row.len == 0) continue;
-                const cv = row[0] orelse continue;
-                if (lhs.eql(columnValueToPlanValue(cv))) return .{ .bool_val = false };
-            }
-            return .{ .bool_val = true };
-        },
-    };
-}
-
-fn evalBinary(
-    op: ast.BinOp,
-    left: *plan_mod.PlanExpr,
-    right: *plan_mod.PlanExpr,
-    ctx: EvalCtx,
-) SqlExecError!plan_mod.Value {
-    const lv = try evalExpr(left, ctx);
-    const rv = try evalExpr(right, ctx);
-
-    if (lv == .null_val or rv == .null_val) {
-        return switch (op) {
-            .eq, .neq, .lt, .gt, .lte, .gte => .null_val,
-            .and_op => if (lv == .null_val and rv.toBool() == false) .{ .bool_val = false } else .null_val,
-            .or_op => if (lv == .null_val and rv.toBool() == true) .{ .bool_val = true } else .null_val,
-            else => .null_val,
-        };
-    }
-
-    return switch (op) {
-        .add => switch (lv) {
-            .int_val => |a| switch (rv) {
-                .int_val => |b| .{ .int_val = a + b },
-                else => error.TypeMismatch,
-            },
-            .float_val => |a| switch (rv) {
-                .float_val => |b| .{ .float_val = a + b },
-                else => error.TypeMismatch,
-            },
-            else => error.TypeMismatch,
-        },
-        .sub => switch (lv) {
-            .int_val => |a| switch (rv) {
-                .int_val => |b| .{ .int_val = a - b },
-                else => error.TypeMismatch,
-            },
-            .float_val => |a| switch (rv) {
-                .float_val => |b| .{ .float_val = a - b },
-                else => error.TypeMismatch,
-            },
-            else => error.TypeMismatch,
-        },
-        .mul => switch (lv) {
-            .int_val => |a| switch (rv) {
-                .int_val => |b| .{ .int_val = a * b },
-                else => error.TypeMismatch,
-            },
-            .float_val => |a| switch (rv) {
-                .float_val => |b| .{ .float_val = a * b },
-                else => error.TypeMismatch,
-            },
-            else => error.TypeMismatch,
-        },
-        .div => switch (lv) {
-            .int_val => |a| switch (rv) {
-                .int_val => |b| if (b == 0) error.DivisionByZero else .{ .int_val = @divTrunc(a, b) },
-                else => error.TypeMismatch,
-            },
-            .float_val => |a| switch (rv) {
-                .float_val => |b| .{ .float_val = a / b },
-                else => error.TypeMismatch,
-            },
-            else => error.TypeMismatch,
-        },
-        .mod => switch (lv) {
-            .int_val => |a| switch (rv) {
-                .int_val => |b| if (b == 0) error.DivisionByZero else .{ .int_val = @rem(a, b) },
-                else => error.TypeMismatch,
-            },
-            else => error.TypeMismatch,
-        },
-        .eq => .{ .bool_val = lv.eql(rv) },
-        .neq => .{ .bool_val = !lv.eql(rv) },
-        .lt => .{ .bool_val = lv.lessThan(rv) },
-        .gt => .{ .bool_val = rv.lessThan(lv) },
-        .lte => .{ .bool_val = lv.lessThan(rv) or lv.eql(rv) },
-        .gte => .{ .bool_val = rv.lessThan(lv) or lv.eql(rv) },
-        .and_op => .{ .bool_val = (lv.toBool() orelse false) and (rv.toBool() orelse false) },
-        .or_op => .{ .bool_val = (lv.toBool() orelse false) or (rv.toBool() orelse false) },
-        .concat => switch (lv) {
-            .string_val => |a| switch (rv) {
-                .string_val => |b| blk: {
-                    const s = try ctx.alloc.alloc(u8, a.len + b.len);
-                    @memcpy(s[0..a.len], a);
-                    @memcpy(s[a.len..], b);
-                    break :blk .{ .string_val = s };
-                },
-                else => error.TypeMismatch,
-            },
-            else => error.TypeMismatch,
-        },
-        .contains => blk: {
-            const ls = switch (lv) {
-                .bytes_val => |b| b,
-                .string_val => |s| s,
-                else => break :blk plan_mod.Value.null_val,
-            };
-            const rs = switch (rv) {
-                .bytes_val => |b| b,
-                .string_val => |s| s,
-                else => break :blk plan_mod.Value.null_val,
-            };
-            break :blk .{ .bool_val = jsonContains(ls, rs, ctx.alloc) };
-        },
-        .contained => blk: {
-            const ls = switch (lv) {
-                .bytes_val => |b| b,
-                .string_val => |s| s,
-                else => break :blk plan_mod.Value.null_val,
-            };
-            const rs = switch (rv) {
-                .bytes_val => |b| b,
-                .string_val => |s| s,
-                else => break :blk plan_mod.Value.null_val,
-            };
-            break :blk .{ .bool_val = jsonContains(rs, ls, ctx.alloc) };
-        },
-        .arrow => blk: {
-            const json = switch (lv) {
-                .bytes_val => |b| b,
-                .string_val => |s| s,
-                else => break :blk plan_mod.Value.null_val,
-            };
-            break :blk jsonFieldAccess(json, rv, false, ctx.alloc);
-        },
-        .darrow => blk: {
-            const json = switch (lv) {
-                .bytes_val => |b| b,
-                .string_val => |s| s,
-                else => break :blk plan_mod.Value.null_val,
-            };
-            break :blk jsonFieldAccess(json, rv, true, ctx.alloc);
-        },
-        .bit_and => switch (lv) {
-            .int_val => |a| switch (rv) {
-                .int_val => |b| .{ .int_val = a & b },
-                else => error.TypeMismatch,
-            },
-            else => error.TypeMismatch,
-        },
-        .bit_or => switch (lv) {
-            .int_val => |a| switch (rv) {
-                .int_val => |b| .{ .int_val = a | b },
-                else => error.TypeMismatch,
-            },
-            else => error.TypeMismatch,
-        },
-        .bit_xor => switch (lv) {
-            .int_val => |a| switch (rv) {
-                .int_val => |b| .{ .int_val = a ^ b },
-                else => error.TypeMismatch,
-            },
-            else => error.TypeMismatch,
-        },
-        .shl => switch (lv) {
-            .int_val => |a| switch (rv) {
-                .int_val => |b| .{ .int_val = a << @as(u6, @truncate(@as(u64, @bitCast(b)))) },
-                else => error.TypeMismatch,
-            },
-            else => error.TypeMismatch,
-        },
-        .shr => switch (lv) {
-            .int_val => |a| switch (rv) {
-                .int_val => |b| .{ .int_val = a >> @as(u6, @truncate(@as(u64, @bitCast(b)))) },
-                else => error.TypeMismatch,
-            },
-            else => error.TypeMismatch,
-        },
-    };
-}
-
-fn jsonFieldAccess(json_bytes: []const u8, key: plan_mod.Value, as_text: bool, alloc: std.mem.Allocator) plan_mod.Value {
-    var parsed = std.json.parseFromSlice(std.json.Value, alloc, json_bytes, .{}) catch return .null_val;
-    defer parsed.deinit();
-
-    const field: std.json.Value = switch (key) {
-        .string_val => |k| switch (parsed.value) {
-            .object => |obj| obj.get(k) orelse return .null_val,
-            else => return .null_val,
-        },
-        .int_val => |idx| switch (parsed.value) {
-            .array => |arr| blk: {
-                if (idx < 0 or @as(usize, @intCast(idx)) >= arr.items.len) return .null_val;
-                break :blk arr.items[@as(usize, @intCast(idx))];
-            },
-            else => return .null_val,
-        },
-        else => return .null_val,
-    };
-
-    if (as_text) {
-        return switch (field) {
-            .null => .null_val,
-            .bool => |b| .{ .string_val = if (b) "true" else "false" },
-            .integer => |n| .{ .string_val = std.fmt.allocPrint(alloc, "{d}", .{n}) catch return .null_val },
-            .float => |f| .{ .string_val = std.fmt.allocPrint(alloc, "{d}", .{f}) catch return .null_val },
-            .number_string => |s| .{ .string_val = alloc.dupe(u8, s) catch return .null_val },
-            .string => |s| .{ .string_val = alloc.dupe(u8, s) catch return .null_val },
-            else => blk: {
-                const s = std.json.Stringify.valueAlloc(alloc, field, .{}) catch return .null_val;
-                break :blk .{ .string_val = s };
-            },
-        };
-    } else {
-        const b = std.json.Stringify.valueAlloc(alloc, field, .{}) catch return .null_val;
-        return .{ .bytes_val = b };
-    }
-}
-
-fn jsonContains(left: []const u8, right: []const u8, alloc: std.mem.Allocator) bool {
-    var lp = std.json.parseFromSlice(std.json.Value, alloc, left, .{}) catch return false;
-    defer lp.deinit();
-    var rp = std.json.parseFromSlice(std.json.Value, alloc, right, .{}) catch return false;
-    defer rp.deinit();
-    return jsonValueContains(lp.value, rp.value);
-}
-
-fn jsonValueContains(left: std.json.Value, right: std.json.Value) bool {
-    return switch (right) {
-        .object => |ro| {
-            const lo = switch (left) {
-                .object => |o| o,
-                else => return false,
-            };
-            var it = ro.iterator();
-            while (it.next()) |entry| {
-                const lv = lo.get(entry.key_ptr.*) orelse return false;
-                if (!jsonValueContains(lv, entry.value_ptr.*)) return false;
-            }
-            return true;
-        },
-        .array => |ra| {
-            const la = switch (left) {
-                .array => |a| a,
-                else => return false,
-            };
-            for (ra.items) |rv| {
-                var found = false;
-                for (la.items) |lv| {
-                    if (jsonValueContains(lv, rv)) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) return false;
-            }
-            return true;
-        },
-        .null => left == .null,
-        .bool => |b| switch (left) {
-            .bool => |lb| lb == b,
-            else => false,
-        },
-        .integer => |n| switch (left) {
-            .integer => |ln| ln == n,
-            else => false,
-        },
-        .float => |f| switch (left) {
-            .float => |lf| lf == f,
-            else => false,
-        },
-        .string => |s| switch (left) {
-            .string => |ls| std.mem.eql(u8, ls, s),
-            else => false,
-        },
-        .number_string => |s| switch (left) {
-            .number_string => |ls| std.mem.eql(u8, ls, s),
-            else => false,
-        },
-    };
-}
-
-fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) SqlExecError!plan_mod.Value {
-    if (std.ascii.eqlIgnoreCase(name, "in_list")) {
-        if (args.len < 1) return .{ .bool_val = false };
-        const needle = try evalExpr(args[0], ctx);
-        for (args[1..]) |a| {
-            const v = try evalExpr(a, ctx);
-            if (needle.eql(v)) return .{ .bool_val = true };
-        }
-        return .{ .bool_val = false };
-    }
-    if (std.ascii.eqlIgnoreCase(name, "not_in_list")) {
-        if (args.len < 1) return .{ .bool_val = true };
-        const needle = try evalExpr(args[0], ctx);
-        for (args[1..]) |a| {
-            const v = try evalExpr(a, ctx);
-            if (needle.eql(v)) return .{ .bool_val = false };
-        }
-        return .{ .bool_val = true };
-    }
-    if (std.ascii.eqlIgnoreCase(name, "like")) {
-        if (args.len != 2) return error.TypeMismatch;
-        const s = (try evalExpr(args[0], ctx)).string_val;
-        const pat = (try evalExpr(args[1], ctx)).string_val;
-        return .{ .bool_val = likeMatch(s, pat) };
-    }
-    if (std.ascii.eqlIgnoreCase(name, "coalesce")) {
-        for (args) |a| {
-            const v = try evalExpr(a, ctx);
-            if (v != .null_val) return v;
-        }
-        return .null_val;
-    }
-    if (std.ascii.eqlIgnoreCase(name, "length") or std.ascii.eqlIgnoreCase(name, "char_length")) {
-        if (args.len != 1) return error.TypeMismatch;
-        const v = try evalExpr(args[0], ctx);
-        return switch (v) {
-            .string_val => |s| .{ .int_val = @intCast(s.len) },
-            .bytes_val => |b| .{ .int_val = @intCast(b.len) },
-            else => error.TypeMismatch,
-        };
-    }
-    if (std.ascii.eqlIgnoreCase(name, "lower")) {
-        if (args.len != 1) return error.TypeMismatch;
-        const s = (try evalExpr(args[0], ctx)).string_val;
-        const out = try ctx.alloc.dupe(u8, s);
-        for (out) |*c| c.* = std.ascii.toLower(c.*);
-        return .{ .string_val = out };
-    }
-    if (std.ascii.eqlIgnoreCase(name, "upper")) {
-        if (args.len != 1) return error.TypeMismatch;
-        const s = (try evalExpr(args[0], ctx)).string_val;
-        const out = try ctx.alloc.dupe(u8, s);
-        for (out) |*c| c.* = std.ascii.toUpper(c.*);
-        return .{ .string_val = out };
-    }
-    if (std.ascii.eqlIgnoreCase(name, "trim")) {
-        if (args.len != 1) return error.TypeMismatch;
-        const s = (try evalExpr(args[0], ctx)).string_val;
-        return .{ .string_val = std.mem.trim(u8, s, " \t\n\r") };
-    }
-    if (std.ascii.eqlIgnoreCase(name, "ltrim")) {
-        if (args.len != 1) return error.TypeMismatch;
-        const s = (try evalExpr(args[0], ctx)).string_val;
-        var i: usize = 0;
-        while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r')) i += 1;
-        return .{ .string_val = s[i..] };
-    }
-    if (std.ascii.eqlIgnoreCase(name, "rtrim")) {
-        if (args.len != 1) return error.TypeMismatch;
-        const s = (try evalExpr(args[0], ctx)).string_val;
-        var i: usize = s.len;
-        while (i > 0 and (s[i - 1] == ' ' or s[i - 1] == '\t' or s[i - 1] == '\n' or s[i - 1] == '\r')) i -= 1;
-        return .{ .string_val = s[0..i] };
-    }
-    if (std.ascii.eqlIgnoreCase(name, "substr") or std.ascii.eqlIgnoreCase(name, "substring")) {
-        if (args.len < 2) return error.TypeMismatch;
-        const s = (try evalExpr(args[0], ctx)).string_val;
-        const start_v = try evalExpr(args[1], ctx);
-        const start: usize = if (start_v == .int_val) @intCast(@max(0, start_v.int_val - 1)) else 0;
-        if (args.len >= 3) {
-            const len_v = try evalExpr(args[2], ctx);
-            const len: usize = if (len_v == .int_val) @intCast(@max(0, len_v.int_val)) else 0;
-            const end = @min(start + len, s.len);
-            if (start >= s.len) return .{ .string_val = "" };
-            return .{ .string_val = s[start..end] };
-        }
-        if (start >= s.len) return .{ .string_val = "" };
-        return .{ .string_val = s[start..] };
-    }
-    if (std.ascii.eqlIgnoreCase(name, "replace")) {
-        if (args.len != 3) return error.TypeMismatch;
-        const s = (try evalExpr(args[0], ctx)).string_val;
-        const from = (try evalExpr(args[1], ctx)).string_val;
-        const to = (try evalExpr(args[2], ctx)).string_val;
-        if (from.len == 0) return .{ .string_val = s };
-        var buf: std.ArrayList(u8) = .empty;
-        var i: usize = 0;
-        while (i < s.len) {
-            if (i + from.len <= s.len and std.mem.eql(u8, s[i .. i + from.len], from)) {
-                try buf.appendSlice(ctx.alloc, to);
-                i += from.len;
-            } else {
-                try buf.append(ctx.alloc, s[i]);
-                i += 1;
-            }
-        }
-        return .{ .string_val = try buf.toOwnedSlice(ctx.alloc) };
-    }
-    if (std.ascii.eqlIgnoreCase(name, "concat")) {
-        var result: std.ArrayList(u8) = .empty;
-        for (args) |a| {
-            const v = try evalExpr(a, ctx);
-            switch (v) {
-                .string_val => |s| try result.appendSlice(ctx.alloc, s),
-                .int_val => |n| {
-                    const s = try std.fmt.allocPrint(ctx.alloc, "{d}", .{n});
-                    defer ctx.alloc.free(s);
-                    try result.appendSlice(ctx.alloc, s);
-                },
-                .float_val => |f| {
-                    const s = try std.fmt.allocPrint(ctx.alloc, "{d}", .{f});
-                    defer ctx.alloc.free(s);
-                    try result.appendSlice(ctx.alloc, s);
-                },
-                else => {},
-            }
-        }
-        return .{ .string_val = try result.toOwnedSlice(ctx.alloc) };
-    }
-    if (std.ascii.eqlIgnoreCase(name, "nullif")) {
-        if (args.len != 2) return error.TypeMismatch;
-        const a = try evalExpr(args[0], ctx);
-        const b = try evalExpr(args[1], ctx);
-        return if (a.eql(b)) .null_val else a;
-    }
-    if (std.ascii.eqlIgnoreCase(name, "greatest")) {
-        if (args.len == 0) return .null_val;
-        var best = try evalExpr(args[0], ctx);
-        for (args[1..]) |a| {
-            const v = try evalExpr(a, ctx);
-            if (v != .null_val and best.lessThan(v)) best = v;
-        }
-        return best;
-    }
-    if (std.ascii.eqlIgnoreCase(name, "least")) {
-        if (args.len == 0) return .null_val;
-        var best = try evalExpr(args[0], ctx);
-        for (args[1..]) |a| {
-            const v = try evalExpr(a, ctx);
-            if (v != .null_val and v.lessThan(best)) best = v;
-        }
-        return best;
-    }
-    if (std.ascii.eqlIgnoreCase(name, "abs")) {
-        if (args.len != 1) return error.TypeMismatch;
-        const v = try evalExpr(args[0], ctx);
-        return switch (v) {
-            .int_val => |n| .{ .int_val = if (n < 0) -n else n },
-            .float_val => |f| .{ .float_val = @abs(f) },
-            else => error.TypeMismatch,
-        };
-    }
-    if (std.ascii.eqlIgnoreCase(name, "floor")) {
-        if (args.len != 1) return error.TypeMismatch;
-        const v = try evalExpr(args[0], ctx);
-        return switch (v) {
-            .float_val => |f| .{ .float_val = @floor(f) },
-            .int_val => v,
-            else => error.TypeMismatch,
-        };
-    }
-    if (std.ascii.eqlIgnoreCase(name, "ceil") or std.ascii.eqlIgnoreCase(name, "ceiling")) {
-        if (args.len != 1) return error.TypeMismatch;
-        const v = try evalExpr(args[0], ctx);
-        return switch (v) {
-            .float_val => |f| .{ .float_val = @ceil(f) },
-            .int_val => v,
-            else => error.TypeMismatch,
-        };
-    }
-    if (std.ascii.eqlIgnoreCase(name, "round")) {
-        if (args.len < 1) return error.TypeMismatch;
-        const v = try evalExpr(args[0], ctx);
-        return switch (v) {
-            .float_val => |f| .{ .float_val = @round(f) },
-            .int_val => v,
-            else => error.TypeMismatch,
-        };
-    }
-    // Unknown functions return null (user WASM functions handled separately)
-    return .null_val;
-}
-
-fn likeMatch(s: []const u8, pattern: []const u8) bool {
-    // Simple % and _ matching
-    var si: usize = 0;
-    var pi: usize = 0;
-    var star_pi: usize = std.math.maxInt(usize);
-    var star_si: usize = 0;
-
-    while (si < s.len) {
-        if (pi < pattern.len and (pattern[pi] == '_' or pattern[pi] == s[si])) {
-            si += 1;
-            pi += 1;
-        } else if (pi < pattern.len and pattern[pi] == '%') {
-            star_pi = pi;
-            star_si = si;
-            pi += 1;
-        } else if (star_pi != std.math.maxInt(usize)) {
-            star_si += 1;
-            si = star_si;
-            pi = star_pi + 1;
-        } else {
-            return false;
-        }
-    }
-    while (pi < pattern.len and pattern[pi] == '%') pi += 1;
-    return pi == pattern.len;
+fn executeScanShim(
+    opaque_self: *anyopaque,
+    node: *plan_mod.PlanNode,
+    ctx: *const EvalCtx,
+    out: *std.ArrayList([]const ?ColumnValue),
+) anyerror!void {
+    const self: *SqlExecutor = @ptrCast(@alignCast(opaque_self));
+    return self.executeScan(node, ctx.*, out);
 }
 
 fn projectReturning(
