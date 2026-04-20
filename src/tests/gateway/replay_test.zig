@@ -368,3 +368,107 @@ test "Gateway Replay: compaction-triggering load produces byte-equal SSTables" {
 
     try assertBytEqualSsts(dir_a, dir_b, 1, alloc);
 }
+
+// ─── DST: JOIN query determinism ─────────────────────────────────────────────
+
+test "Gateway Replay: JOIN queries produce identical results on two instances" {
+    const alloc = testing.allocator;
+
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
+    const base = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+
+    const dir_a = try makeTempDir(alloc, base + 30);
+    defer { removeDir(dir_a); alloc.free(dir_a); }
+    const dir_b = try makeTempDir(alloc, base + 31);
+    defer { removeDir(dir_b); alloc.free(dir_b); }
+
+    const gw_a = try Gateway.init(dir_a, alloc, .{});
+    defer gw_a.deinit();
+    const gw_b = try Gateway.init(dir_b, alloc, .{});
+    defer gw_b.deinit();
+
+    const users_ddl = "CREATE TABLE users (id INT64 NOT NULL, dept_id INT64 NOT NULL, PRIMARY KEY (id))";
+    const depts_ddl = "CREATE TABLE depts (id INT64 NOT NULL, budget INT64 NOT NULL, PRIMARY KEY (id))";
+    try gw_a.applyDdl(users_ddl); try gw_b.applyDdl(users_ddl);
+    try gw_a.applyDdl(depts_ddl); try gw_b.applyDdl(depts_ddl);
+
+    // Register all queries on both instances; hashes must match
+    const ins_u_a = (try gw_a.register("INSERT INTO users (id, dept_id) VALUES ($1, $2)")).hash;
+    const ins_u_b = (try gw_b.register("INSERT INTO users (id, dept_id) VALUES ($1, $2)")).hash;
+    try testing.expectEqualSlices(u8, &ins_u_a, &ins_u_b);
+
+    const ins_d_a = (try gw_a.register("INSERT INTO depts (id, budget) VALUES ($1, $2)")).hash;
+    const ins_d_b = (try gw_b.register("INSERT INTO depts (id, budget) VALUES ($1, $2)")).hash;
+    try testing.expectEqualSlices(u8, &ins_d_a, &ins_d_b);
+
+    const inner_a = (try gw_a.register("SELECT users.id FROM users INNER JOIN depts ON users.dept_id = depts.id")).hash;
+    const inner_b = (try gw_b.register("SELECT users.id FROM users INNER JOIN depts ON users.dept_id = depts.id")).hash;
+    try testing.expectEqualSlices(u8, &inner_a, &inner_b);
+
+    const left_a = (try gw_a.register("SELECT users.id FROM users LEFT JOIN depts ON users.dept_id = depts.id")).hash;
+    const left_b = (try gw_b.register("SELECT users.id FROM users LEFT JOIN depts ON users.dept_id = depts.id")).hash;
+    try testing.expectEqualSlices(u8, &left_a, &left_b);
+
+    const full_a = (try gw_a.register("SELECT users.id FROM users FULL JOIN depts ON users.dept_id = depts.id")).hash;
+    const full_b = (try gw_b.register("SELECT users.id FROM users FULL JOIN depts ON users.dept_id = depts.id")).hash;
+    try testing.expectEqualSlices(u8, &full_a, &full_b);
+
+    const cross_a = (try gw_a.register("SELECT users.id FROM users CROSS JOIN depts")).hash;
+    const cross_b = (try gw_b.register("SELECT users.id FROM users CROSS JOIN depts")).hash;
+    try testing.expectEqualSlices(u8, &cross_a, &cross_b);
+
+    // Apply identical data to both
+    const user_rows = [_][2]i64{ .{1, 10}, .{2, 10}, .{3, 99} };
+    for (user_rows) |r| {
+        const p = [_]ColumnValue{ .{ .int64 = r[0] }, .{ .int64 = r[1] } };
+        _ = try gw_a.execute(std.testing.io, ins_u_a, &p, &.{});
+        _ = try gw_b.execute(std.testing.io, ins_u_b, &p, &.{});
+    }
+    const dept_rows = [_][2]i64{ .{10, 1000}, .{20, 500} };
+    for (dept_rows) |r| {
+        const p = [_]ColumnValue{ .{ .int64 = r[0] }, .{ .int64 = r[1] } };
+        _ = try gw_a.execute(std.testing.io, ins_d_a, &p, &.{});
+        _ = try gw_b.execute(std.testing.io, ins_d_b, &p, &.{});
+    }
+
+    // Execute all JOIN queries on both instances and compare results
+    {
+        var rs_a = try gw_a.querySelect(inner_a, &.{}, &.{});
+        defer rs_a.deinit();
+        var rs_b = try gw_b.querySelect(inner_b, &.{}, &.{});
+        defer rs_b.deinit();
+        try testing.expectEqual(rs_a.rows.len, rs_b.rows.len);
+        try testing.expectEqual(@as(usize, 2), rs_a.rows.len);
+    }
+    {
+        var rs_a = try gw_a.querySelect(left_a, &.{}, &.{});
+        defer rs_a.deinit();
+        var rs_b = try gw_b.querySelect(left_b, &.{}, &.{});
+        defer rs_b.deinit();
+        try testing.expectEqual(rs_a.rows.len, rs_b.rows.len);
+        try testing.expectEqual(@as(usize, 3), rs_a.rows.len);
+    }
+    {
+        var rs_a = try gw_a.querySelect(full_a, &.{}, &.{});
+        defer rs_a.deinit();
+        var rs_b = try gw_b.querySelect(full_b, &.{}, &.{});
+        defer rs_b.deinit();
+        try testing.expectEqual(rs_a.rows.len, rs_b.rows.len);
+        try testing.expectEqual(@as(usize, 4), rs_a.rows.len);
+    }
+    {
+        var rs_a = try gw_a.querySelect(cross_a, &.{}, &.{});
+        defer rs_a.deinit();
+        var rs_b = try gw_b.querySelect(cross_b, &.{}, &.{});
+        defer rs_b.deinit();
+        try testing.expectEqual(rs_a.rows.len, rs_b.rows.len);
+        try testing.expectEqual(@as(usize, 6), rs_a.rows.len);
+    }
+
+    // Verify storage is byte-equal on both instances
+    try gw_a.flushAll();
+    try gw_b.flushAll();
+    try assertBytEqualSsts(dir_a, dir_b, 1, alloc); // users
+    try assertBytEqualSsts(dir_a, dir_b, 2, alloc); // depts
+}

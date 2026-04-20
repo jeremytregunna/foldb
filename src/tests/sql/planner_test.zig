@@ -601,3 +601,85 @@ test "subquery scope isolation: EXISTS inner plan uses isolated scope" {
     try std.testing.expect(lhs.* == .column);
     try std.testing.expectEqual(@as(u32, 1), lhs.column); // user_id at 1, not 4
 }
+
+test "LEFT JOIN plan has kind .left" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const al = arena.allocator();
+    const parsed = try parser_mod.parse("SELECT u.id FROM users u LEFT JOIN orders o ON u.id = o.user_id", al);
+    var planner = plan_mod.Planner.init(al, &sr);
+    const ep = try planner.planStmt(parsed.stmts[0], &.{});
+    const join = ep.stmts[0].select.project.input;
+    try std.testing.expect(join.* == .hash_join);
+    try std.testing.expectEqual(ast_mod.JoinKind.left, join.hash_join.kind);
+}
+
+test "RIGHT JOIN plan has kind .right" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const al = arena.allocator();
+    const parsed = try parser_mod.parse("SELECT u.id FROM users u RIGHT JOIN orders o ON u.id = o.user_id", al);
+    var planner = plan_mod.Planner.init(al, &sr);
+    const ep = try planner.planStmt(parsed.stmts[0], &.{});
+    const join = ep.stmts[0].select.project.input;
+    try std.testing.expect(join.* == .hash_join);
+    try std.testing.expectEqual(ast_mod.JoinKind.right, join.hash_join.kind);
+}
+
+test "FULL JOIN plan has kind .full" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const al = arena.allocator();
+    const parsed = try parser_mod.parse("SELECT u.id FROM users u FULL JOIN orders o ON u.id = o.user_id", al);
+    var planner = plan_mod.Planner.init(al, &sr);
+    const ep = try planner.planStmt(parsed.stmts[0], &.{});
+    const join = ep.stmts[0].select.project.input;
+    try std.testing.expect(join.* == .hash_join);
+    try std.testing.expectEqual(ast_mod.JoinKind.full, join.hash_join.kind);
+}
+
+test "CROSS JOIN plan has kind .cross" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const al = arena.allocator();
+    const parsed = try parser_mod.parse("SELECT u.id FROM users u CROSS JOIN orders o", al);
+    var planner = plan_mod.Planner.init(al, &sr);
+    const ep = try planner.planStmt(parsed.stmts[0], &.{});
+    const join = ep.stmts[0].select.project.input;
+    try std.testing.expect(join.* == .hash_join);
+    try std.testing.expectEqual(ast_mod.JoinKind.cross, join.hash_join.kind);
+}
+
+test "JOIN USING synthesizes equality condition from column positions" {
+    const alloc = std.testing.allocator;
+    var sr = try makeSchema(alloc);
+    defer sr.deinit();
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const al = arena.allocator();
+    // users.id = 0, orders.id = 3 — USING (id) should produce .column{0} = .column{3}
+    const parsed = try parser_mod.parse("SELECT users.id FROM users JOIN orders USING (id)", al);
+    var planner = plan_mod.Planner.init(al, &sr);
+    const ep = try planner.planStmt(parsed.stmts[0], &.{});
+    const join = ep.stmts[0].select.project.input;
+    try std.testing.expect(join.* == .hash_join);
+    const cond = join.hash_join.condition;
+    try std.testing.expect(cond.* == .binary);
+    try std.testing.expect(cond.binary.op == .eq);
+    try std.testing.expect(cond.binary.left.* == .column);
+    try std.testing.expectEqual(@as(u32, 0), cond.binary.left.column); // users.id
+    try std.testing.expect(cond.binary.right.* == .column);
+    try std.testing.expectEqual(@as(u32, 3), cond.binary.right.column); // orders.id
+}

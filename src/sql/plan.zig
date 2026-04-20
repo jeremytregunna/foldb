@@ -505,11 +505,38 @@ pub const Planner = struct {
 
         // Joins
         for (q.joins) |j| {
+            const right_scope_start: usize = self.scope.items.len;
             const right = try self.planTableRef(j.table);
             const cond = if (j.condition) |c| switch (c) {
                 .on => |e| try self.planExpr(e),
-                .using => blk: {
-                    // USING: synthesize equality condition
+                .using => |cols| blk: {
+                    // Build: col_left = col_right [AND ...] by matching column names in each side's scope
+                    var cond_expr: ?*PlanExpr = null;
+                    for (cols) |col_name| {
+                        var left_pos: ?u32 = null;
+                        var right_pos: ?u32 = null;
+                        for (self.scope.items[0..right_scope_start]) |e| {
+                            if (std.ascii.eqlIgnoreCase(e.col_name, col_name)) { left_pos = e.position; break; }
+                        }
+                        for (self.scope.items[right_scope_start..]) |e| {
+                            if (std.ascii.eqlIgnoreCase(e.col_name, col_name)) { right_pos = e.position; break; }
+                        }
+                        if (left_pos == null or right_pos == null) return error.ColumnNotFound;
+                        const lc = try self.arena.create(PlanExpr);
+                        lc.* = .{ .column = left_pos.? };
+                        const rc = try self.arena.create(PlanExpr);
+                        rc.* = .{ .column = right_pos.? };
+                        const eq = try self.arena.create(PlanExpr);
+                        eq.* = .{ .binary = .{ .op = .eq, .left = lc, .right = rc } };
+                        if (cond_expr == null) {
+                            cond_expr = eq;
+                        } else {
+                            const and_node = try self.arena.create(PlanExpr);
+                            and_node.* = .{ .binary = .{ .op = .and_op, .left = cond_expr.?, .right = eq } };
+                            cond_expr = and_node;
+                        }
+                    }
+                    if (cond_expr) |e| break :blk e;
                     const dummy = try self.arena.create(PlanExpr);
                     dummy.* = .{ .bool_literal = true };
                     break :blk dummy;

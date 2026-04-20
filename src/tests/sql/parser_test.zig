@@ -79,6 +79,72 @@ test "parse SELECT with LEFT JOIN" {
     try std.testing.expectEqual(ast_mod.JoinKind.left, q.stmts[0].select.joins[0].kind);
 }
 
+test "parse SELECT with RIGHT JOIN" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const q = try parse(
+        "SELECT u.id FROM users u RIGHT JOIN orders o ON u.id = o.user_id",
+        arena.allocator(),
+    );
+    try std.testing.expectEqual(ast_mod.JoinKind.right, q.stmts[0].select.joins[0].kind);
+}
+
+test "parse SELECT with FULL JOIN" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const q = try parse(
+        "SELECT u.id FROM users u FULL JOIN orders o ON u.id = o.user_id",
+        arena.allocator(),
+    );
+    try std.testing.expectEqual(ast_mod.JoinKind.full, q.stmts[0].select.joins[0].kind);
+}
+
+test "parse SELECT with FULL OUTER JOIN" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const q = try parse(
+        "SELECT u.id FROM users u FULL OUTER JOIN orders o ON u.id = o.user_id",
+        arena.allocator(),
+    );
+    try std.testing.expectEqual(ast_mod.JoinKind.full, q.stmts[0].select.joins[0].kind);
+}
+
+test "parse SELECT with CROSS JOIN" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const q = try parse(
+        "SELECT u.id FROM users u CROSS JOIN orders o",
+        arena.allocator(),
+    );
+    try std.testing.expectEqual(ast_mod.JoinKind.cross, q.stmts[0].select.joins[0].kind);
+    try std.testing.expect(q.stmts[0].select.joins[0].condition == null);
+}
+
+test "parse SELECT with JOIN USING" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const q = try parse(
+        "SELECT id FROM users JOIN orders USING (id)",
+        arena.allocator(),
+    );
+    const join = q.stmts[0].select.joins[0];
+    try std.testing.expectEqual(ast_mod.JoinKind.inner, join.kind);
+    try std.testing.expect(join.condition != null);
+    try std.testing.expect(join.condition.? == .using);
+    try std.testing.expectEqual(@as(usize, 1), join.condition.?.using.len);
+    try std.testing.expectEqualStrings("id", join.condition.?.using[0]);
+}
+
+test "parse SELECT with multiple chained JOINs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const q = try parse(
+        "SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id JOIN items i ON o.id = i.order_id",
+        arena.allocator(),
+    );
+    try std.testing.expectEqual(@as(usize, 2), q.stmts[0].select.joins.len);
+}
+
 test "parse SELECT with subquery in WHERE" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
