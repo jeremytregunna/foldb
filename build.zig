@@ -970,6 +970,17 @@ pub fn build(b: *std.Build) void {
     const gateway_create_index_tests = b.addTest(.{ .root_module = gateway_create_index_test_module });
     const run_gateway_create_index_tests = b.addRunArtifact(gateway_create_index_tests);
 
+    const gateway_join_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/gateway/join_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gateway_join_test_module.addImport("gateway.zig", gateway_module);
+    gateway_join_test_module.addImport("storage.zig", storage_module);
+    gateway_join_test_module.addImport("sequencer.zig", sequencer_module);
+    const gateway_join_tests = b.addTest(.{ .root_module = gateway_join_test_module });
+    const run_gateway_join_tests = b.addRunArtifact(gateway_join_tests);
+
     // Gateway replay (DST)
     const gateway_replay_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/gateway/replay_test.zig"),
@@ -1027,6 +1038,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_gateway_bitwise_tests.step);
     test_step.dependOn(&run_gateway_alter_table_tests.step);
     test_step.dependOn(&run_gateway_create_index_tests.step);
+    test_step.dependOn(&run_gateway_join_tests.step);
     test_step.dependOn(&run_seq_epoch_tests.step);
     test_step.dependOn(&run_seq_idem_tests.step);
     test_step.dependOn(&run_seq_tests.step);

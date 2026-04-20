@@ -530,19 +530,29 @@ pub const SqlExecutor = struct {
 
                 const right_width = if (right_rows.items.len > 0) right_rows.items[0].len else 0;
 
+                const left_width = if (left_rows.items.len > 0) left_rows.items[0].len else 0;
+
+                // Track which right rows were matched (for RIGHT and FULL joins)
+                const right_matched = try ctx.alloc.alloc(bool, right_rows.items.len);
+                defer ctx.alloc.free(right_matched);
+                @memset(right_matched, false);
+
                 for (left_rows.items) |lr| {
                     var matched = false;
-                    for (right_rows.items) |rr| {
-                        // shallow combined for condition eval only
-                        const combined = try ctx.alloc.alloc(?ColumnValue, lr.len + rr.len);
-                        @memcpy(combined[0..lr.len], lr);
-                        @memcpy(combined[lr.len..], rr);
-                        var join_ctx = ctx;
-                        join_ctx.row = combined;
-                        const passes = (try evalExpr(j.condition, join_ctx)).toBool() orelse false;
-                        ctx.alloc.free(combined);
+                    for (right_rows.items, 0..) |rr, ri| {
+                        const passes = if (j.kind == .cross) true else blk: {
+                            const combined = try ctx.alloc.alloc(?ColumnValue, lr.len + rr.len);
+                            @memcpy(combined[0..lr.len], lr);
+                            @memcpy(combined[lr.len..], rr);
+                            var join_ctx = ctx;
+                            join_ctx.row = combined;
+                            const v = (try evalExpr(j.condition, join_ctx)).toBool() orelse false;
+                            ctx.alloc.free(combined);
+                            break :blk v;
+                        };
                         if (passes) {
                             matched = true;
+                            right_matched[ri] = true;
                             const owned = try ctx.alloc.alloc(?ColumnValue, lr.len + rr.len);
                             errdefer ctx.alloc.free(owned);
                             for (lr, 0..) |v, i| owned[i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
@@ -550,7 +560,8 @@ pub const SqlExecutor = struct {
                             try out.append(ctx.alloc, owned);
                         }
                     }
-                    if (!matched and (j.kind == .left)) {
+                    // LEFT and FULL: unmatched left rows get NULL-padded right side
+                    if (!matched and (j.kind == .left or j.kind == .full)) {
                         const padded = try ctx.alloc.alloc(?ColumnValue, lr.len + right_width);
                         errdefer ctx.alloc.free(padded);
                         for (lr, 0..) |v, i| padded[i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
@@ -558,31 +569,15 @@ pub const SqlExecutor = struct {
                         try out.append(ctx.alloc, padded);
                     }
                 }
-                // RIGHT JOIN: emit right rows with no match as NULL-padded
-                if (j.kind == .right) {
-                    for (right_rows.items) |rr| {
-                        var any_match = false;
-                        for (left_rows.items) |lr| {
-                            const combined = try ctx.alloc.alloc(?ColumnValue, lr.len + rr.len);
-                            @memcpy(combined[0..lr.len], lr);
-                            @memcpy(combined[lr.len..], rr);
-                            var join_ctx = ctx;
-                            join_ctx.row = combined;
-                            const passes = (try evalExpr(j.condition, join_ctx)).toBool() orelse false;
-                            ctx.alloc.free(combined);
-                            if (passes) {
-                                any_match = true;
-                                break;
-                            }
-                        }
-                        if (!any_match) {
-                            const left_width = if (left_rows.items.len > 0) left_rows.items[0].len else 0;
-                            const padded = try ctx.alloc.alloc(?ColumnValue, left_width + rr.len);
-                            errdefer ctx.alloc.free(padded);
-                            for (padded[0..left_width]) |*v| v.* = null;
-                            for (rr, 0..) |v, i| padded[left_width + i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
-                            try out.append(ctx.alloc, padded);
-                        }
+                // RIGHT and FULL: unmatched right rows get NULL-padded left side
+                if (j.kind == .right or j.kind == .full) {
+                    for (right_rows.items, 0..) |rr, ri| {
+                        if (right_matched[ri]) continue;
+                        const padded = try ctx.alloc.alloc(?ColumnValue, left_width + rr.len);
+                        errdefer ctx.alloc.free(padded);
+                        for (padded[0..left_width]) |*v| v.* = null;
+                        for (rr, 0..) |v, i| padded[left_width + i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
+                        try out.append(ctx.alloc, padded);
                     }
                 }
             },
