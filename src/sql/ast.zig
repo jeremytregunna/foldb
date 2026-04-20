@@ -207,6 +207,7 @@ pub const FnCall = struct {
     args: []*Expr,
     distinct: bool,
     star: bool, // COUNT(*)
+    filter: ?*Expr = null,
 };
 
 // ─── SELECT ──────────────────────────────────────────────────────────────────

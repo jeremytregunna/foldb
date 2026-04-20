@@ -635,6 +635,8 @@ fn inferBuiltinReturn(name: []const u8, arg_count: usize, star: bool) TypeCheckE
         std.ascii.eqlIgnoreCase(name, "first_value") or std.ascii.eqlIgnoreCase(name, "last_value")) return .null_type;
     if (std.ascii.eqlIgnoreCase(name, "json_extract") or std.ascii.eqlIgnoreCase(name, "json_object") or
         std.ascii.eqlIgnoreCase(name, "json_array")) return .json;
+    if (std.ascii.eqlIgnoreCase(name, "array_agg")) return .bytes;
+    if (std.ascii.eqlIgnoreCase(name, "string_agg")) return .string;
     // Unknown function — allowed (could be a user WASM function)
     return .null_type;
 }

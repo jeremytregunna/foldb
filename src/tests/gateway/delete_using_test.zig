@@ -137,3 +137,54 @@ test "DELETE USING: deletes all matched rows when multiple items share a categor
     try testing.expectEqual(@as(usize, 1), rs.rows.len);
     try testing.expectEqual(@as(?i64, 3), rs.rows[0][0].?.int64);
 }
+
+test "DELETE USING: two USING tables cross-product — only row matching both is deleted" {
+    const dir = try makeTempDir();
+    const gw = try Gateway.init(dir, testing.allocator, .{});
+    defer {
+        gw.deinit();
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
+
+    try gw.applyDdl("CREATE TABLE products (id INT64 NOT NULL, cat_id INT64 NOT NULL, region_id INT64 NOT NULL, PRIMARY KEY (id))");
+    try gw.applyDdl("CREATE TABLE banned_cats (id INT64 NOT NULL, PRIMARY KEY (id))");
+    try gw.applyDdl("CREATE TABLE banned_regions (id INT64 NOT NULL, PRIMARY KEY (id))");
+
+    // product 1: cat=10, region=100 — both banned → DELETE
+    // product 2: cat=10, region=200 — cat banned but region not → KEEP
+    // product 3: cat=20, region=100 — region banned but cat not → KEEP
+    const ins_prod = (try gw.register("INSERT INTO products (id, cat_id, region_id) VALUES ($1, $2, $3)")).hash;
+    _ = try gw.execute(std.testing.io, ins_prod, &.{ .{ .int64 = 1 }, .{ .int64 = 10 }, .{ .int64 = 100 } }, &.{});
+    _ = try gw.execute(std.testing.io, ins_prod, &.{ .{ .int64 = 2 }, .{ .int64 = 10 }, .{ .int64 = 200 } }, &.{});
+    _ = try gw.execute(std.testing.io, ins_prod, &.{ .{ .int64 = 3 }, .{ .int64 = 20 }, .{ .int64 = 100 } }, &.{});
+
+    const ins_cat = (try gw.register("INSERT INTO banned_cats (id) VALUES ($1)")).hash;
+    _ = try gw.execute(std.testing.io, ins_cat, &.{.{ .int64 = 10 }}, &.{});
+
+    const ins_reg = (try gw.register("INSERT INTO banned_regions (id) VALUES ($1)")).hash;
+    _ = try gw.execute(std.testing.io, ins_reg, &.{.{ .int64 = 100 }}, &.{});
+
+    const del = (try gw.register(
+        "DELETE FROM products USING banned_cats, banned_regions " ++
+        "WHERE products.cat_id = banned_cats.id AND products.region_id = banned_regions.id",
+    )).hash;
+    const r = try gw.execute(std.testing.io, del, &.{}, &.{});
+    try testing.expectEqual(@as(u64, 1), r.rows_affected);
+
+    const q = (try gw.register("SELECT id FROM products")).hash;
+    var rs = try gw.querySelect(q, &.{}, &.{});
+    defer rs.deinit();
+    try testing.expectEqual(@as(usize, 2), rs.rows.len);
+
+    // Verify products 2 and 3 survive
+    var saw2 = false;
+    var saw3 = false;
+    for (rs.rows) |row| {
+        const id = row[0].?.int64;
+        if (id == 2) saw2 = true;
+        if (id == 3) saw3 = true;
+    }
+    try testing.expect(saw2);
+    try testing.expect(saw3);
+}

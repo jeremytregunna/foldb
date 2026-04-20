@@ -163,6 +163,8 @@ pub const AggExpr = struct {
     arg: ?*PlanExpr,
     distinct: bool,
     alias: []const u8,
+    filter: ?*PlanExpr = null,
+    separator: ?*PlanExpr = null,
 };
 
 pub const HashJoinNode = struct {
@@ -593,11 +595,22 @@ pub const Planner = struct {
                                 try self.planExpr(fn_call.args[0])
                             else
                                 null;
+                            const sep: ?*PlanExpr = if (fn_call.args.len > 1 and
+                                std.ascii.eqlIgnoreCase(fn_call.name, "string_agg"))
+                                try self.planExpr(fn_call.args[1])
+                            else
+                                null;
+                            const filt: ?*PlanExpr = if (fn_call.filter) |f|
+                                try self.planExpr(f)
+                            else
+                                null;
                             try agg_exprs.append(self.arena, .{
                                 .fn_name = fn_call.name,
                                 .arg = arg,
                                 .distinct = fn_call.distinct,
                                 .alias = ei.alias orelse fn_call.name,
+                                .filter = filt,
+                                .separator = sep,
                             });
                         }
                     },

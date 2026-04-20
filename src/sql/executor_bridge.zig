@@ -602,6 +602,7 @@ pub const SqlExecutor = struct {
                 defer {
                     for (groups.items) |g| {
                         SqlExecutor.freeRowValues(g.key, ctx.alloc);
+                        for (g.accums) |*acc| acc.deinit(ctx.alloc);
                         ctx.alloc.free(g.accums);
                     }
                     groups.deinit(ctx.alloc);
@@ -649,11 +650,14 @@ pub const SqlExecutor = struct {
                 }
 
                 for (groups.items) |g| {
+                    var agg_arena = std.heap.ArenaAllocator.init(ctx.alloc);
+                    defer agg_arena.deinit();
+                    const agg_alloc = agg_arena.allocator();
                     const result_row = try ctx.alloc.alloc(?ColumnValue, ha.group_keys.len + ha.agg_exprs.len);
                     errdefer ctx.alloc.free(result_row);
                     for (g.key, 0..) |v, i| result_row[i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
                     for (ha.agg_exprs, g.accums, 0..) |ae, acc, i| {
-                        const v = acc.toValue(ae.fn_name);
+                        const v = try acc.toValue(ae, agg_alloc);
                         result_row[ha.group_keys.len + i] = planValueToColumnValue(v, ctx.alloc) catch null;
                     }
                     try out.append(ctx.alloc, result_row);
@@ -1512,8 +1516,25 @@ const AggAccum = struct {
     is_float: bool = false,
     min: ?plan_mod.Value = null,
     max: ?plan_mod.Value = null,
+    collected: std.ArrayListUnmanaged(plan_mod.Value) = .empty,
+    separator: ?[]const u8 = null,
+
+    fn deinit(self: *AggAccum, alloc: std.mem.Allocator) void {
+        for (self.collected.items) |v| freePlanValue(v, alloc);
+        self.collected.deinit(alloc);
+        if (self.separator) |s| alloc.free(s);
+    }
 
     fn update(self: *AggAccum, ae: plan_mod.AggExpr, row_ctx: EvalCtx) SqlExecError!void {
+        if (ae.filter) |f| {
+            const fv = try evalExpr(f, row_ctx);
+            const passes = switch (fv) {
+                .bool_val => |b| b,
+                else => false,
+            };
+            if (!passes) return;
+        }
+
         const val = if (ae.arg) |arg| try evalExpr(arg, row_ctx) else .null_val;
         const fn_name = ae.fn_name;
 
@@ -1541,10 +1562,29 @@ const AggAccum = struct {
             if (val != .null_val) {
                 if (self.max == null or self.max.?.lessThan(val)) self.max = val;
             }
+        } else if (std.ascii.eqlIgnoreCase(fn_name, "array_agg")) {
+            if (val != .null_val) {
+                const duped = try dupePlanValue(val, row_ctx.alloc);
+                try self.collected.append(row_ctx.alloc, duped);
+            }
+        } else if (std.ascii.eqlIgnoreCase(fn_name, "string_agg")) {
+            if (val != .null_val) {
+                const duped = try dupePlanValue(val, row_ctx.alloc);
+                try self.collected.append(row_ctx.alloc, duped);
+                if (self.separator == null) {
+                    if (ae.separator) |sep_expr| {
+                        const sv = try evalExpr(sep_expr, row_ctx);
+                        if (sv == .string_val) {
+                            self.separator = try row_ctx.alloc.dupe(u8, sv.string_val);
+                        }
+                    }
+                }
+            }
         }
     }
 
-    fn toValue(self: AggAccum, fn_name: []const u8) plan_mod.Value {
+    fn toValue(self: AggAccum, ae: plan_mod.AggExpr, alloc: std.mem.Allocator) !plan_mod.Value {
+        const fn_name = ae.fn_name;
         if (std.ascii.eqlIgnoreCase(fn_name, "count")) {
             return .{ .int_val = self.count };
         } else if (std.ascii.eqlIgnoreCase(fn_name, "sum")) {
@@ -1558,10 +1598,95 @@ const AggAccum = struct {
             return self.min orelse .null_val;
         } else if (std.ascii.eqlIgnoreCase(fn_name, "max")) {
             return self.max orelse .null_val;
+        } else if (std.ascii.eqlIgnoreCase(fn_name, "array_agg")) {
+            return .{ .bytes_val = try serializeArrayAgg(self.collected.items, alloc) };
+        } else if (std.ascii.eqlIgnoreCase(fn_name, "string_agg")) {
+            return .{ .string_val = try buildStringAgg(self.collected.items, self.separator orelse "", alloc) };
         }
         return .null_val;
     }
 };
+
+fn dupePlanValue(v: plan_mod.Value, alloc: std.mem.Allocator) !plan_mod.Value {
+    return switch (v) {
+        .string_val => |s| .{ .string_val = try alloc.dupe(u8, s) },
+        .bytes_val => |b| .{ .bytes_val = try alloc.dupe(u8, b) },
+        .opaque_val => |o| .{ .opaque_val = try alloc.dupe(u8, o) },
+        else => v,
+    };
+}
+
+fn freePlanValue(v: plan_mod.Value, alloc: std.mem.Allocator) void {
+    switch (v) {
+        .string_val => |s| alloc.free(s),
+        .bytes_val => |b| alloc.free(b),
+        .opaque_val => |o| alloc.free(o),
+        else => {},
+    }
+}
+
+fn serializeArrayAgg(items: []const plan_mod.Value, alloc: std.mem.Allocator) ![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+    try buf.append(alloc, '[');
+    for (items, 0..) |v, i| {
+        if (i > 0) try buf.appendSlice(alloc, ", ");
+        switch (v) {
+            .null_val => try buf.appendSlice(alloc, "null"),
+            .bool_val => |b| try buf.appendSlice(alloc, if (b) "true" else "false"),
+            .int_val => |n| {
+                const s = try std.fmt.allocPrint(alloc, "{}", .{n});
+                defer alloc.free(s);
+                try buf.appendSlice(alloc, s);
+            },
+            .uint_val => |n| {
+                const s = try std.fmt.allocPrint(alloc, "{}", .{n});
+                defer alloc.free(s);
+                try buf.appendSlice(alloc, s);
+            },
+            .float_val => |f| {
+                const s = try std.fmt.allocPrint(alloc, "{d}", .{f});
+                defer alloc.free(s);
+                try buf.appendSlice(alloc, s);
+            },
+            .string_val => |s| {
+                try buf.append(alloc, '"');
+                for (s) |c| {
+                    switch (c) {
+                        '"' => try buf.appendSlice(alloc, "\\\""),
+                        '\\' => try buf.appendSlice(alloc, "\\\\"),
+                        '\n' => try buf.appendSlice(alloc, "\\n"),
+                        '\r' => try buf.appendSlice(alloc, "\\r"),
+                        '\t' => try buf.appendSlice(alloc, "\\t"),
+                        else => try buf.append(alloc, c),
+                    }
+                }
+                try buf.append(alloc, '"');
+            },
+            .bytes_val => |b| try buf.appendSlice(alloc, b),
+            .opaque_val => |o| try buf.appendSlice(alloc, o),
+        }
+    }
+    try buf.append(alloc, ']');
+    return buf.toOwnedSlice(alloc);
+}
+
+fn buildStringAgg(items: []const plan_mod.Value, sep: []const u8, alloc: std.mem.Allocator) ![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+    var first = true;
+    for (items) |v| {
+        switch (v) {
+            .string_val => |s| {
+                if (!first) try buf.appendSlice(alloc, sep);
+                try buf.appendSlice(alloc, s);
+                first = false;
+            },
+            else => {},
+        }
+    }
+    return buf.toOwnedSlice(alloc);
+}
 
 fn aggKeyEquals(a: []const ?ColumnValue, b: []const ?ColumnValue) bool {
     if (a.len != b.len) return false;

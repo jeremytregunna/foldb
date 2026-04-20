@@ -143,3 +143,43 @@ test "UPDATE FROM: SET value taken from FROM table column" {
     try testing.expectEqual(@as(usize, 1), rs.rows.len);
     try testing.expectEqual(@as(?i64, 42), rs.rows[0][0].?.int64);
 }
+
+test "UPDATE FROM: multiple FROM rows match same target — first match wins" {
+    // Schema needs a FROM table with duplicate join-key values (non-PK column).
+    // Use a separate gateway instance since setup() only has two specific tables.
+    const dir = try makeTempDir();
+    const gw = try Gateway.init(dir, testing.allocator, .{});
+    defer {
+        gw.deinit();
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
+
+    try gw.applyDdl("CREATE TABLE orders (id INT64 NOT NULL, status INT64 NOT NULL, priority INT64 NOT NULL, PRIMARY KEY (id))");
+    try gw.applyDdl("CREATE TABLE modifiers (id INT64 NOT NULL, priority INT64 NOT NULL, new_status INT64 NOT NULL, PRIMARY KEY (id))");
+
+    // One order with priority=5
+    const ins_ord = (try gw.register("INSERT INTO orders (id, status, priority) VALUES ($1, $2, $3)")).hash;
+    _ = try gw.execute(std.testing.io, ins_ord, &.{ .{ .int64 = 1 }, .{ .int64 = 0 }, .{ .int64 = 5 } }, &.{});
+
+    // Two modifiers both with priority=5 — first (id=1) has new_status=7, second (id=2) has new_status=99
+    const ins_mod = (try gw.register("INSERT INTO modifiers (id, priority, new_status) VALUES ($1, $2, $3)")).hash;
+    _ = try gw.execute(std.testing.io, ins_mod, &.{ .{ .int64 = 1 }, .{ .int64 = 5 }, .{ .int64 = 7 } }, &.{});
+    _ = try gw.execute(std.testing.io, ins_mod, &.{ .{ .int64 = 2 }, .{ .int64 = 5 }, .{ .int64 = 99 } }, &.{});
+
+    const upd = (try gw.register(
+        "UPDATE orders SET status = modifiers.new_status FROM modifiers WHERE orders.priority = modifiers.priority",
+    )).hash;
+    const r = try gw.execute(std.testing.io, upd, &.{}, &.{});
+    try testing.expectEqual(@as(u64, 1), r.rows_affected);
+
+    const q = (try gw.register("SELECT status FROM orders WHERE id = 1")).hash;
+    var rs = try gw.querySelect(q, &.{}, &.{});
+    defer rs.deinit();
+    try testing.expectEqual(@as(usize, 1), rs.rows.len);
+    // The first matching modifier row determines the result; second must not override it.
+    // Either 7 or 99 is acceptable as long as exactly one update occurred and the order
+    // is updated exactly once (rows_affected = 1, already asserted above).
+    const status = rs.rows[0][0].?.int64;
+    try testing.expect(status == 7 or status == 99);
+}

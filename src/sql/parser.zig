@@ -1470,7 +1470,7 @@ pub const Parser = struct {
                 }
             }
             _ = try self.expect(.sym_rparen);
-            const fn_call = ast.FnCall{
+            var fn_call = ast.FnCall{
                 .name = name,
                 .args = try args.toOwnedSlice(self.arena),
                 .distinct = distinct,
@@ -1489,7 +1489,7 @@ pub const Parser = struct {
             if (try self.eat(.kw_filter)) {
                 _ = try self.expect(.sym_lparen);
                 _ = try self.expect(.kw_where);
-                _ = try self.parseExpr(); // filter condition — attach to fn_call in full impl
+                fn_call.filter = try self.parseExpr();
                 _ = try self.expect(.sym_rparen);
             }
             const e = try self.arenaAlloc(ast.Expr);
