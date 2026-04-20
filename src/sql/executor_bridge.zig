@@ -374,8 +374,11 @@ pub const SqlExecutor = struct {
                     seen.deinit();
                 }
                 for (inner.items) |row| {
+                    var eval_arena = std.heap.ArenaAllocator.init(ctx.alloc);
+                    defer eval_arena.deinit();
                     var row_ctx = ctx;
                     row_ctx.row = row;
+                    row_ctx.alloc = eval_arena.allocator();
                     const projected = try ctx.alloc.alloc(?ColumnValue, p.exprs.len);
                     for (p.exprs, 0..) |item, i| {
                         const v = try evalExpr(item.expr, row_ctx);
@@ -1707,8 +1710,24 @@ fn evalBinary(
             },
             else => error.TypeMismatch,
         },
-        .contains, .contained => .null_val, // JSON ops - simplified
-        .arrow, .darrow => .null_val, // JSON ops - simplified
+        .contains => blk: {
+            const ls = switch (lv) { .bytes_val => |b| b, .string_val => |s| s, else => break :blk plan_mod.Value.null_val };
+            const rs = switch (rv) { .bytes_val => |b| b, .string_val => |s| s, else => break :blk plan_mod.Value.null_val };
+            break :blk .{ .bool_val = jsonContains(ls, rs, ctx.alloc) };
+        },
+        .contained => blk: {
+            const ls = switch (lv) { .bytes_val => |b| b, .string_val => |s| s, else => break :blk plan_mod.Value.null_val };
+            const rs = switch (rv) { .bytes_val => |b| b, .string_val => |s| s, else => break :blk plan_mod.Value.null_val };
+            break :blk .{ .bool_val = jsonContains(rs, ls, ctx.alloc) };
+        },
+        .arrow => blk: {
+            const json = switch (lv) { .bytes_val => |b| b, .string_val => |s| s, else => break :blk plan_mod.Value.null_val };
+            break :blk jsonFieldAccess(json, rv, false, ctx.alloc);
+        },
+        .darrow => blk: {
+            const json = switch (lv) { .bytes_val => |b| b, .string_val => |s| s, else => break :blk plan_mod.Value.null_val };
+            break :blk jsonFieldAccess(json, rv, true, ctx.alloc);
+        },
         .bit_and => switch (lv) {
             .int_val => |a| switch (rv) {
                 .int_val => |b| .{ .int_val = a & b },
@@ -1744,6 +1763,83 @@ fn evalBinary(
             },
             else => error.TypeMismatch,
         },
+    };
+}
+
+fn jsonFieldAccess(json_bytes: []const u8, key: plan_mod.Value, as_text: bool, alloc: std.mem.Allocator) plan_mod.Value {
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, json_bytes, .{}) catch return .null_val;
+    defer parsed.deinit();
+
+    const field: std.json.Value = switch (key) {
+        .string_val => |k| switch (parsed.value) {
+            .object => |obj| obj.get(k) orelse return .null_val,
+            else => return .null_val,
+        },
+        .int_val => |idx| switch (parsed.value) {
+            .array => |arr| blk: {
+                if (idx < 0 or @as(usize, @intCast(idx)) >= arr.items.len) return .null_val;
+                break :blk arr.items[@as(usize, @intCast(idx))];
+            },
+            else => return .null_val,
+        },
+        else => return .null_val,
+    };
+
+    if (as_text) {
+        return switch (field) {
+            .null => .null_val,
+            .bool => |b| .{ .string_val = if (b) "true" else "false" },
+            .integer => |n| .{ .string_val = std.fmt.allocPrint(alloc, "{d}", .{n}) catch return .null_val },
+            .float => |f| .{ .string_val = std.fmt.allocPrint(alloc, "{d}", .{f}) catch return .null_val },
+            .number_string => |s| .{ .string_val = alloc.dupe(u8, s) catch return .null_val },
+            .string => |s| .{ .string_val = alloc.dupe(u8, s) catch return .null_val },
+            else => blk: {
+                const s = std.json.Stringify.valueAlloc(alloc, field, .{}) catch return .null_val;
+                break :blk .{ .string_val = s };
+            },
+        };
+    } else {
+        const b = std.json.Stringify.valueAlloc(alloc, field, .{}) catch return .null_val;
+        return .{ .bytes_val = b };
+    }
+}
+
+fn jsonContains(left: []const u8, right: []const u8, alloc: std.mem.Allocator) bool {
+    var lp = std.json.parseFromSlice(std.json.Value, alloc, left, .{}) catch return false;
+    defer lp.deinit();
+    var rp = std.json.parseFromSlice(std.json.Value, alloc, right, .{}) catch return false;
+    defer rp.deinit();
+    return jsonValueContains(lp.value, rp.value);
+}
+
+fn jsonValueContains(left: std.json.Value, right: std.json.Value) bool {
+    return switch (right) {
+        .object => |ro| {
+            const lo = switch (left) { .object => |o| o, else => return false };
+            var it = ro.iterator();
+            while (it.next()) |entry| {
+                const lv = lo.get(entry.key_ptr.*) orelse return false;
+                if (!jsonValueContains(lv, entry.value_ptr.*)) return false;
+            }
+            return true;
+        },
+        .array => |ra| {
+            const la = switch (left) { .array => |a| a, else => return false };
+            for (ra.items) |rv| {
+                var found = false;
+                for (la.items) |lv| {
+                    if (jsonValueContains(lv, rv)) { found = true; break; }
+                }
+                if (!found) return false;
+            }
+            return true;
+        },
+        .null => left == .null,
+        .bool => |b| switch (left) { .bool => |lb| lb == b, else => false },
+        .integer => |n| switch (left) { .integer => |ln| ln == n, else => false },
+        .float => |f| switch (left) { .float => |lf| lf == f, else => false },
+        .string => |s| switch (left) { .string => |ls| std.mem.eql(u8, ls, s), else => false },
+        .number_string => |s| switch (left) { .number_string => |ls| std.mem.eql(u8, ls, s), else => false },
     };
 }
 
