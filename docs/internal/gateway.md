@@ -13,7 +13,7 @@ Accepts client requests, validates and enriches them, resolves nondeterminism, a
 | `register(sql)` | Parse, type-check, and cache a query by hash |
 | `execute(hash, params)` | Submit a DML mutation |
 | `querySelect(hash, params)` | Execute a SELECT against current state |
-| `readAt(seq, hash, params)` | Historical read at a specific sequence number |
+| `readAt(hash, params, seq)` | Historical read at a specific sequence number |
 
 All operations require the query to be pre-registered. An unregistered hash returns `QueryNotFound`.
 
@@ -24,7 +24,7 @@ Before forwarding a mutation to the sequencer, the gateway resolves all nondeter
 - `NOW()` and `UUID_V7()` — sourced from an injected `ClockSource`.
 - `RANDOM()` — 16 bytes from an injected `RandSource`.
 
-Resolved values are bundled into the intent payload. Clients may supply pre-resolved overrides, but gateway-resolved values take precedence. This ensures every replica applies the same values when the executor folds the entry.
+Resolved values are bundled into the intent payload. Clients may supply pre-resolved overrides; caller-supplied values take precedence over gateway-resolved values. This ensures every replica applies the same values when the executor folds the entry.
 
 ## Validation
 
@@ -36,9 +36,11 @@ The gateway enforces three domain boundaries:
 
 ## Reconnaissance
 
-For queries whose read/write set cannot be statically determined at registration time (e.g. `WHERE` on a non-primary-key column), the gateway performs **reconnaissance** before submitting: it reads from a recent snapshot to discover which keys the transaction will actually touch, then includes this as a hint in the `TxnIntent`.
+Before submitting a mutation the gateway runs **reconnaissance**: it walks the query plan to determine which storage partitions the transaction will read and write, then embeds those partition IDs as `read_set_hint` / `write_set_hint` in the `TxnIntent`. This enables the executor and `PartitionSet` to route the transaction to the correct partition(s) without guessing.
 
-If the declared set turns out to be wrong by the time the executor runs the transaction (because another transaction modified relevant keys), the executor detects the mismatch, produces a retry marker at `seq`, and the gateway re-runs reconnaissance at the new seq and resubmits. For well-designed schemas (primary-key lookups, indexed scans), this never occurs.
+**Current implementation — table-level granularity**: each table referenced by the plan is mapped to a storage partition via `table_id % partition_count`. With the current single-partition storage layout this always produces partition 0. The code structure is correct for multi-partition deployments; a row-level scan (reading the actual snapshot at `at_seq` to find the exact keys affected by non-PK-filter DML) is left as a TODO until per-table partition counts are tracked in the schema.
+
+**Retry loop**: if the executor detects a read-set mismatch and returns `.abort { .code = .retry }`, the gateway updates the reconnaissance snapshot point to the seq the executor assigned, re-runs reconnaissance, and resubmits — up to 3 attempts. The `recon_retries` metric tracks how often this path is taken.
 
 ## Idempotency
 

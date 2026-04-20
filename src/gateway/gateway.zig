@@ -260,10 +260,24 @@ pub const Gateway = struct {
         // Merge caller-supplied nondet with gateway-resolved values.
         const all_nondet = if (nondet.len > 0) nondet else resolved;
 
+        // Reconnaissance: determine which storage partitions this transaction will touch.
+        // On retry, re-run at the seq the executor assigned to the conflicting entry so
+        // hints reflect state as of that point.
+        var recon_seq: Seq = self.sql_exec.committed_seq;
+        var hints = try reconnaissanceScan(rq.plan, recon_seq, self.alloc);
+        defer hints.deinit();
+
         const max_retries: usize = 3;
         var attempt: usize = 0;
         while (attempt < max_retries) : (attempt += 1) {
-            if (attempt > 0) self.metrics.recon_retries.inc();
+            if (attempt > 0) {
+                self.metrics.recon_retries.inc();
+                // Build new hints before freeing old ones so a failed alloc leaves hints valid.
+                const new_hints = try reconnaissanceScan(rq.plan, recon_seq, self.alloc);
+                hints.deinit();
+                hints = new_hints;
+            }
+
             // Serialize TxnIntent payload — client_seq stays constant across retries.
             var intent_buf: std.ArrayList(u8) = .empty;
             defer intent_buf.deinit(self.alloc);
@@ -272,8 +286,8 @@ pub const Gateway = struct {
                 &hash,
                 self.client_id,
                 op_seq,
-                &.{},
-                &.{},
+                hints.read,
+                hints.write,
                 params_bytes,
                 all_nondet,
                 &intent_buf,
@@ -308,8 +322,8 @@ pub const Gateway = struct {
                 return e;
             };
 
-            return switch (exec_result) {
-                .ok => |ok| .{ .rows_affected = ok.rows_affected, .result_set = ok.result_set },
+            switch (exec_result) {
+                .ok => |ok| return .{ .rows_affected = ok.rows_affected, .result_set = ok.result_set },
                 .abort => |ab| switch (ab.code) {
                     .constraint_violation => {
                         self.metrics.queries_aborted.inc();
@@ -319,12 +333,18 @@ pub const Gateway = struct {
                         self.metrics.queries_aborted.inc();
                         return error.QueryNotFound;
                     },
+                    .retry => {
+                        // Executor detected a read-set mismatch; re-run reconnaissance at
+                        // the seq this entry was assigned and resubmit with updated hints.
+                        recon_seq = validated.seq;
+                        continue;
+                    },
                     else => {
                         self.metrics.queries_aborted.inc();
                         return error.ExecutionError;
                     },
                 },
-            };
+            }
         }
         return error.ExecutionError;
     }
@@ -726,5 +746,140 @@ fn extractColumnNames(
             return names;
         },
         else => return try alloc.alloc([]const u8, 0),
+    }
+}
+
+// ── Reconnaissance ────────────────────────────────────────────────────────────
+
+/// Partition routing hints produced by reconnaissance.
+/// Callers must call deinit() when done.
+const ReconHints = struct {
+    read: []executor_mod.PartitionId,
+    write: []executor_mod.PartitionId,
+    alloc: std.mem.Allocator,
+
+    fn deinit(self: *ReconHints) void {
+        self.alloc.free(self.read);
+        self.alloc.free(self.write);
+    }
+};
+
+/// Determine which storage partitions a transaction plan will read and write.
+///
+/// Uses table-level granularity: maps each table the plan touches to its storage
+/// partition(s). With a single-partition storage layout (current default) this
+/// always returns partition 0, but the code structure is correct for multi-partition
+/// deployments once per-table partition counts are tracked in the schema.
+///
+/// `at_seq` is reserved for a future row-level implementation that will run an
+/// actual snapshot read at that seq to discover the exact keys (and therefore
+/// partitions) affected by non-PK-filter DML statements.
+fn reconnaissanceScan(
+    plan: sql_mod.plan.ExecutionPlan,
+    at_seq: Seq,
+    alloc: std.mem.Allocator,
+) !ReconHints {
+    _ = at_seq; // TODO: use for row-level scan once per-table partition counts exist
+
+    // Storage is currently always single-partition; all tables map to partition 0.
+    const partition_count: executor_mod.PartitionId = 1;
+
+    var read_set: std.ArrayList(executor_mod.PartitionId) = .empty;
+    errdefer read_set.deinit(alloc);
+    var write_set: std.ArrayList(executor_mod.PartitionId) = .empty;
+    errdefer write_set.deinit(alloc);
+
+    for (plan.stmts) |stmt| {
+        switch (stmt) {
+            .select => |node| try collectNodeReadPartitions(node, partition_count, &read_set, alloc),
+            .insert => |ins| {
+                try appendPartitionUnique(&write_set, tablePartitionId(ins.table_id, partition_count), alloc);
+                if (ins.source == .query) {
+                    try collectNodeReadPartitions(ins.source.query, partition_count, &read_set, alloc);
+                }
+            },
+            .update => |upd| {
+                const p = tablePartitionId(upd.table_id, partition_count);
+                try appendPartitionUnique(&write_set, p, alloc);
+                try appendPartitionUnique(&read_set, p, alloc);
+                if (upd.from_table_id) |from_tid| {
+                    try appendPartitionUnique(&read_set, tablePartitionId(from_tid, partition_count), alloc);
+                }
+            },
+            .delete => |del| {
+                const p = tablePartitionId(del.table_id, partition_count);
+                try appendPartitionUnique(&write_set, p, alloc);
+                try appendPartitionUnique(&read_set, p, alloc);
+                for (del.using_table_ids) |tid| {
+                    try appendPartitionUnique(&read_set, tablePartitionId(tid, partition_count), alloc);
+                }
+            },
+            .merge => |mrg| {
+                const p = tablePartitionId(mrg.target_id, partition_count);
+                try appendPartitionUnique(&write_set, p, alloc);
+                try appendPartitionUnique(&read_set, p, alloc);
+                try collectNodeReadPartitions(mrg.source, partition_count, &read_set, alloc);
+            },
+            .assert => {},
+        }
+    }
+
+    return .{
+        .read = try read_set.toOwnedSlice(alloc),
+        .write = try write_set.toOwnedSlice(alloc),
+        .alloc = alloc,
+    };
+}
+
+/// Map a table_id to its storage partition ID.
+fn tablePartitionId(table_id: sql_mod.schema.TableId, partition_count: executor_mod.PartitionId) executor_mod.PartitionId {
+    return table_id % partition_count;
+}
+
+/// Append a partition ID to a list only if not already present.
+fn appendPartitionUnique(
+    list: *std.ArrayList(executor_mod.PartitionId),
+    val: executor_mod.PartitionId,
+    alloc: std.mem.Allocator,
+) !void {
+    for (list.items) |item| {
+        if (item == val) return;
+    }
+    try list.append(alloc, val);
+}
+
+/// Walk a plan node tree and collect the storage partition ID for every table read.
+fn collectNodeReadPartitions(
+    node: *const sql_mod.plan.PlanNode,
+    partition_count: executor_mod.PartitionId,
+    out: *std.ArrayList(executor_mod.PartitionId),
+    alloc: std.mem.Allocator,
+) !void {
+    switch (node.*) {
+        .scan => |s| try appendPartitionUnique(out, tablePartitionId(s.table_id, partition_count), alloc),
+        .pk_lookup => |pk| try appendPartitionUnique(out, tablePartitionId(pk.table_id, partition_count), alloc),
+        .filter => |f| try collectNodeReadPartitions(f.input, partition_count, out, alloc),
+        .project => |p| try collectNodeReadPartitions(p.input, partition_count, out, alloc),
+        .sort => |s| try collectNodeReadPartitions(s.input, partition_count, out, alloc),
+        .limit => |l| try collectNodeReadPartitions(l.input, partition_count, out, alloc),
+        .hash_agg => |h| try collectNodeReadPartitions(h.input, partition_count, out, alloc),
+        .hash_join => |j| {
+            try collectNodeReadPartitions(j.left, partition_count, out, alloc);
+            try collectNodeReadPartitions(j.right, partition_count, out, alloc);
+        },
+        .window => |w| try collectNodeReadPartitions(w.input, partition_count, out, alloc),
+        .insert => |ins| {
+            try appendPartitionUnique(out, tablePartitionId(ins.table_id, partition_count), alloc);
+            if (ins.source == .query) {
+                try collectNodeReadPartitions(ins.source.query, partition_count, out, alloc);
+            }
+        },
+        .update => |upd| try appendPartitionUnique(out, tablePartitionId(upd.table_id, partition_count), alloc),
+        .delete => |del| try appendPartitionUnique(out, tablePartitionId(del.table_id, partition_count), alloc),
+        .merge => |mrg| {
+            try appendPartitionUnique(out, tablePartitionId(mrg.target_id, partition_count), alloc);
+            try collectNodeReadPartitions(mrg.source, partition_count, out, alloc);
+        },
+        .assert, .empty, .single_row => {},
     }
 }
