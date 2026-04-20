@@ -1318,6 +1318,84 @@ pub const SqlExecutor = struct {
                     }
                     results[ri][fn_idx] = .{ .int64 = rank };
                 }
+            } else if (std.ascii.eqlIgnoreCase(wf.fn_name, "lag") or
+                std.ascii.eqlIgnoreCase(wf.fn_name, "lead"))
+            {
+                const is_lead = std.ascii.eqlIgnoreCase(wf.fn_name, "lead");
+                for (sorted, 0..) |ri, pos| {
+                    // Evaluate offset (arg[1], default 1)
+                    const offset: usize = if (wf.args.len > 1) blk: {
+                        var row_ctx = ctx;
+                        row_ctx.row = rows[ri];
+                        const ov = evalExpr(wf.args[1], row_ctx) catch break :blk 1;
+                        break :blk switch (ov) {
+                            .int_val => |n| if (n >= 0) @intCast(n) else 1,
+                            else => 1,
+                        };
+                    } else 1;
+
+                    const src_pos: ?usize = if (is_lead) blk: {
+                        const fwd = pos + offset;
+                        break :blk if (fwd < sorted.len) fwd else null;
+                    } else blk: {
+                        break :blk if (pos >= offset) pos - offset else null;
+                    };
+
+                    if (src_pos) |sp| {
+                        var row_ctx = ctx;
+                        row_ctx.row = rows[sorted[sp]];
+                        const v = evalExpr(wf.args[0], row_ctx) catch continue;
+                        results[ri][fn_idx] = planValueToColumnValue(v, ctx.alloc) catch null;
+                    } else if (wf.args.len > 2) {
+                        var row_ctx = ctx;
+                        row_ctx.row = rows[ri];
+                        const dv = evalExpr(wf.args[2], row_ctx) catch continue;
+                        results[ri][fn_idx] = planValueToColumnValue(dv, ctx.alloc) catch null;
+                    }
+                    // else: out of bounds with no default — leave null
+                }
+            } else if (std.ascii.eqlIgnoreCase(wf.fn_name, "first_value")) {
+                if (sorted.len == 0 or wf.args.len == 0) continue;
+                var row_ctx = ctx;
+                row_ctx.row = rows[sorted[0]];
+                const v = evalExpr(wf.args[0], row_ctx) catch continue;
+                const cv = planValueToColumnValue(v, ctx.alloc) catch null;
+                for (sorted) |ri| {
+                    results[ri][fn_idx] = if (cv) |c| c.dupe(ctx.alloc) catch null else null;
+                }
+                if (cv) |c| c.freeIfOwned(ctx.alloc);
+            } else if (std.ascii.eqlIgnoreCase(wf.fn_name, "last_value")) {
+                if (sorted.len == 0 or wf.args.len == 0) continue;
+                var row_ctx = ctx;
+                row_ctx.row = rows[sorted[sorted.len - 1]];
+                const v = evalExpr(wf.args[0], row_ctx) catch continue;
+                const cv = planValueToColumnValue(v, ctx.alloc) catch null;
+                for (sorted) |ri| {
+                    results[ri][fn_idx] = if (cv) |c| c.dupe(ctx.alloc) catch null else null;
+                }
+                if (cv) |c| c.freeIfOwned(ctx.alloc);
+            } else if (std.ascii.eqlIgnoreCase(wf.fn_name, "nth_value")) {
+                if (sorted.len == 0 or wf.args.len < 2) continue;
+                // Evaluate n from args[1] (1-indexed, constant across partition)
+                var row_ctx0 = ctx;
+                row_ctx0.row = rows[sorted[0]];
+                const n: usize = blk: {
+                    const nv = evalExpr(wf.args[1], row_ctx0) catch break :blk 0;
+                    break :blk switch (nv) {
+                        .int_val => |iv| if (iv >= 1) @as(usize, @intCast(iv - 1)) else 0,
+                        else => 0,
+                    };
+                };
+                const cv: ?ColumnValue = if (n < sorted.len) blk: {
+                    var row_ctx = ctx;
+                    row_ctx.row = rows[sorted[n]];
+                    const v = evalExpr(wf.args[0], row_ctx) catch break :blk null;
+                    break :blk planValueToColumnValue(v, ctx.alloc) catch null;
+                } else null;
+                for (sorted) |ri| {
+                    results[ri][fn_idx] = if (cv) |c| c.dupe(ctx.alloc) catch null else null;
+                }
+                if (cv) |c| c.freeIfOwned(ctx.alloc);
             }
             // Unknown window functions leave result as null
         }
