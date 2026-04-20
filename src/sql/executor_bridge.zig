@@ -765,7 +765,10 @@ pub const SqlExecutor = struct {
                         // Build a row context using the existing row values for referencing old columns.
                         const ex_nullable = try ctx.alloc.alloc(?ColumnValue, tbl.columns.len);
                         defer ctx.alloc.free(ex_nullable);
-                        for (ex_row.values, 0..) |v, i| ex_nullable[i] = v;
+                        @memset(ex_nullable, null);
+                        for (ex_row.values, 0..) |v, i| {
+                            if (i < ex_nullable.len) ex_nullable[i] = v;
+                        }
                         var row_ctx = ctx;
                         row_ctx.row = ex_nullable;
                         // Apply SET assignments.
@@ -778,6 +781,12 @@ pub const SqlExecutor = struct {
                                 new_values[pos] = try planValueToTypedColumnValue(pv, col.typ, ctx.alloc);
                             }
                         }
+                        // Enforce FK constraints on the updated values.
+                        const all_col_ids = try ctx.alloc.alloc(schema_mod.ColumnId, tbl.columns.len);
+                        defer ctx.alloc.free(all_col_ids);
+                        for (tbl.columns, 0..) |col, i| all_col_ids[i] = col.id;
+                        try self.checkForeignKeys(tbl, all_col_ids, new_values, ctx);
+
                         // Discard the incoming insert values (replaced by update).
                         for (values) |v| v.freeIfOwned(ctx.alloc);
                         ctx.alloc.free(values);

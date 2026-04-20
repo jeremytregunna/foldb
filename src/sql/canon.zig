@@ -483,6 +483,36 @@ pub const CanonWriter = struct {
                 try self.writeSelect(q.*);
             },
         }
+        if (stmt.on_conflict) |oc| {
+            try self.writeByte(0x01);
+            switch (oc) {
+                .do_nothing => try self.writeByte(0x01),
+                .do_update => |du| {
+                    try self.writeByte(0x02);
+                    try self.writeU32(@intCast(du.sets.len));
+                    for (du.sets) |a| {
+                        try self.writeStr(a.column);
+                        try self.writeExpr(a.value);
+                    }
+                    try self.writeByte(if (du.where != null) 1 else 0);
+                    if (du.where) |w| try self.writeExpr(w);
+                },
+            }
+        } else {
+            try self.writeByte(0x00);
+        }
+        try self.writeU32(@intCast(stmt.returning.len));
+        for (stmt.returning) |item| {
+            switch (item) {
+                .star => try self.writeByte(0x00),
+                .expr => |ei| {
+                    try self.writeByte(0x01);
+                    try self.writeExpr(ei.expr);
+                    try self.writeByte(if (ei.alias != null) 1 else 0);
+                    if (ei.alias) |a| try self.writeStr(a);
+                },
+            }
+        }
     }
 
     fn writeUpdate(self: *CanonWriter, stmt: ast.UpdateStmt) !void {
@@ -494,12 +524,36 @@ pub const CanonWriter = struct {
         }
         try self.writeByte(if (stmt.where != null) 1 else 0);
         if (stmt.where) |w| try self.writeExpr(w);
+        try self.writeU32(@intCast(stmt.returning.len));
+        for (stmt.returning) |item| {
+            switch (item) {
+                .star => try self.writeByte(0x00),
+                .expr => |ei| {
+                    try self.writeByte(0x01);
+                    try self.writeExpr(ei.expr);
+                    try self.writeByte(if (ei.alias != null) 1 else 0);
+                    if (ei.alias) |a| try self.writeStr(a);
+                },
+            }
+        }
     }
 
     fn writeDelete(self: *CanonWriter, stmt: ast.DeleteStmt) !void {
         try self.writeStr(stmt.table);
         try self.writeByte(if (stmt.where != null) 1 else 0);
         if (stmt.where) |w| try self.writeExpr(w);
+        try self.writeU32(@intCast(stmt.returning.len));
+        for (stmt.returning) |item| {
+            switch (item) {
+                .star => try self.writeByte(0x00),
+                .expr => |ei| {
+                    try self.writeByte(0x01);
+                    try self.writeExpr(ei.expr);
+                    try self.writeByte(if (ei.alias != null) 1 else 0);
+                    if (ei.alias) |a| try self.writeStr(a);
+                },
+            }
+        }
     }
 
     fn writeMerge(self: *CanonWriter, stmt: ast.MergeStmt) !void {
