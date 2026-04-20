@@ -213,7 +213,16 @@ pub const TypeChecker = struct {
         const tbl = self.schema.getTable(stmt.table) orelse return error.TableNotFound;
         var scope_list: std.ArrayList(ScopeEntry) = .empty;
         defer scope_list.deinit(self.alloc);
-        try scope_list.append(self.alloc, .{ .alias = stmt.table, .table = tbl });
+        try scope_list.append(self.alloc, .{ .alias = stmt.alias orelse stmt.table, .table = tbl });
+        if (stmt.from) |from_ref| {
+            switch (from_ref) {
+                .named => |n| {
+                    const from_tbl = self.schema.getTable(n.name) orelse return error.TableNotFound;
+                    try scope_list.append(self.alloc, .{ .alias = n.alias orelse n.name, .table = from_tbl });
+                },
+                else => {},
+            }
+        }
         const ctx = self.makeCtx(params, scope_list.items);
         for (stmt.sets) |asgn| {
             _ = try self.inferExpr(asgn.value, ctx);
@@ -228,7 +237,16 @@ pub const TypeChecker = struct {
         const tbl = self.schema.getTable(stmt.table) orelse return error.TableNotFound;
         var scope_list: std.ArrayList(ScopeEntry) = .empty;
         defer scope_list.deinit(self.alloc);
-        try scope_list.append(self.alloc, .{ .alias = stmt.table, .table = tbl });
+        try scope_list.append(self.alloc, .{ .alias = stmt.alias orelse stmt.table, .table = tbl });
+        for (stmt.using) |using_ref| {
+            switch (using_ref) {
+                .named => |n| {
+                    const using_tbl = self.schema.getTable(n.name) orelse return error.TableNotFound;
+                    try scope_list.append(self.alloc, .{ .alias = n.alias orelse n.name, .table = using_tbl });
+                },
+                else => {},
+            }
+        }
         const ctx = self.makeCtx(params, scope_list.items);
         if (stmt.where) |w| {
             const t = try self.inferExpr(w, ctx);

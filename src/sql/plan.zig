@@ -195,6 +195,7 @@ pub const UpdatePlan = struct {
     assignments: []const UpdateAssignment,
     filter: ?*PlanExpr,
     returning: []const ProjectItem = &.{},
+    from_table_id: ?schema_mod.TableId = null,
 };
 
 pub const UpdateAssignment = struct {
@@ -206,6 +207,7 @@ pub const DeletePlan = struct {
     table_id: schema_mod.TableId,
     filter: ?*PlanExpr,
     returning: []const ProjectItem = &.{},
+    using_table_ids: []const schema_mod.TableId = &.{},
 };
 
 pub const AssertPlan = struct {
@@ -896,10 +898,29 @@ pub const Planner = struct {
         defer self.scope.shrinkRetainingCapacity(scope_save);
         for (tbl.columns, 0..) |col, i| {
             try self.scope.append(self.arena, .{
-                .table_alias = stmt.table,
+                .table_alias = stmt.alias orelse stmt.table,
                 .col_name = col.name,
                 .position = @intCast(i),
             });
+        }
+        var from_table_id: ?schema_mod.TableId = null;
+        if (stmt.from) |from_ref| {
+            switch (from_ref) {
+                .named => |n| {
+                    const from_tbl = self.schema.getTable(n.name) orelse return error.TableNotFound;
+                    const from_alias = n.alias orelse n.name;
+                    const start: u32 = @intCast(self.scope.items.len);
+                    for (from_tbl.columns, 0..) |col, i| {
+                        try self.scope.append(self.arena, .{
+                            .table_alias = from_alias,
+                            .col_name = col.name,
+                            .position = start + @as(u32, @intCast(i)),
+                        });
+                    }
+                    from_table_id = from_tbl.id;
+                },
+                else => return error.TableNotFound,
+            }
         }
         var assignments: std.ArrayList(UpdateAssignment) = .empty;
         for (stmt.sets) |a| {
@@ -928,6 +949,7 @@ pub const Planner = struct {
             .assignments = try assignments.toOwnedSlice(self.arena),
             .filter = filter,
             .returning = try upd_returning.toOwnedSlice(self.arena),
+            .from_table_id = from_table_id,
         };
     }
 
@@ -937,10 +959,29 @@ pub const Planner = struct {
         defer self.scope.shrinkRetainingCapacity(scope_save);
         for (tbl.columns, 0..) |col, i| {
             try self.scope.append(self.arena, .{
-                .table_alias = stmt.table,
+                .table_alias = stmt.alias orelse stmt.table,
                 .col_name = col.name,
                 .position = @intCast(i),
             });
+        }
+        var using_ids: std.ArrayList(schema_mod.TableId) = .empty;
+        for (stmt.using) |using_ref| {
+            switch (using_ref) {
+                .named => |n| {
+                    const using_tbl = self.schema.getTable(n.name) orelse return error.TableNotFound;
+                    const using_alias = n.alias orelse n.name;
+                    const start: u32 = @intCast(self.scope.items.len);
+                    for (using_tbl.columns, 0..) |col, i| {
+                        try self.scope.append(self.arena, .{
+                            .table_alias = using_alias,
+                            .col_name = col.name,
+                            .position = start + @as(u32, @intCast(i)),
+                        });
+                    }
+                    try using_ids.append(self.arena, using_tbl.id);
+                },
+                else => return error.TableNotFound,
+            }
         }
         const filter = if (stmt.where) |w| try self.planExpr(w) else null;
         var del_returning: std.ArrayList(ProjectItem) = .empty;
@@ -956,7 +997,12 @@ pub const Planner = struct {
                 },
             }
         }
-        return .{ .table_id = tbl.id, .filter = filter, .returning = try del_returning.toOwnedSlice(self.arena) };
+        return .{
+            .table_id = tbl.id,
+            .filter = filter,
+            .returning = try del_returning.toOwnedSlice(self.arena),
+            .using_table_ids = try using_ids.toOwnedSlice(self.arena),
+        };
     }
 
     fn planMerge(self: *Planner, stmt: ast.MergeStmt) PlanError!MergePlan {

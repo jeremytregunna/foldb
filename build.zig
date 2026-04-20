@@ -981,6 +981,28 @@ pub fn build(b: *std.Build) void {
     const gateway_json_tests = b.addTest(.{ .root_module = gateway_json_test_module });
     const run_gateway_json_tests = b.addRunArtifact(gateway_json_tests);
 
+    const gateway_update_from_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/gateway/update_from_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gateway_update_from_test_module.addImport("gateway.zig", gateway_module);
+    gateway_update_from_test_module.addImport("storage.zig", storage_module);
+    gateway_update_from_test_module.addImport("sequencer.zig", sequencer_module);
+    const gateway_update_from_tests = b.addTest(.{ .root_module = gateway_update_from_test_module });
+    const run_gateway_update_from_tests = b.addRunArtifact(gateway_update_from_tests);
+
+    const gateway_delete_using_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/gateway/delete_using_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gateway_delete_using_test_module.addImport("gateway.zig", gateway_module);
+    gateway_delete_using_test_module.addImport("storage.zig", storage_module);
+    gateway_delete_using_test_module.addImport("sequencer.zig", sequencer_module);
+    const gateway_delete_using_tests = b.addTest(.{ .root_module = gateway_delete_using_test_module });
+    const run_gateway_delete_using_tests = b.addRunArtifact(gateway_delete_using_tests);
+
     const gateway_join_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/gateway/join_test.zig"),
         .target = target,
@@ -1050,6 +1072,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_gateway_alter_table_tests.step);
     test_step.dependOn(&run_gateway_create_index_tests.step);
     test_step.dependOn(&run_gateway_json_tests.step);
+    test_step.dependOn(&run_gateway_update_from_tests.step);
+    test_step.dependOn(&run_gateway_delete_using_tests.step);
     test_step.dependOn(&run_gateway_join_tests.step);
     test_step.dependOn(&run_seq_epoch_tests.step);
     test_step.dependOn(&run_seq_idem_tests.step);

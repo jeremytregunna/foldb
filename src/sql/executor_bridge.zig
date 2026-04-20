@@ -833,37 +833,79 @@ pub const SqlExecutor = struct {
         returning_rows: ?*std.ArrayList([]const ?ColumnValue),
     ) SqlExecError!void {
         const tbl = self.schema.getTableById(upd.table_id) orelse return error.TableNotFound;
+
+        // Pre-load FROM table rows if a FROM clause was specified.
+        var from_rows: std.ArrayList([]const ?ColumnValue) = .empty;
+        defer {
+            for (from_rows.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
+            from_rows.deinit(ctx.alloc);
+        }
+        if (upd.from_table_id) |from_id| {
+            var fi = self.storage.scan(from_id, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch return error.TableNotFound;
+            defer fi.deinit();
+            while (fi.next() catch null) |fr| {
+                try from_rows.append(ctx.alloc, try self.rowToValues(fr, &.{}, ctx.alloc));
+            }
+        }
+
         var iter = self.storage.scan(upd.table_id, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch return error.TableNotFound;
         defer iter.deinit();
 
         while (iter.next() catch null) |row| {
-            // Convert row to nullable values for filter evaluation
             const row_vals = try self.rowToValues(row, pkColumnIds(tbl), ctx.alloc);
             defer SqlExecutor.freeRowValues(row_vals, ctx.alloc);
 
-            var row_ctx = ctx;
-            row_ctx.row = row_vals;
+            // Build eval row: target cols, then FROM cols (if any).
+            // For no-FROM case we avoid the allocation.
+            const eval_row: []const ?ColumnValue = if (from_rows.items.len == 0) blk: {
+                break :blk row_vals;
+            } else blk: {
+                // Attempt each FROM row; use the first that satisfies the filter.
+                var matched_from: ?[]const ?ColumnValue = null;
+                for (from_rows.items) |fv| {
+                    const combined = try ctx.alloc.alloc(?ColumnValue, row_vals.len + fv.len);
+                    @memcpy(combined[0..row_vals.len], row_vals);
+                    @memcpy(combined[row_vals.len..], fv);
+                    var row_ctx = ctx;
+                    row_ctx.row = combined;
+                    const passes = if (upd.filter) |f| blk2: {
+                        const v = try evalExpr(f, row_ctx);
+                        break :blk2 v.toBool() orelse false;
+                    } else true;
+                    if (passes) {
+                        matched_from = combined;
+                        break;
+                    }
+                    ctx.alloc.free(combined);
+                }
+                const mf = matched_from orelse continue; // no FROM row matched
+                break :blk mf;
+            };
+            defer if (from_rows.items.len > 0) ctx.alloc.free(eval_row);
 
-            // Apply WHERE filter
-            if (upd.filter) |f| {
-                const v = try evalExpr(f, row_ctx);
-                if (!(v.toBool() orelse false)) continue;
+            var row_ctx = ctx;
+            row_ctx.row = eval_row;
+
+            // Apply WHERE filter (already applied above when FROM is present).
+            if (from_rows.items.len == 0) {
+                if (upd.filter) |f| {
+                    const v = try evalExpr(f, row_ctx);
+                    if (!(v.toBool() orelse false)) continue;
+                }
             }
 
-            // Evaluate new values
+            // Copy existing values and apply assignments.
             const new_values = try ctx.alloc.alloc(ColumnValue, tbl.columns.len);
             errdefer {
                 for (new_values) |v| v.freeIfOwned(ctx.alloc);
                 ctx.alloc.free(new_values);
             }
-            // Copy existing values
             for (tbl.columns, 0..) |col, i| {
                 new_values[i] = if (i < row.values.len)
                     row.values[i].dupe(ctx.alloc) catch defaultValue(col.typ)
                 else
                     defaultValue(col.typ);
             }
-            // Apply assignments
             for (upd.assignments) |asgn| {
                 const pv = try evalExpr(asgn.value, row_ctx);
                 const col = tbl.columnById(asgn.column_id) orelse return error.ColumnNotFound;
@@ -874,7 +916,6 @@ pub const SqlExecutor = struct {
                 }
             }
 
-            // Enforce FK constraints on new values (all columns, sequential IDs)
             const all_col_ids = try ctx.alloc.alloc(schema_mod.ColumnId, tbl.columns.len);
             defer ctx.alloc.free(all_col_ids);
             for (tbl.columns, 0..) |col, i| all_col_ids[i] = col.id;
@@ -890,7 +931,6 @@ pub const SqlExecutor = struct {
 
             if (returning_rows) |rr| {
                 if (upd.returning.len > 0) {
-                    // new_values is now owned by mutation; build nullable view for projection
                     const virtual = try ctx.alloc.alloc(?ColumnValue, new_values.len);
                     defer ctx.alloc.free(virtual);
                     for (new_values, 0..) |v, i| virtual[i] = v;
@@ -909,7 +949,29 @@ pub const SqlExecutor = struct {
     ) SqlExecError!void {
         const tbl = self.schema.getTableById(del.table_id) orelse return error.TableNotFound;
 
-        // Collect inbound FKs once for this delete
+        // Pre-load each USING table's rows into memory for the nested-loop join.
+        var using_rows: std.ArrayList(std.ArrayList([]const ?ColumnValue)) = .empty;
+        defer {
+            for (using_rows.items) |*bucket| {
+                for (bucket.items) |r| SqlExecutor.freeRowValues(r, ctx.alloc);
+                bucket.deinit(ctx.alloc);
+            }
+            using_rows.deinit(ctx.alloc);
+        }
+        var using_widths: std.ArrayList(usize) = .empty;
+        defer using_widths.deinit(ctx.alloc);
+        for (del.using_table_ids) |uid| {
+            const using_tbl = self.schema.getTableById(uid) orelse return error.TableNotFound;
+            var bucket: std.ArrayList([]const ?ColumnValue) = .empty;
+            var ui = self.storage.scan(uid, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch return error.TableNotFound;
+            defer ui.deinit();
+            while (ui.next() catch null) |ur| {
+                try bucket.append(ctx.alloc, try self.rowToValues(ur, &.{}, ctx.alloc));
+            }
+            try using_rows.append(ctx.alloc, bucket);
+            try using_widths.append(ctx.alloc, using_tbl.columns.len);
+        }
+
         const inbound = self.schema.getInboundForeignKeys(del.table_id, ctx.alloc) catch &.{};
         defer ctx.alloc.free(inbound);
 
@@ -917,21 +979,72 @@ pub const SqlExecutor = struct {
         defer iter.deinit();
 
         while (iter.next() catch null) |row| {
-            const need_row_vals = del.filter != null or (returning_rows != null and del.returning.len > 0);
+            const need_row_vals = del.filter != null or del.using_table_ids.len > 0 or (returning_rows != null and del.returning.len > 0);
             const row_vals: ?[]const ?ColumnValue = if (need_row_vals)
                 try self.rowToValues(row, &.{}, ctx.alloc)
             else
                 null;
             defer if (row_vals) |rv| SqlExecutor.freeRowValues(rv, ctx.alloc);
 
-            if (del.filter) |f| {
-                var row_ctx = ctx;
-                row_ctx.row = row_vals.?;
-                const v = try evalExpr(f, row_ctx);
-                if (!(v.toBool() orelse false)) continue;
+            // Apply WHERE (with USING join if present).
+            if (del.filter != null or del.using_table_ids.len > 0) {
+                const target_vals = row_vals.?;
+                const passes = if (del.using_table_ids.len == 0) blk: {
+                    var row_ctx = ctx;
+                    row_ctx.row = target_vals;
+                    const v = try evalExpr(del.filter.?, row_ctx);
+                    break :blk v.toBool() orelse false;
+                } else blk: {
+                    // Compute combined row width for the cross product.
+                    var total_width = target_vals.len;
+                    for (using_widths.items) |w| total_width += w;
+                    const combined = try ctx.alloc.alloc(?ColumnValue, total_width);
+                    defer ctx.alloc.free(combined);
+                    @memcpy(combined[0..target_vals.len], target_vals);
+
+                    // Iterate cross product of all USING tables via index counters.
+                    const n_using = using_rows.items.len;
+                    const indices = try ctx.alloc.alloc(usize, n_using);
+                    defer ctx.alloc.free(indices);
+                    @memset(indices, 0);
+
+                    var found = false;
+                    outer: while (true) {
+                        // Skip empty USING tables immediately.
+                        for (using_rows.items, 0..) |bucket, bi| {
+                            if (bucket.items.len == 0) break :outer;
+                            _ = bi;
+                        }
+                        // Populate combined row with current USING combination.
+                        var offset = target_vals.len;
+                        for (using_rows.items, indices) |bucket, idx| {
+                            const uv = bucket.items[idx];
+                            @memcpy(combined[offset..offset + uv.len], uv);
+                            offset += uv.len;
+                        }
+                        var row_ctx = ctx;
+                        row_ctx.row = combined;
+                        const passes_filter = if (del.filter) |f| v: {
+                            const v = try evalExpr(f, row_ctx);
+                            break :v v.toBool() orelse false;
+                        } else true;
+                        if (passes_filter) { found = true; break; }
+
+                        // Advance counters (right-to-left carry).
+                        var k: usize = n_using;
+                        while (k > 0) {
+                            k -= 1;
+                            indices[k] += 1;
+                            if (indices[k] < using_rows.items[k].items.len) break;
+                            indices[k] = 0;
+                            if (k == 0) break :outer;
+                        }
+                    }
+                    break :blk found;
+                };
+                if (!passes) continue;
             }
 
-            // Check no child rows reference this row
             if (inbound.len > 0) {
                 try self.checkInboundForeignKeys(tbl, row, inbound, ctx);
             }
