@@ -34,7 +34,7 @@ pub const ExecResult = union(enum) {
 // Embedded in LogEntry.payload for kind = .txn_intent.
 //
 // Layout:
-//   TxnIntentHeader (64 bytes)
+//   TxnIntentHeader (72 bytes)
 //   read_set_hint: [read_count]PartitionId (4 bytes each)
 //   write_set_hint: [write_count]PartitionId (4 bytes each)
 //   params: [params_len]u8
@@ -50,13 +50,15 @@ pub const TxnIntentHeader = extern struct {
     write_count: u32, // 52-55
     params_len: u32, // 56-59
     nondet_count: u32, // 60-63
+    recon_seq: u64, // 64-71: seq at which reconnaissance was performed (0 = no recon)
 
     comptime {
-        std.debug.assert(@sizeOf(TxnIntentHeader) == 64);
+        std.debug.assert(@sizeOf(TxnIntentHeader) == 72);
         std.debug.assert(@offsetOf(TxnIntentHeader, "read_count") == 48);
         std.debug.assert(@offsetOf(TxnIntentHeader, "write_count") == 52);
         std.debug.assert(@offsetOf(TxnIntentHeader, "params_len") == 56);
         std.debug.assert(@offsetOf(TxnIntentHeader, "nondet_count") == 60);
+        std.debug.assert(@offsetOf(TxnIntentHeader, "recon_seq") == 64);
     }
 };
 
@@ -76,6 +78,7 @@ pub const TxnIntentDecoded = struct {
     query_hash: *const [32]u8, // points into original payload
     client_id: u64,
     client_seq: u64,
+    recon_seq: Seq, // seq at which reconnaissance was performed (0 = no recon)
     read_set_hint: []const PartitionId, // allocated
     write_set_hint: []const PartitionId, // allocated
     params: []const u8, // slice into original payload
@@ -93,6 +96,7 @@ pub fn serializeTxnIntent(
     hash: *const [32]u8,
     client_id: u64,
     client_seq: u64,
+    recon_seq: Seq,
     read_set_hint: []const PartitionId,
     write_set_hint: []const PartitionId,
     params: []const u8,
@@ -108,6 +112,7 @@ pub fn serializeTxnIntent(
         .write_count = @intCast(write_set_hint.len),
         .params_len = @intCast(params.len),
         .nondet_count = @intCast(nondet.len),
+        .recon_seq = recon_seq,
     };
     try out.appendSlice(alloc, std.mem.asBytes(&hdr));
 
@@ -207,6 +212,7 @@ pub fn deserializeTxnIntent(payload: []const u8, alloc: std.mem.Allocator) !TxnI
         .query_hash = &hdr.query_hash,
         .client_id = hdr.client_id,
         .client_seq = hdr.client_seq,
+        .recon_seq = hdr.recon_seq,
         .read_set_hint = read_set_hint,
         .write_set_hint = write_set_hint,
         .params = payload[params_start..params_end],

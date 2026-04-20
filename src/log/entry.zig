@@ -68,6 +68,7 @@ pub const TxnIntent = struct {
     resolved_nondet: []const ResolvedValue, // nondeterminism resolved by gateway
     client_id: u64, // client identifier for idempotency
     client_seq: u64, // client sequence for idempotency
+    recon_seq: Seq = 0, // seq at which reconnaissance was performed (0 = no recon)
 
     /// Creates a new TxnIntent with the given fields.
     pub fn init(
@@ -92,8 +93,9 @@ pub const TxnIntent = struct {
 
     /// Serializes TxnIntent to an ArrayList.
     /// Format:
-    ///   - header (56 bytes): query_hash(32) + client_id(8) + client_seq(8) +
-    ///                         read_count(4) + write_count(4) + params_len(4) + nondet_count(4)
+    ///   - header (72 bytes): query_hash(32) + client_id(8) + client_seq(8) +
+    ///                         read_count(4) + write_count(4) + params_len(4) + nondet_count(4) +
+    ///                         recon_seq(8)
     ///   - read_set_hint: read_count * 4 bytes
     ///   - write_set_hint: write_count * 4 bytes
     ///   - params: params_len bytes
@@ -122,6 +124,8 @@ pub const TxnIntent = struct {
         try out.appendSlice(allocator, std.mem.asBytes(&params_len));
         // nondet_count: 4 bytes
         try out.appendSlice(allocator, std.mem.asBytes(&nondet_count));
+        // recon_seq: 8 bytes
+        try out.appendSlice(allocator, std.mem.asBytes(&self.recon_seq));
 
         // Write read_set_hint
         for (self.read_set_hint) |pid| {
@@ -156,7 +160,7 @@ pub const TxnIntent = struct {
     pub const RESOLVED_RECORD_SIZE: usize = 17; // tag(1) + data(16)
 
     /// Constant for the size of the TxnIntent header on wire.
-    pub const HEADER_SIZE: usize = 64;
+    pub const HEADER_SIZE: usize = 72;
 
     /// Deserializes TxnIntent from a byte slice.
     pub fn deserializeFrom(payload: []const u8, allocator: std.mem.Allocator) !TxnIntent {
@@ -174,6 +178,7 @@ pub const TxnIntent = struct {
         const write_count = std.mem.readInt(u32, @ptrCast(@alignCast(ptr + 52)), .little);
         const params_len = std.mem.readInt(u32, @ptrCast(@alignCast(ptr + 56)), .little);
         const nondet_count = std.mem.readInt(u32, @ptrCast(@alignCast(ptr + 60)), .little);
+        const recon_seq = std.mem.readInt(u64, @ptrCast(@alignCast(ptr + 64)), .little);
 
         // Calculate offsets
         const read_set_start = HEADER_SIZE;
@@ -251,6 +256,7 @@ pub const TxnIntent = struct {
             .resolved_nondet = resolved_nondet,
             .client_id = client_id,
             .client_seq = client_seq,
+            .recon_seq = recon_seq,
         };
     }
 

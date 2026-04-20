@@ -286,6 +286,7 @@ pub const Gateway = struct {
                 &hash,
                 self.client_id,
                 op_seq,
+                recon_seq,
                 hints.read,
                 hints.write,
                 params_bytes,

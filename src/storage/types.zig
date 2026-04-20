@@ -148,3 +148,39 @@ pub const KeyRange = struct {
 pub const SnapshotHandle = struct {
     seq: Seq,
 };
+
+/// Records a single key read during handler execution.
+/// `row_seq` is the sequence of the row version that was returned (0 if not found).
+pub const ReadEntry = struct {
+    table_id: TableId,
+    key: []const u8,
+    row_seq: Seq,
+};
+
+/// Tracks keys read by a handler during a single transaction execution.
+/// Attach to Storage.read_tracker before calling the handler; detach after.
+/// Used by the executor to detect read-write conflicts against recon_seq.
+pub const ReadTracker = struct {
+    reads: std.ArrayList(ReadEntry),
+    alloc: std.mem.Allocator,
+
+    pub fn init(alloc: std.mem.Allocator) ReadTracker {
+        return .{ .reads = .empty, .alloc = alloc };
+    }
+
+    /// Record a key read. Deduplicates by (table_id, key); if the key was already
+    /// recorded the first row_seq is kept (first read wins for conflict purposes).
+    pub fn record(self: *ReadTracker, table_id: TableId, key: []const u8, row_seq: Seq) !void {
+        for (self.reads.items) |r| {
+            if (r.table_id == table_id and std.mem.eql(u8, r.key, key)) return;
+        }
+        const key_copy = try self.alloc.dupe(u8, key);
+        errdefer self.alloc.free(key_copy);
+        try self.reads.append(self.alloc, .{ .table_id = table_id, .key = key_copy, .row_seq = row_seq });
+    }
+
+    pub fn deinit(self: *ReadTracker) void {
+        for (self.reads.items) |r| self.alloc.free(r.key);
+        self.reads.deinit(self.alloc);
+    }
+};

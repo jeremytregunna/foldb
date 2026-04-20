@@ -841,12 +841,13 @@ fn buildTestPayloadWithHash(hash: [32]u8, alloc: std.mem.Allocator) ![]u8 {
     const zero8: [8]u8 = std.mem.zeroes([8]u8);
     const zero4: [4]u8 = std.mem.zeroes([4]u8);
     try buf.appendSlice(alloc, &hash);
-    try buf.appendSlice(alloc, &zero8);
-    try buf.appendSlice(alloc, &zero8);
-    try buf.appendSlice(alloc, &zero4);
-    try buf.appendSlice(alloc, &zero4);
-    try buf.appendSlice(alloc, &zero4);
-    try buf.appendSlice(alloc, &zero4);
+    try buf.appendSlice(alloc, &zero8); // client_id
+    try buf.appendSlice(alloc, &zero8); // client_seq
+    try buf.appendSlice(alloc, &zero4); // read_count
+    try buf.appendSlice(alloc, &zero4); // write_count
+    try buf.appendSlice(alloc, &zero4); // params_len
+    try buf.appendSlice(alloc, &zero4); // nondet_count
+    try buf.appendSlice(alloc, &zero8); // recon_seq
     return buf.toOwnedSlice(alloc);
 }
 
@@ -857,7 +858,7 @@ fn buildTestPayload(id: i64, val: i64, alloc: std.mem.Allocator) ![]u8 {
     const hash: [32]u8 = [_]u8{0xAB} ** 32;
     var buf = std.ArrayListUnmanaged(u8).empty;
     errdefer buf.deinit(alloc);
-    // Header: query_hash(32) + client_id(8) + client_seq(8) + read_count(4) + write_count(4) + params_len(4) + nondet_count(4) = 64 bytes
+    // Header: query_hash(32) + client_id(8) + client_seq(8) + read_count(4) + write_count(4) + params_len(4) + nondet_count(4) + recon_seq(8) = 72 bytes
     try buf.appendSlice(alloc, &hash);
     const zero8: [8]u8 = std.mem.zeroes([8]u8);
     const zero4: [4]u8 = std.mem.zeroes([4]u8);
@@ -867,5 +868,6 @@ fn buildTestPayload(id: i64, val: i64, alloc: std.mem.Allocator) ![]u8 {
     try buf.appendSlice(alloc, &zero4); // write_count
     try buf.appendSlice(alloc, &zero4); // params_len
     try buf.appendSlice(alloc, &zero4); // nondet_count
+    try buf.appendSlice(alloc, &zero8); // recon_seq
     return buf.toOwnedSlice(alloc);
 }

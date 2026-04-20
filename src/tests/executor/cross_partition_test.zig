@@ -261,7 +261,7 @@ fn makeEntry(
 ) !LogEntry {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(alloc);
-    try serializeTxnIntent(hash, 0, seq, read_hint, write_hint, params, &.{}, &payload, alloc);
+    try serializeTxnIntent(hash, 0, seq, 0, read_hint, write_hint, params, &.{}, &payload, alloc);
     const payload_copy = try alloc.dupe(u8, payload.items);
     return LogEntry.create(seq, 1, .txn_intent, payload_copy);
 }

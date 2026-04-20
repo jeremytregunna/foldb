@@ -226,7 +226,7 @@ fn encodeKey(alloc: std.mem.Allocator, key: []const u8) ![]u8 {
 fn makeEntry(alloc: std.mem.Allocator, seq: u64, hash: *const [32]u8, params: []const u8) !LogEntry {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(alloc);
-    try serializeTxnIntent(hash, 0, seq, &.{}, &.{}, params, &.{}, &payload, alloc);
+    try serializeTxnIntent(hash, 0, seq, 0, &.{}, &.{}, params, &.{}, &payload, alloc);
     const copy = try alloc.dupe(u8, payload.items);
     return LogEntry.create(seq, 1, .txn_intent, copy);
 }

@@ -248,7 +248,7 @@ fn makeEntry(
 ) !LogEntry {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(alloc);
-    try serializeTxnIntent(hash, 0, seq, &.{}, &.{}, params, nondet, &payload, alloc);
+    try serializeTxnIntent(hash, 0, seq, 0, &.{}, &.{}, params, nondet, &payload, alloc);
     const payload_copy = try alloc.dupe(u8, payload.items);
     return LogEntry.create(seq, 1, .txn_intent, payload_copy);
 }
@@ -562,7 +562,7 @@ test "truncated payload returns bad_params abort" {
     var exec = try setupExecutor(alloc, dir);
     defer teardownExecutor(&exec, alloc);
 
-    // Build a payload shorter than TxnIntentHeader (56 bytes)
+    // Build a payload shorter than TxnIntentHeader (72 bytes)
     const short_payload = try alloc.dupe(u8, "too short");
     var e = LogEntry.create(1, 1, .txn_intent, short_payload);
     defer e.deinit(alloc);
@@ -669,7 +669,7 @@ test "txn_intent round-trip preserves all fields" {
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(alloc);
-    try serializeTxnIntent(&hash, 42, 7, &.{}, &.{}, params, &nondet, &buf, alloc);
+    try serializeTxnIntent(&hash, 42, 7, 5, &.{}, &.{}, params, &nondet, &buf, alloc);
 
     var decoded = try deserializeTxnIntent(buf.items, alloc);
     defer decoded.deinit();
@@ -677,11 +677,94 @@ test "txn_intent round-trip preserves all fields" {
     try testing.expectEqualSlices(u8, &hash, decoded.query_hash);
     try testing.expectEqual(@as(u64, 42), decoded.client_id);
     try testing.expectEqual(@as(u64, 7), decoded.client_seq);
+    try testing.expectEqual(@as(u64, 5), decoded.recon_seq);
     try testing.expectEqualSlices(u8, params, decoded.params);
     try testing.expectEqual(@as(usize, 3), decoded.nondet.len);
     try testing.expectEqual(@as(i64, 999), decoded.nondet[0].now);
     try testing.expectEqualSlices(u8, &([_]u8{0xAA} ** 16), &decoded.nondet[1].random);
     try testing.expectEqualSlices(u8, &([_]u8{0xBB} ** 16), &decoded.nondet[2].uuid_v7);
+}
+
+fn makeEntryWithRecon(
+    alloc: std.mem.Allocator,
+    seq: u64,
+    hash: *const [32]u8,
+    recon_seq: u64,
+    params: []const u8,
+    nondet: []const ResolvedValue,
+) !LogEntry {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(alloc);
+    try serializeTxnIntent(hash, 0, seq, recon_seq, &.{}, &.{}, params, nondet, &payload, alloc);
+    const payload_copy = try alloc.dupe(u8, payload.items);
+    return LogEntry.create(seq, 1, .txn_intent, payload_copy);
+}
+
+test "OCC: read-write conflict detected when key written after recon_seq" {
+    const alloc = testing.allocator;
+    const dir = try makeTempDir(alloc);
+    defer alloc.free(dir);
+    defer removeDir(dir);
+
+    var exec = try setupExecutor(alloc, dir);
+    defer teardownExecutor(&exec, alloc);
+
+    // seq=1: insert "x" = 10
+    const ip = try encodeInsertParams(alloc, "x", 10);
+    defer alloc.free(ip);
+    var e1 = try makeEntry(alloc, 1, &HASH_INSERT, ip, &.{});
+    defer e1.deinit(alloc);
+    _ = try exec.run(e1);
+
+    // seq=2: another transaction updates "x" (simulates concurrent write after recon_seq=1)
+    const up2 = try encodeInsertParams(alloc, "x", 1);
+    defer alloc.free(up2);
+    var e2 = try makeEntry(alloc, 2, &HASH_UPDATE, up2, &.{});
+    defer e2.deinit(alloc);
+    _ = try exec.run(e2);
+
+    // seq=3: our transaction runs with recon_seq=1 and tries to update "x".
+    // Reads "x" → row.seq=2 > recon_seq=1 → stale read → retry.
+    const up3 = try encodeInsertParams(alloc, "x", 5);
+    defer alloc.free(up3);
+    var e3 = try makeEntryWithRecon(alloc, 3, &HASH_UPDATE, 1, up3, &.{});
+    defer e3.deinit(alloc);
+
+    const result = try exec.run(e3);
+    try testing.expectEqual(AbortCode.retry, result.abort.code);
+}
+
+test "OCC: no conflict when recon_seq covers all prior writes" {
+    const alloc = testing.allocator;
+    const dir = try makeTempDir(alloc);
+    defer alloc.free(dir);
+    defer removeDir(dir);
+
+    var exec = try setupExecutor(alloc, dir);
+    defer teardownExecutor(&exec, alloc);
+
+    // seq=1: insert "y" = 20
+    const ip = try encodeInsertParams(alloc, "y", 20);
+    defer alloc.free(ip);
+    var e1 = try makeEntry(alloc, 1, &HASH_INSERT, ip, &.{});
+    defer e1.deinit(alloc);
+    _ = try exec.run(e1);
+
+    // seq=2: update "y" += 3, recon_seq=1 — row was written at seq=1, not after recon_seq=1
+    const up = try encodeInsertParams(alloc, "y", 3);
+    defer alloc.free(up);
+    var e2 = try makeEntryWithRecon(alloc, 2, &HASH_UPDATE, 1, up, &.{});
+    defer e2.deinit(alloc);
+
+    const result = try exec.run(e2);
+    try testing.expectEqual(@as(u64, 1), result.ok.rows_affected);
+
+    // Confirm the update was applied
+    const row = try exec.storage.get(1, "y", 2);
+    try testing.expect(row != null);
+    var r = row.?;
+    defer r.deinit(alloc);
+    try testing.expectEqual(@as(i64, 23), r.values[1].int64);
 }
 
 test "crc mismatch returns bad_params abort" {

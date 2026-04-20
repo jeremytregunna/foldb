@@ -38,6 +38,7 @@ pub const LogEntry = log_mod.LogEntry;
 pub const EntryKind = log_mod.EntryKind;
 
 pub const Storage = storage_mod.Storage;
+pub const ReadTracker = storage_mod.ReadTracker;
 pub const Mutation = storage_mod.Mutation;
 pub const ColumnValue = storage_mod.ColumnValue;
 pub const Row = storage_mod.Row;
@@ -196,13 +197,32 @@ pub const Executor = struct {
             mutations.deinit(self.alloc);
         }
 
+        // Activate read tracking when recon_seq is set — this enables OCC conflict detection.
+        var read_tracker: ?storage_mod.ReadTracker = if (decoded.recon_seq > 0)
+            storage_mod.ReadTracker.init(self.alloc)
+        else
+            null;
+        defer if (read_tracker) |*rt| rt.deinit();
+        if (read_tracker != null) self.storage.read_tracker = &read_tracker.?;
+
         handler(ctx, self.storage, &mutations) catch |err| {
+            self.storage.read_tracker = null;
             if (err == error.ConstraintViolation) {
                 self.metrics.txns_aborted.inc();
                 return .{ .abort = .{ .code = .constraint_violation, .detail = "constraint failed" } };
             }
             return err;
         };
+        self.storage.read_tracker = null;
+
+        // OCC conflict check: if any key the handler read was written after recon_seq,
+        // the gateway's reconnaissance was stale — signal retry.
+        if (read_tracker) |*rt| {
+            if (readWriteConflict(rt, decoded.recon_seq)) {
+                self.metrics.txns_aborted.inc();
+                return .{ .abort = .{ .code = .retry, .detail = "read-write conflict" } };
+            }
+        }
 
         // CDC: capture before-images before mutations are applied to storage.
         var before_images: ?cdc_mod.BeforeImages = null;
@@ -227,6 +247,15 @@ pub const Executor = struct {
         return .{ .ok = .{ .rows_affected = rows } };
     }
 };
+
+/// Returns true if any tracked read has a row_seq newer than recon_seq, meaning
+/// the key was written after reconnaissance — the gateway's hints are stale.
+fn readWriteConflict(tracker: *const storage_mod.ReadTracker, recon_seq: Seq) bool {
+    for (tracker.reads.items) |r| {
+        if (r.row_seq > recon_seq) return true;
+    }
+    return false;
+}
 
 /// Drains committed log entries into an Executor. Decouples the log from the executor
 /// so the executor only processes what's been committed rather than polling blindly.

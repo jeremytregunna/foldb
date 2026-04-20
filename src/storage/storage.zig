@@ -57,6 +57,8 @@ pub const Mutation = types.Mutation;
 pub const MutationKind = types.MutationKind;
 pub const KeyRange = types.KeyRange;
 pub const SnapshotHandle = types.SnapshotHandle;
+pub const ReadTracker = types.ReadTracker;
+pub const ReadEntry = types.ReadEntry;
 
 // Index types
 pub const IndexId = u32;
@@ -161,6 +163,9 @@ pub const Storage = struct {
     snapshot_policy: ?SnapshotPolicy = null,
     metrics: obs.StorageMetrics = .{},
     fault_hook: ?DiskFaultHook = null,
+    /// When set, storage.get() records each read into this tracker.
+    /// Executor sets and clears this around handler calls for OCC conflict detection.
+    read_tracker: ?*ReadTracker = null,
 
     pub fn init(dir: []const u8, alloc: std.mem.Allocator) !Storage {
         mkdirAll(dir);
@@ -259,6 +264,12 @@ pub const Storage = struct {
         self.metrics.gets.inc();
         const result = try lsm.get(key, at_seq);
         if (result == null) self.metrics.get_misses.inc();
+        if (self.read_tracker) |tracker| {
+            const row_seq: Seq = if (result) |row| row.seq else 0;
+            // Best-effort: if tracker allocation fails we miss this read, accepting a
+            // potential false negative (no retry when one might be warranted).
+            tracker.record(table_id, key, row_seq) catch {};
+        }
         return result;
     }
 
