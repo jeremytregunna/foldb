@@ -28,7 +28,7 @@ pub const SimScheduler = struct {
     }
 
     /// Sample a u64 uniformly in [min_val, max_val] inclusive.
-    pub fn rangU64(self: *SimScheduler, min_val: u64, max_val: u64) u64 {
+    pub fn rangeU64(self: *SimScheduler, min_val: u64, max_val: u64) u64 {
         if (min_val >= max_val) return min_val;
         return min_val + self.prng.random().uintLessThan(u64, max_val - min_val + 1);
     }
@@ -56,10 +56,10 @@ test "SimScheduler: chance boundaries" {
     }
 }
 
-test "SimScheduler: rangU64 stays in range" {
+test "SimScheduler: rangeU64 stays in range" {
     var s = SimScheduler.init(42);
     for (0..1000) |_| {
-        const v = s.rangU64(10, 20);
+        const v = s.rangeU64(10, 20);
         try std.testing.expect(v >= 10);
         try std.testing.expect(v <= 20);
     }
@@ -69,7 +69,7 @@ test "SimScheduler: same seed same sequence" {
     var s1 = SimScheduler.init(0xCAFE_BABE);
     var s2 = SimScheduler.init(0xCAFE_BABE);
     for (0..500) |_| {
-        try std.testing.expectEqual(s1.rangU64(0, 1000), s2.rangU64(0, 1000));
+        try std.testing.expectEqual(s1.rangeU64(0, 1000), s2.rangeU64(0, 1000));
         try std.testing.expectEqual(s1.chance(0.3), s2.chance(0.3));
     }
 }

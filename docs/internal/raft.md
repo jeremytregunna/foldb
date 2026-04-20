@@ -74,9 +74,9 @@ Config changes use joint consensus (two phases): a `pending_config` is tracked d
 ## Source Files
 
 - `src/raft/raft.zig` — module exports and top-level types
-- `src/raft/node.zig` — per-node Raft state machine: propose, tick, message handlers
+- `src/raft/node.zig` — per-node Raft state machine: propose, tick, message handlers; defines Output and Config
 - `src/raft/cluster.zig` — multi-node cluster coordination
 - `src/raft/rpc.zig` — RPC message definitions and encoding
 - `src/raft/transport.zig` — network transport abstraction for peer communication
 - `src/raft/persistent_state.zig` — durable term and voted_for storage
-- `src/raft/types.zig` — shared types: Term, Index, NodeId, Output
+- `src/raft/types.zig` — shared types: Term, RaftRole

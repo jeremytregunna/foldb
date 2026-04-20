@@ -11,19 +11,19 @@ test "SimScheduler: chance boundaries" {
     }
 }
 
-test "SimScheduler: rangU64 bounds" {
+test "SimScheduler: rangeU64 bounds" {
     var s = SimScheduler.init(42);
     for (0..1000) |_| {
-        const v = s.rangU64(5, 15);
+        const v = s.rangeU64(5, 15);
         try testing.expect(v >= 5);
         try testing.expect(v <= 15);
     }
 }
 
-test "SimScheduler: rangU64 min==max returns min" {
+test "SimScheduler: rangeU64 min==max returns min" {
     var s = SimScheduler.init(0);
     for (0..100) |_| {
-        try testing.expectEqual(@as(u64, 7), s.rangU64(7, 7));
+        try testing.expectEqual(@as(u64, 7), s.rangeU64(7, 7));
     }
 }
 
@@ -31,7 +31,7 @@ test "SimScheduler: same seed reproduces same sequence" {
     var a = SimScheduler.init(0xDEAD_BEEF);
     var b = SimScheduler.init(0xDEAD_BEEF);
     for (0..1000) |_| {
-        try testing.expectEqual(a.rangU64(0, 9999), b.rangU64(0, 9999));
+        try testing.expectEqual(a.rangeU64(0, 9999), b.rangeU64(0, 9999));
         try testing.expectEqual(a.chance(0.4), b.chance(0.4));
     }
 }
@@ -41,7 +41,7 @@ test "SimScheduler: different seeds produce different sequences" {
     var b = SimScheduler.init(2);
     var differs: usize = 0;
     for (0..100) |_| {
-        if (a.rangU64(0, 0xFFFF_FFFF) != b.rangU64(0, 0xFFFF_FFFF)) differs += 1;
+        if (a.rangeU64(0, 0xFFFF_FFFF) != b.rangeU64(0, 0xFFFF_FFFF)) differs += 1;
     }
     try testing.expect(differs > 0);
 }

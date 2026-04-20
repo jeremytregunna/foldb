@@ -34,7 +34,7 @@ pub const NetworkSim = struct {
 
     /// Sample a delay for this message in nanoseconds.
     pub fn delayNs(self: *NetworkSim) u64 {
-        return self.sched.rangU64(self.cfg.min_delay_ns, self.cfg.max_delay_ns);
+        return self.sched.rangeU64(self.cfg.min_delay_ns, self.cfg.max_delay_ns);
     }
 };
 
