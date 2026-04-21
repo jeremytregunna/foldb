@@ -134,6 +134,8 @@ pub const Gateway = struct {
     partition_count: u32,
     alloc: std.mem.Allocator,
     metrics: obs.GatewayMetrics = .{},
+    /// Heap-allocated S3 store; non-null when S3 is configured. Freed in deinit.
+    s3_store: ?*storage_mod.S3ObjectStore = null,
     /// Last error detail set by gateway operations (table/column context).
     /// Reset at the start of each operation that may set it.
     error_detail: [256]u8 = undefined,
@@ -150,6 +152,17 @@ pub const Gateway = struct {
         election_timeout_max_ms: u32 = 300,
         heartbeat_interval_ms: u32 = 50,
         peers: []const sequencer_mod.PeerAddr = &.{},
+        // S3 / object storage (all optional — zero values disable tiering).
+        s3_endpoint_ip: [4]u8 = .{ 0, 0, 0, 0 },
+        s3_endpoint_host: []const u8 = "",
+        s3_endpoint_port: u16 = 0,
+        s3_access_key: []const u8 = "",
+        s3_secret_key: []const u8 = "",
+        s3_region: []const u8 = "us-east-1",
+        s3_bucket: []const u8 = "",
+        s3_bucket_style: storage_mod.BucketStyle = .path,
+        /// Local directory for caching downloaded L3 SSTables. Defaults to storage_dir.
+        s3_cache_dir: []const u8 = "",
     };
 
     /// Initialize and heap-allocate a Gateway. Caller owns the pointer; call `deinit` to free.
@@ -198,6 +211,28 @@ pub const Gateway = struct {
         }
         gw.storages = storages;
         gw.partitioned = .{ .partitions = storages, .alloc = alloc };
+        gw.s3_store = null;
+
+        // Wire S3 tiered storage when credentials are provided.
+        if (opts.s3_access_key.len > 0 and opts.s3_bucket.len > 0) {
+            const s3 = try alloc.create(storage_mod.S3ObjectStore);
+            errdefer alloc.destroy(s3);
+            s3.* = storage_mod.S3ObjectStore.init(.{
+                .access_key = opts.s3_access_key,
+                .secret_key = opts.s3_secret_key,
+                .region = opts.s3_region,
+                .endpoint_ip = opts.s3_endpoint_ip,
+                .endpoint_port = opts.s3_endpoint_port,
+                .endpoint_host = opts.s3_endpoint_host,
+                .bucket = opts.s3_bucket,
+                .bucket_style = opts.s3_bucket_style,
+                .alloc = alloc,
+            });
+            gw.s3_store = s3;
+            const cache_dir = if (opts.s3_cache_dir.len > 0) opts.s3_cache_dir else storage_dir;
+            const obj = s3.objectStore();
+            for (storages) |stor| try stor.setObjectStore(obj, cache_dir);
+        }
 
         gw.schema = sql_mod.SchemaRegistry.init(alloc);
         gw.registry = sql_mod.SqlRegistry.init(alloc, &gw.schema);
@@ -254,6 +289,7 @@ pub const Gateway = struct {
         }
         self.alloc.free(self.storages);
         self.storage_schema_arena.deinit();
+        if (self.s3_store) |s3| self.alloc.destroy(s3);
         self.alloc.destroy(self);
     }
 

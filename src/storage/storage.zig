@@ -103,6 +103,9 @@ pub const LSM = lsm_mod.LSM;
 // Object store
 pub const ObjectStore = object_store_mod.ObjectStore;
 pub const MemoryObjectStore = object_store_mod.MemoryObjectStore;
+pub const S3Config = @import("s3.zig").S3Config;
+pub const S3ObjectStore = @import("s3.zig").S3ObjectStore;
+pub const BucketStyle = @import("s3.zig").BucketStyle;
 
 // Snapshot
 pub const SnapshotManifest = snapshot_mod.SnapshotManifest;

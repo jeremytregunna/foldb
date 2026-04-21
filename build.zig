@@ -305,6 +305,15 @@ pub fn build(b: *std.Build) void {
     const storage_lsm_tests = b.addTest(.{ .root_module = storage_lsm_test_module });
     const run_storage_lsm_tests = b.addRunArtifact(storage_lsm_tests);
 
+    // Storage S3 tests (inline tests in s3.zig)
+    const storage_s3_test_module = b.createModule(.{
+        .root_source_file = b.path("src/storage/s3.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const storage_s3_tests = b.addTest(.{ .root_module = storage_s3_test_module });
+    const run_storage_s3_tests = b.addRunArtifact(storage_s3_tests);
+
     // Storage tiered tests
     const storage_tiered_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/storage/tiered_test.zig"),
@@ -1129,6 +1138,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_storage_block_tests.step);
     test_step.dependOn(&run_storage_sstable_tests.step);
     test_step.dependOn(&run_storage_lsm_tests.step);
+    test_step.dependOn(&run_storage_s3_tests.step);
     test_step.dependOn(&run_storage_tiered_tests.step);
     test_step.dependOn(&run_storage_snapshot_tests.step);
     test_step.dependOn(&run_vector_codec_tests.step);
