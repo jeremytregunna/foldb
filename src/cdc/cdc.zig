@@ -107,11 +107,28 @@ pub const CdcSubscription = struct {
     }
 
     /// Record that all events up to and including `seq` have been processed.
+    /// Prunes any events still in the pending queue that are now below the cursor —
+    /// this handles the case where ack() is called ahead of next().
     pub fn ack(self: *CdcSubscription, seq: Seq) void {
         if (seq > self.cursor) self.cursor = seq;
+        var i: usize = 0;
+        while (i < self.pending.items.len and self.pending.items[i].seq <= self.cursor) : (i += 1) {
+            self.pending.items[i].deinit();
+        }
+        if (i > 0) {
+            const new_len = self.pending.items.len - i;
+            std.mem.copyForwards(CdcEvent, self.pending.items[0..new_len], self.pending.items[i..]);
+            self.pending.shrinkRetainingCapacity(new_len);
+        }
     }
 
     fn push(self: *CdcSubscription, event: CdcEvent) !void {
+        // Skip events already covered by the cursor (e.g. on reconnect with from_seq).
+        if (event.seq <= self.cursor) {
+            var e = event;
+            e.deinit();
+            return;
+        }
         try self.pending.append(self.alloc, event);
     }
 };

@@ -827,6 +827,81 @@ test "CDC: non-txn log entry produces no events" {
     try testing.expectEqual(@as(usize, 0), n);
 }
 
+test "CDC: push skips events at or below from_seq cursor" {
+    var mgr = CdcManager.init(testing.allocator);
+    defer mgr.deinit();
+
+    const dir = try makeTempDir();
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
+    var storage = try Storage.init(dir, testing.allocator);
+    defer storage.deinit();
+    try storage.registerTable(makeSchema());
+
+    // Subscribe from seq 2 — events 1 and 2 should be filtered out.
+    const sub = try mgr.subscribe(null, 2);
+
+    const m1 = try makeInsertMutation(1, 1, testing.allocator);
+    defer freeMutation(m1, testing.allocator);
+    const m2 = try makeInsertMutation(2, 2, testing.allocator);
+    defer freeMutation(m2, testing.allocator);
+    const m3 = try makeInsertMutation(3, 3, testing.allocator);
+    defer freeMutation(m3, testing.allocator);
+
+    try applyWithCdc(&mgr, &storage, &.{m1}, 1, 0, testing.allocator);
+    try applyWithCdc(&mgr, &storage, &.{m2}, 2, 0, testing.allocator);
+    try applyWithCdc(&mgr, &storage, &.{m3}, 3, 0, testing.allocator);
+
+    var buf: [3]CdcEvent = undefined;
+    const n = try sub.next(&buf);
+    defer for (buf[0..n]) |*e| e.deinit();
+
+    // Only seq=3 should be delivered.
+    try testing.expectEqual(@as(usize, 1), n);
+    try testing.expectEqual(@as(Seq, 3), buf[0].seq);
+}
+
+test "CDC: ack before next prunes already-queued events" {
+    var mgr = CdcManager.init(testing.allocator);
+    defer mgr.deinit();
+
+    const dir = try makeTempDir();
+    defer {
+        removeDirRecursive(dir);
+        testing.allocator.free(dir);
+    }
+    var storage = try Storage.init(dir, testing.allocator);
+    defer storage.deinit();
+    try storage.registerTable(makeSchema());
+
+    const sub = try mgr.subscribe(null, 0);
+
+    const m1 = try makeInsertMutation(1, 1, testing.allocator);
+    defer freeMutation(m1, testing.allocator);
+    const m2 = try makeInsertMutation(2, 2, testing.allocator);
+    defer freeMutation(m2, testing.allocator);
+    const m3 = try makeInsertMutation(3, 3, testing.allocator);
+    defer freeMutation(m3, testing.allocator);
+
+    try applyWithCdc(&mgr, &storage, &.{m1}, 1, 0, testing.allocator);
+    try applyWithCdc(&mgr, &storage, &.{m2}, 2, 0, testing.allocator);
+    try applyWithCdc(&mgr, &storage, &.{m3}, 3, 0, testing.allocator);
+
+    // Ack seq=2 before calling next() — events 1 and 2 should be pruned from pending.
+    sub.ack(2);
+    try testing.expectEqual(@as(Seq, 2), sub.cursor);
+
+    var buf: [3]CdcEvent = undefined;
+    const n = try sub.next(&buf);
+    defer for (buf[0..n]) |*e| e.deinit();
+
+    // Only seq=3 should remain.
+    try testing.expectEqual(@as(usize, 1), n);
+    try testing.expectEqual(@as(Seq, 3), buf[0].seq);
+}
+
 fn testAbortingHandler(
     _: executor_mod.QueryContext,
     _: *Storage,
