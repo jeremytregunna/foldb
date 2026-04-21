@@ -24,6 +24,7 @@ Data is partitioned independently of log partitions. Data partitioning is by pri
 - **Block cache**: 2-clock LRU, 32 MiB default. Not persisted across restarts. L3 cache misses trigger a download from the object store.
 - **HNSW vector index**: Fully in-memory; rebuilt from base-table scan on recovery. Deletes are soft-tombstoned — physical pruning happens after compaction, not on each delete.
 - **Sequence monotonicity**: `apply()` is called with strictly increasing sequence numbers. Storage does not validate this — it is the executor's responsibility.
+- **PartitionedStorage routing**: The caller must use a consistent key hash (`wyhash(key) % N`) for all routing decisions. `scan` fans out to all partitions and merge-sorts by key — correctness depends on each partition holding disjoint key ranges (by hash mod N).
 
 ## Read Path
 
@@ -71,7 +72,7 @@ For large, stable, read-heavy tables, the in-memory level index can be replaced 
 
 ## Source Files
 
-- `src/storage/storage.zig` — top-level API: apply, get, scan, index registration
+- `src/storage/storage.zig` — top-level API: apply, get, scan, index registration; also contains `PartitionedStorage` (routing wrapper over `[]*Storage`) and re-exports `S3Config`, `S3ObjectStore`, `BucketStyle`
 - `src/storage/lsm.zig` — LSM tree: level management, compaction, visibility merge
 - `src/storage/memtable.zig` — in-memory write buffer
 - `src/storage/sstable.zig` — sorted string table format for L1/L2
@@ -83,7 +84,7 @@ For large, stable, read-heavy tables, the in-memory level index can be replaced 
 - `src/storage/snapshot.zig` — snapshot creation and manifest writing
 - `src/storage/recovery.zig` — startup recovery from disk state
 - `src/storage/object_store.zig` — L3 object store abstraction
-- `src/storage/s3.zig` — S3-compatible object store implementation
+- `src/storage/s3.zig` — S3-compatible object store; supports path-style and virtual-hosted-style buckets via `BucketStyle`; all requests signed with AWS Signature Version 4
 - `src/storage/codec.zig` — row serialization and deserialization
 - `src/storage/vector_codec.zig` — vector value encoding
 - `src/storage/crc.zig` — CRC validation for storage blocks

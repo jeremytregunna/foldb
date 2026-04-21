@@ -52,6 +52,22 @@ Each client operation is assigned a stable `client_seq` that is preserved across
 - **Executor**: Reads committed entries, validates them, and applies mutations to storage. Constraint violations and missing query hashes are returned as abort codes.
 - **Storage**: SELECTs and `readAt` queries are served directly from storage without sequencer involvement.
 
+## Storage Backend
+
+The gateway manages `partition_count` storage instances, created at init under `{storage_dir}/p0`, `{storage_dir}/p1`, etc. All internal calls (`SqlExecutor`, `reconnaissanceScan`, `applyDdlToSchema`, `flushAll`) route through a `PartitionedStorage` wrapper.
+
+S3 object store support is configured via `Options`:
+
+| Field | Purpose |
+|---|---|
+| `s3_endpoint_ip` / `s3_endpoint_host` / `s3_endpoint_port` | Endpoint address for connection and Host header |
+| `s3_access_key` / `s3_secret_key` / `s3_region` | AWS credentials and signing region |
+| `s3_bucket` | Bucket name |
+| `s3_bucket_style` | `.path` (S3-compatible servers) or `.virtual_hosted` (AWS S3) |
+| `s3_cache_dir` | Local dir for downloaded L3 blocks; defaults to `storage_dir` |
+
+When both `s3_access_key` and `s3_bucket` are non-empty, `init()` heap-allocates an `S3ObjectStore` (`?*S3ObjectStore`) and wires it into all storage partitions via `setObjectStore()`. It is heap-allocated so the `*anyopaque` VTable pointer remains stable. Freed in `deinit()`.
+
 ## Error Conditions
 
 | Error | Meaning |
@@ -71,7 +87,7 @@ Extended error detail is available via `lastDetail()`.
 - Does not handle authentication or authorization — that is the network layer's responsibility.
 - Does not perform cross-partition joins.
 - Does not use pessimistic locking — concurrency is optimistic, validated in storage.
-- Does not replicate across cluster nodes — Raft is currently single-node.
+- Does not support dynamic cluster reconfiguration — multi-node Raft replication via `TcpTransport` is supported, but adding or removing nodes at runtime is not.
 
 ## Source Files
 

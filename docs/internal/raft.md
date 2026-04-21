@@ -71,12 +71,20 @@ Config changes use joint consensus (two phases): a `pending_config` is tracked d
 - **Sequencer**: Uses Raft to replicate EpochDecisions. Raft provides the durability guarantee; the sequencer provides the ordering and idempotency guarantees.
 - **Log**: Raft reads and writes entries via the `Log` interface. It does not own segment management or CRC validation.
 
+## Transport
+
+`TcpTransport` uses a connection-per-message contract: `send()` opens a new TCP connection, writes one message, and closes the connection immediately. The receiver side mirrors this: `pollOnce()` accepts one connection, reads one message, and closes the accepted fd. `pollOnce()` is non-blocking (O_NONBLOCK on accept) — it returns `false` when no message is waiting, and `true` after delivering one message to an internal inbox queue. `drainInbox()` moves all buffered messages out of the inbox into caller-owned storage for dispatch.
+
+`SendFaultHook` is a function pointer (`?*const fn(to: NodeId, msg: Message, ctx: *anyopaque) bool`) injected before a send. When set, it can drop the message by returning `false`; used for deterministic simulation testing (DST) to exercise message-loss scenarios without a real network.
+
+`listen_port = 0` requests an OS-assigned port; the actual bound port is retrieved via `boundPort()`. `addPeer()` can be called after `init()`, enabling two-phase setup where nodes start with port 0 and fix up peer addresses once all nodes are listening.
+
 ## Source Files
 
 - `src/raft/raft.zig` — module exports and top-level types
 - `src/raft/node.zig` — per-node Raft state machine: propose, tick, message handlers; defines Output and Config
 - `src/raft/cluster.zig` — multi-node cluster coordination
 - `src/raft/rpc.zig` — RPC message definitions and encoding
-- `src/raft/transport.zig` — network transport abstraction for peer communication
+- `src/raft/transport.zig` — `TcpTransport` implementation: connection-per-message TCP send/receive, non-blocking `pollOnce`, `drainInbox`, and `SendFaultHook` for DST fault injection
 - `src/raft/persistent_state.zig` — durable term and voted_for storage
 - `src/raft/types.zig` — shared types: Term, RaftRole

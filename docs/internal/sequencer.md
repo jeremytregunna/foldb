@@ -44,6 +44,21 @@ Keyed by `(client_id, client_seq_num)`, not payload content.
 - Provide a unique `client_id` and a strictly increasing `client_seq_num` per client for idempotency.
 - Call `awaitCommit()` on the returned handle before treating the assignment as durable.
 
+## Tick Loop
+
+`tickOnce(alloc)` is the main driver loop step. Each call:
+
+1. Calls `pollOnce` in a loop until no new messages are waiting.
+2. Drains the transport inbox into a local message buffer.
+3. Dispatches each message to the Raft state machine.
+4. Flushes all `Output` values via `flushOutputs` (sends RPCs, builds and sends AppendEntries with log entries, persists term/voted_for).
+5. Calls `raft.tick()` to advance election/heartbeat timers.
+6. Flushes outputs again to handle any new outputs produced by the tick.
+
+`flushOutputs` handles each `Output` variant: `send` delivers an RPC to a peer via transport, `send_entries` reads the relevant log entries and constructs an AppendEntries message, `persist` writes term and voted_for to stable storage, `committed` notifies waiting callers, and `apply_config` rewires transport peers.
+
+**`send_entries` ownership contract**: `decodeMessage` allocates the `entries` slice and each `entry.payload`. After `handleAppendEntries` returns, the caller must free every `entry.payload` and the slice itself — the log serializes entries to disk and retains no reference to the decoded memory. This cleanup happens in the `tickOnce` defer block.
+
 ## Relation to Other Subsystems
 
 - **Raft** (`src/raft/`): The sequencer wraps a RaftNode used exclusively for replicating EpochDecisions. On single-node deployments it immediately becomes leader.
@@ -66,11 +81,12 @@ Epochs in flight at the moment of a leader failure are either fully committed or
 - Does not validate or interpret intent payloads.
 - Does not replicate intent bytes via Raft — only ordering decisions.
 - Does not execute intents — that is the Executor's responsibility.
-- Does not handle Raft membership changes (single-node only currently).
+- Does not support dynamic reconfiguration (add/remove nodes at runtime).
 
 ## Source Files
 
-- `src/sequencer/sequencer.zig` — submit, epoch management, partition log writes
+- `src/sequencer/sequencer.zig` — submit, epoch management, partition log writes, `tickOnce`, `flushOutputs`
 - `src/sequencer/epoch.zig` — epoch batching and EpochDecision serialization
 - `src/sequencer/idempotency.zig` — `(client_id, client_seq)` deduplication cache
 - `src/sequencer/types.zig` — shared types: Seq, EpochDecision, OrderingEntry
+- `src/raft/transport.zig` — `TcpTransport` used by the sequencer for inter-node messaging
