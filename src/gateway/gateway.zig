@@ -127,6 +127,8 @@ pub const Gateway = struct {
     /// Per-gateway client identity for idempotency tracking.
     client_id: u64,
     client_seq: u64,
+    /// Number of data partitions — used to hash PK keys to partition IDs during reconnaissance.
+    partition_count: u32,
     alloc: std.mem.Allocator,
     metrics: obs.GatewayMetrics = .{},
     /// Last error detail set by gateway operations (table/column context).
@@ -138,6 +140,7 @@ pub const Gateway = struct {
         clock: ClockSource = .{},
         rand: RandSource = .{},
         disk_fault: ?storage_mod.DiskFaultHook = null,
+        partition_count: u32 = 1,
     };
 
     /// Initialize and heap-allocate a Gateway. Caller owns the pointer; call `deinit` to free.
@@ -185,6 +188,7 @@ pub const Gateway = struct {
             break :blk h;
         };
         gw.client_seq = 0;
+        gw.partition_count = opts.partition_count;
 
         return gw;
     }
@@ -264,7 +268,7 @@ pub const Gateway = struct {
         // On retry, re-run at the seq the executor assigned to the conflicting entry so
         // hints reflect state as of that point.
         var recon_seq: Seq = self.sql_exec.committed_seq;
-        var hints = try reconnaissanceScan(rq.plan, recon_seq, self.alloc);
+        var hints = try reconnaissanceScan(rq.plan, &self.storage, params, &self.schema, recon_seq, self.partition_count, self.alloc);
         defer hints.deinit();
 
         const max_retries: usize = 3;
@@ -273,7 +277,7 @@ pub const Gateway = struct {
             if (attempt > 0) {
                 self.metrics.recon_retries.inc();
                 // Build new hints before freeing old ones so a failed alloc leaves hints valid.
-                const new_hints = try reconnaissanceScan(rq.plan, recon_seq, self.alloc);
+                const new_hints = try reconnaissanceScan(rq.plan, &self.storage, params, &self.schema, recon_seq, self.partition_count, self.alloc);
                 hints.deinit();
                 hints = new_hints;
             }
@@ -767,24 +771,20 @@ const ReconHints = struct {
 
 /// Determine which storage partitions a transaction plan will read and write.
 ///
-/// Uses table-level granularity: maps each table the plan touches to its storage
-/// partition(s). With a single-partition storage layout (current default) this
-/// always returns partition 0, but the code structure is correct for multi-partition
-/// deployments once per-table partition counts are tracked in the schema.
-///
-/// `at_seq` is reserved for a future row-level implementation that will run an
-/// actual snapshot read at that seq to discover the exact keys (and therefore
-/// partitions) affected by non-PK-filter DML statements.
+/// For PK lookups: hashes the encoded key to a partition ID.
+/// For full-table scans and non-PK DML: enumerates actual rows in storage at
+/// at_seq and hashes each row's primary key. This is correct for any
+/// partition_count and produces exact partition sets rather than table-level
+/// over-approximations.
 fn reconnaissanceScan(
     plan: sql_mod.plan.ExecutionPlan,
+    storage: *storage_mod.Storage,
+    params: []const ColumnValue,
+    schema: *const sql_mod.SchemaRegistry,
     at_seq: Seq,
+    partition_count: u32,
     alloc: std.mem.Allocator,
 ) !ReconHints {
-    _ = at_seq; // TODO: use for row-level scan once per-table partition counts exist
-
-    // Storage is currently always single-partition; all tables map to partition 0.
-    const partition_count: executor_mod.PartitionId = 1;
-
     var read_set: std.ArrayList(executor_mod.PartitionId) = .empty;
     errdefer read_set.deinit(alloc);
     var write_set: std.ArrayList(executor_mod.PartitionId) = .empty;
@@ -792,34 +792,31 @@ fn reconnaissanceScan(
 
     for (plan.stmts) |stmt| {
         switch (stmt) {
-            .select => |node| try collectNodeReadPartitions(node, partition_count, &read_set, alloc),
+            .select => |node| try collectNodePartitions(node, storage, params, at_seq, partition_count, &read_set, alloc),
             .insert => |ins| {
-                try appendPartitionUnique(&write_set, tablePartitionId(ins.table_id, partition_count), alloc);
+                try collectInsertPartitions(ins, storage, params, schema, at_seq, partition_count, &write_set, alloc);
                 if (ins.source == .query) {
-                    try collectNodeReadPartitions(ins.source.query, partition_count, &read_set, alloc);
+                    try collectNodePartitions(ins.source.query, storage, params, at_seq, partition_count, &read_set, alloc);
                 }
             },
             .update => |upd| {
-                const p = tablePartitionId(upd.table_id, partition_count);
-                try appendPartitionUnique(&write_set, p, alloc);
-                try appendPartitionUnique(&read_set, p, alloc);
+                try scanTablePartitions(storage, upd.table_id, at_seq, partition_count, &write_set, alloc);
+                try scanTablePartitions(storage, upd.table_id, at_seq, partition_count, &read_set, alloc);
                 if (upd.from_table_id) |from_tid| {
-                    try appendPartitionUnique(&read_set, tablePartitionId(from_tid, partition_count), alloc);
+                    try scanTablePartitions(storage, from_tid, at_seq, partition_count, &read_set, alloc);
                 }
             },
             .delete => |del| {
-                const p = tablePartitionId(del.table_id, partition_count);
-                try appendPartitionUnique(&write_set, p, alloc);
-                try appendPartitionUnique(&read_set, p, alloc);
+                try scanTablePartitions(storage, del.table_id, at_seq, partition_count, &write_set, alloc);
+                try scanTablePartitions(storage, del.table_id, at_seq, partition_count, &read_set, alloc);
                 for (del.using_table_ids) |tid| {
-                    try appendPartitionUnique(&read_set, tablePartitionId(tid, partition_count), alloc);
+                    try scanTablePartitions(storage, tid, at_seq, partition_count, &read_set, alloc);
                 }
             },
             .merge => |mrg| {
-                const p = tablePartitionId(mrg.target_id, partition_count);
-                try appendPartitionUnique(&write_set, p, alloc);
-                try appendPartitionUnique(&read_set, p, alloc);
-                try collectNodeReadPartitions(mrg.source, partition_count, &read_set, alloc);
+                try scanTablePartitions(storage, mrg.target_id, at_seq, partition_count, &write_set, alloc);
+                try scanTablePartitions(storage, mrg.target_id, at_seq, partition_count, &read_set, alloc);
+                try collectNodePartitions(mrg.source, storage, params, at_seq, partition_count, &read_set, alloc);
             },
             .assert => {},
         }
@@ -832,9 +829,11 @@ fn reconnaissanceScan(
     };
 }
 
-/// Map a table_id to its storage partition ID.
-fn tablePartitionId(table_id: sql_mod.schema.TableId, partition_count: executor_mod.PartitionId) executor_mod.PartitionId {
-    return table_id % partition_count;
+/// Map an encoded storage key to a partition ID by hashing.
+fn keyToPartitionId(key: []const u8, partition_count: u32) executor_mod.PartitionId {
+    if (partition_count <= 1) return 0;
+    const h = std.hash.Wyhash.hash(0, key);
+    return @intCast(h % partition_count);
 }
 
 /// Append a partition ID to a list only if not already present.
@@ -849,37 +848,152 @@ fn appendPartitionUnique(
     try list.append(alloc, val);
 }
 
-/// Walk a plan node tree and collect the storage partition ID for every table read.
-fn collectNodeReadPartitions(
+/// Scan all rows in a table at at_seq and collect their partition IDs.
+/// Silently skips tables not yet registered in storage (no rows, no partitions).
+fn scanTablePartitions(
+    storage: *storage_mod.Storage,
+    table_id: storage_mod.TableId,
+    at_seq: Seq,
+    partition_count: u32,
+    out: *std.ArrayList(executor_mod.PartitionId),
+    alloc: std.mem.Allocator,
+) !void {
+    var it = storage.scan(table_id, storage_mod.KeyRange.all(), at_seq, alloc) catch |err| switch (err) {
+        error.TableNotFound => return,
+        else => return err,
+    };
+    defer it.deinit();
+    while (try it.next()) |row| {
+        try appendPartitionUnique(out, keyToPartitionId(row.key, partition_count), alloc);
+    }
+}
+
+/// Try to evaluate a plan expression to a concrete ColumnValue using the bound params.
+/// Returns null for expressions that require execution-time context (columns, subqueries, etc.).
+fn evalLiteralExpr(expr: *const sql_mod.plan.PlanExpr, params: []const ColumnValue) ?ColumnValue {
+    return switch (expr.*) {
+        .param => |n| if (n < params.len) params[n] else null,
+        .string_literal => |s| ColumnValue{ .string = s },
+        .int_literal => |n| ColumnValue{ .int64 = n },
+        .uint_literal => |n| ColumnValue{ .uint64 = n },
+        .bool_literal => |b| ColumnValue{ .bool_t = b },
+        .bytes_literal => |b| ColumnValue{ .bytes = b },
+        else => null,
+    };
+}
+
+/// Encode a single literal expression as a storage key component.
+/// Returns an owned slice, or null if the expression is not statically evaluable.
+fn encodeLiteralKey(expr: *const sql_mod.plan.PlanExpr, params: []const ColumnValue, alloc: std.mem.Allocator) ?[]const u8 {
+    const val = evalLiteralExpr(expr, params) orelse return null;
+    var buf: std.ArrayList(u8) = .empty;
+    sql_mod.key_encode.encodeKeyComponent(&buf, val, alloc) catch { buf.deinit(alloc); return null; };
+    return buf.toOwnedSlice(alloc) catch { buf.deinit(alloc); return null; };
+}
+
+/// Try to build the encoded primary key for a row in an INSERT VALUES clause.
+/// Returns null if any PK column's expression cannot be statically evaluated.
+/// Caller owns the returned slice.
+fn extractInsertRowKey(
+    tbl: *const sql_mod.schema.TableSchema,
+    column_ids: []const sql_mod.schema.ColumnId,
+    row_exprs: []const *sql_mod.plan.PlanExpr,
+    params: []const ColumnValue,
+    alloc: std.mem.Allocator,
+) ?[]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    for (tbl.primary_key) |pk_col_id| {
+        const idx: usize = blk: {
+            for (column_ids, 0..) |cid, i| {
+                if (cid == pk_col_id) break :blk i;
+            }
+            buf.deinit(alloc);
+            return null;
+        };
+        if (idx >= row_exprs.len) { buf.deinit(alloc); return null; }
+        const val = evalLiteralExpr(row_exprs[idx], params) orelse { buf.deinit(alloc); return null; };
+        sql_mod.key_encode.encodeKeyComponent(&buf, val, alloc) catch { buf.deinit(alloc); return null; };
+    }
+    return buf.toOwnedSlice(alloc) catch { buf.deinit(alloc); return null; };
+}
+
+/// Collect write partitions for an INSERT plan.
+/// For VALUES rows where the PK can be statically determined, hashes the key.
+/// Falls back to partition 0 for rows whose PK expressions are complex.
+fn collectInsertPartitions(
+    ins: sql_mod.plan.InsertPlan,
+    storage: *storage_mod.Storage,
+    params: []const ColumnValue,
+    schema: *const sql_mod.SchemaRegistry,
+    at_seq: Seq,
+    partition_count: u32,
+    out: *std.ArrayList(executor_mod.PartitionId),
+    alloc: std.mem.Allocator,
+) !void {
+    if (ins.source == .query) {
+        // Can't determine write keys statically; scan for current rows as over-approximation.
+        try scanTablePartitions(storage, ins.table_id, at_seq, partition_count, out, alloc);
+        return;
+    }
+    const tbl = schema.getTableById(ins.table_id) orelse {
+        try appendPartitionUnique(out, 0, alloc);
+        return;
+    };
+    for (ins.source.values) |row_exprs| {
+        if (extractInsertRowKey(tbl, ins.column_ids, row_exprs, params, alloc)) |key| {
+            defer alloc.free(key);
+            try appendPartitionUnique(out, keyToPartitionId(key, partition_count), alloc);
+        } else {
+            try appendPartitionUnique(out, 0, alloc);
+        }
+    }
+}
+
+/// Walk a plan node tree and collect the storage partition IDs for every table read.
+/// For pk_lookup: hashes the key expression if it can be statically evaluated.
+/// For scan and DML nodes: enumerates rows from storage.
+fn collectNodePartitions(
     node: *const sql_mod.plan.PlanNode,
-    partition_count: executor_mod.PartitionId,
+    storage: *storage_mod.Storage,
+    params: []const ColumnValue,
+    at_seq: Seq,
+    partition_count: u32,
     out: *std.ArrayList(executor_mod.PartitionId),
     alloc: std.mem.Allocator,
 ) !void {
     switch (node.*) {
-        .scan => |s| try appendPartitionUnique(out, tablePartitionId(s.table_id, partition_count), alloc),
-        .pk_lookup => |pk| try appendPartitionUnique(out, tablePartitionId(pk.table_id, partition_count), alloc),
-        .filter => |f| try collectNodeReadPartitions(f.input, partition_count, out, alloc),
-        .project => |p| try collectNodeReadPartitions(p.input, partition_count, out, alloc),
-        .sort => |s| try collectNodeReadPartitions(s.input, partition_count, out, alloc),
-        .limit => |l| try collectNodeReadPartitions(l.input, partition_count, out, alloc),
-        .hash_agg => |h| try collectNodeReadPartitions(h.input, partition_count, out, alloc),
-        .hash_join => |j| {
-            try collectNodeReadPartitions(j.left, partition_count, out, alloc);
-            try collectNodeReadPartitions(j.right, partition_count, out, alloc);
-        },
-        .window => |w| try collectNodeReadPartitions(w.input, partition_count, out, alloc),
-        .insert => |ins| {
-            try appendPartitionUnique(out, tablePartitionId(ins.table_id, partition_count), alloc);
-            if (ins.source == .query) {
-                try collectNodeReadPartitions(ins.source.query, partition_count, out, alloc);
+        .scan => |s| try scanTablePartitions(storage, s.table_id, at_seq, partition_count, out, alloc),
+        .pk_lookup => |pk| {
+            // key_expr evaluates to the full encoded PK. Hash it if statically known.
+            const maybe_key = encodeLiteralKey(pk.key_expr, params, alloc);
+            if (maybe_key) |key| {
+                defer alloc.free(key);
+                try appendPartitionUnique(out, keyToPartitionId(key, partition_count), alloc);
+            } else {
+                try scanTablePartitions(storage, pk.table_id, at_seq, partition_count, out, alloc);
             }
         },
-        .update => |upd| try appendPartitionUnique(out, tablePartitionId(upd.table_id, partition_count), alloc),
-        .delete => |del| try appendPartitionUnique(out, tablePartitionId(del.table_id, partition_count), alloc),
+        .filter => |f| try collectNodePartitions(f.input, storage, params, at_seq, partition_count, out, alloc),
+        .project => |p| try collectNodePartitions(p.input, storage, params, at_seq, partition_count, out, alloc),
+        .sort => |s| try collectNodePartitions(s.input, storage, params, at_seq, partition_count, out, alloc),
+        .limit => |l| try collectNodePartitions(l.input, storage, params, at_seq, partition_count, out, alloc),
+        .hash_agg => |h| try collectNodePartitions(h.input, storage, params, at_seq, partition_count, out, alloc),
+        .hash_join => |j| {
+            try collectNodePartitions(j.left, storage, params, at_seq, partition_count, out, alloc);
+            try collectNodePartitions(j.right, storage, params, at_seq, partition_count, out, alloc);
+        },
+        .window => |w| try collectNodePartitions(w.input, storage, params, at_seq, partition_count, out, alloc),
+        .insert => |ins| {
+            try scanTablePartitions(storage, ins.table_id, at_seq, partition_count, out, alloc);
+            if (ins.source == .query) {
+                try collectNodePartitions(ins.source.query, storage, params, at_seq, partition_count, out, alloc);
+            }
+        },
+        .update => |upd| try scanTablePartitions(storage, upd.table_id, at_seq, partition_count, out, alloc),
+        .delete => |del| try scanTablePartitions(storage, del.table_id, at_seq, partition_count, out, alloc),
         .merge => |mrg| {
-            try appendPartitionUnique(out, tablePartitionId(mrg.target_id, partition_count), alloc);
-            try collectNodeReadPartitions(mrg.source, partition_count, out, alloc);
+            try scanTablePartitions(storage, mrg.target_id, at_seq, partition_count, out, alloc);
+            try collectNodePartitions(mrg.source, storage, params, at_seq, partition_count, out, alloc);
         },
         .assert, .empty, .single_row => {},
     }

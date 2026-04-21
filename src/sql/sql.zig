@@ -16,3 +16,4 @@ pub const QueryHash = registry.QueryHash;
 pub const SqlExecutor = executor_bridge.SqlExecutor;
 pub const SchemaRegistry = schema.SchemaRegistry;
 pub const ResultSet = executor_bridge.ResultSet;
+pub const key_encode = @import("key_encode.zig");
