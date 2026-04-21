@@ -4,7 +4,7 @@ Spec: `foldb-spec.md` | Plan: `PLAN.md`
 
 ## Current Focus
 
-**Next up:** Prompt 9 — Snapshot scheduling + snapshot_marker log entry
+**Next up:** Prompt 10 — Log truncation after durable snapshot
 
 ---
 
@@ -13,14 +13,14 @@ Spec: `foldb-spec.md` | Plan: `PLAN.md`
 | # | Milestone | Spec | Status |
 |---|-----------|------|--------|
 | M1 | Log (single node) | §5 | ✅ Done |
-| M2 | Log (replicated) | §5.4 | 🟡 Raft SM + sim done; TcpTransport stub only |
+| M2 | Log (replicated) | §5.4 | 🟡 Raft SM + TcpTransport done; 3-node cluster tested; no dynamic reconfig |
 | M3 | Storage | §6 | ✅ Done |
 | M4 | Fold Executor | §7 | ✅ Done |
 | M5 | SQL front-end | §10 | ✅ Done (CTEs skip type-check) |
 | M6 | Gateway | §9 | ✅ Done |
-| M7 | Sequencer + multi-partition log | §8 | 🟡 Single-node only |
+| M7 | Sequencer + multi-partition log | §8 | 🟡 Multi-node Raft works; dynamic reconfig not implemented |
 | M8 | Multi-partition execution | §7.3 | 🟡 Dataflow exists; not network-tested |
-| M9 | Tiered storage | §6.7, §13 | 🟡 S3 impl exists; not wired |
+| M9 | Tiered storage | §6.7, §13 | 🟡 S3 wired into gateway; snapshot scheduling + log truncation pending |
 | M10 | CDC | §12 | 🟡 Manager + before-images; delivery not hardened |
 | M11 | Specialty indexes | §11 | 🟡 HNSW + JSON done; ANN queries not wired |
 | M12 | Operations | §13 | 🔴 No config, no auth, no reconfig API |
@@ -38,7 +38,7 @@ Spec: `foldb-spec.md` | Plan: `PLAN.md`
 - [x] **Prompt 6** — Sequencer: wire TcpTransport + tick loop + 3-node test
 - [ ] **Prompt 7** — Auth enforcement
 - [x] **Prompt 8** — Wire S3ObjectStore into Gateway
-- [ ] **Prompt 9** — Snapshot scheduling + snapshot_marker log entry
+- [x] **Prompt 9** — Snapshot scheduling + snapshot_marker log entry
 - [ ] **Prompt 10** — Log truncation after durable snapshot
 - [ ] **Prompt 11** — CDC subscription hardening (next/ack/gap-free)
 - [ ] **Prompt 12** — HNSW ANN queries wired into SQL executor

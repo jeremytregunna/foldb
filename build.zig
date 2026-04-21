@@ -963,6 +963,18 @@ pub fn build(b: *std.Build) void {
     const gateway_tests = b.addTest(.{ .root_module = gateway_test_module });
     const run_gateway_tests = b.addRunArtifact(gateway_tests);
 
+    // Gateway snapshot tests
+    const gateway_snapshot_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/gateway/snapshot_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gateway_snapshot_test_module.addImport("gateway.zig", gateway_module);
+    gateway_snapshot_test_module.addImport("storage.zig", storage_module);
+    gateway_snapshot_test_module.addImport("log.zig", log_module);
+    const gateway_snapshot_tests = b.addTest(.{ .root_module = gateway_snapshot_test_module });
+    const run_gateway_snapshot_tests = b.addRunArtifact(gateway_snapshot_tests);
+
     // Gateway transaction unit tests
     const gateway_txn_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/gateway/txn_test.zig"),
@@ -1160,6 +1172,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_sql_fk_tests.step);
     test_step.dependOn(&run_cdc_tests.step);
     test_step.dependOn(&run_gateway_tests.step);
+    test_step.dependOn(&run_gateway_snapshot_tests.step);
     test_step.dependOn(&run_gateway_txn_tests.step);
     test_step.dependOn(&run_gateway_subquery_tests.step);
     test_step.dependOn(&run_gateway_distinct_returning_tests.step);

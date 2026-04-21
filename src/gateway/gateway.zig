@@ -111,6 +111,27 @@ pub const NondetResolver = struct {
     }
 };
 
+/// Context for a per-partition snapshot log writer. Stable once allocated in init.
+const SnapshotWriterCtx = struct {
+    log: *log_mod.Log,
+    next_seq: *sequencer_mod.Seq,
+};
+
+fn snapshotLogWriteImpl(ptr: *anyopaque, manifest_key: []const u8, seq: u64, partition_id: u32, alloc: std.mem.Allocator) anyerror!void {
+    const ctx: *SnapshotWriterCtx = @ptrCast(@alignCast(ptr));
+    const payload = storage_mod.SnapshotMarkerPayload{
+        .manifest_key = manifest_key,
+        .seq = seq,
+        .partition_id = partition_id,
+    };
+    const bytes = try payload.serialize(alloc);
+    defer alloc.free(bytes);
+    const entry_seq = ctx.next_seq.*;
+    ctx.next_seq.* += 1;
+    const entry = log_mod.LogEntry.create(entry_seq, partition_id, .snapshot_marker, bytes);
+    try ctx.log.appendEntryAt(entry);
+}
+
 /// The main Gateway struct.
 /// Always heap-allocated via `init`; internal pointers remain stable.
 pub const Gateway = struct {
@@ -136,6 +157,8 @@ pub const Gateway = struct {
     metrics: obs.GatewayMetrics = .{},
     /// Heap-allocated S3 store; non-null when S3 is configured. Freed in deinit.
     s3_store: ?*storage_mod.S3ObjectStore = null,
+    /// Per-partition context structs for snapshot log writers. Freed in deinit.
+    snapshot_writer_ctxs: []SnapshotWriterCtx = &.{},
     /// Last error detail set by gateway operations (table/column context).
     /// Reset at the start of each operation that may set it.
     error_detail: [256]u8 = undefined,
@@ -163,6 +186,10 @@ pub const Gateway = struct {
         s3_bucket_style: storage_mod.BucketStyle = .path,
         /// Local directory for caching downloaded L3 SSTables. Defaults to storage_dir.
         s3_cache_dir: []const u8 = "",
+        /// How many applied mutations between automatic snapshots. 0 disables scheduling.
+        snapshot_interval_entries: u64 = 10_000_000,
+        /// Optional object store for snapshot uploads (bypasses S3; useful in tests).
+        snapshot_store: ?storage_mod.ObjectStore = null,
     };
 
     /// Initialize and heap-allocate a Gateway. Caller owns the pointer; call `deinit` to free.
@@ -212,6 +239,7 @@ pub const Gateway = struct {
         gw.storages = storages;
         gw.partitioned = .{ .partitions = storages, .alloc = alloc };
         gw.s3_store = null;
+        gw.snapshot_writer_ctxs = &.{};
 
         // Wire S3 tiered storage when credentials are provided.
         if (opts.s3_access_key.len > 0 and opts.s3_bucket.len > 0) {
@@ -254,6 +282,36 @@ pub const Gateway = struct {
         gw.cdc = cdc_mod.CdcManager.init(alloc);
         gw.sql_exec.initCdc(&gw.cdc);
 
+        // Wire snapshot scheduling if an object store is available and interval is set.
+        const snap_obj: ?storage_mod.ObjectStore = blk: {
+            if (opts.snapshot_store) |s| break :blk s;
+            if (gw.s3_store) |s3| break :blk s3.objectStore();
+            break :blk null;
+        };
+        if (snap_obj) |obj| {
+            if (opts.snapshot_interval_entries > 0) {
+                const ctxs = try alloc.alloc(SnapshotWriterCtx, pc);
+                for (ctxs, 0..) |*ctx, i| {
+                    ctx.* = .{
+                        .log = &gw.sequencer.partition_logs[i],
+                        .next_seq = &gw.sequencer.next_seq,
+                    };
+                }
+                gw.snapshot_writer_ctxs = ctxs;
+                for (gw.storages, 0..) |stor, i| {
+                    stor.setSnapshotPolicy(.{
+                        .interval = opts.snapshot_interval_entries,
+                        .store = obj,
+                        .log_writer = .{
+                            .ptr = &ctxs[i],
+                            .writeFn = &snapshotLogWriteImpl,
+                        },
+                        .partition_id = @intCast(i),
+                    });
+                }
+            }
+        }
+
         // Replay log to rebuild schema and storage state after restart.
         // Pass 1 reconstructs DDL/query registry; pass 2 replays DML into storage,
         // recovering rows that were in the memtable and not flushed before a crash.
@@ -290,6 +348,7 @@ pub const Gateway = struct {
         self.alloc.free(self.storages);
         self.storage_schema_arena.deinit();
         if (self.s3_store) |s3| self.alloc.destroy(s3);
+        if (self.snapshot_writer_ctxs.len > 0) self.alloc.free(self.snapshot_writer_ctxs);
         self.alloc.destroy(self);
     }
 
