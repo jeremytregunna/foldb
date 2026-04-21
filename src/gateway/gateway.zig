@@ -759,6 +759,18 @@ pub const Gateway = struct {
         return self.sequencer.currentSeq();
     }
 
+    /// Add a new sequencer node to the Raft group. Only valid on the current leader.
+    /// Note: only the ordering layer is affected — the new node does not automatically
+    /// receive data partition log entries or storage state.
+    pub fn addSequencerNode(self: *Gateway, node_id: sequencer_mod.NodeId, addr: []const u8) !void {
+        try self.sequencer.addNode(node_id, addr, self.alloc);
+    }
+
+    /// Remove a sequencer node from the Raft group. Only valid on the current leader.
+    pub fn removeSequencerNode(self: *Gateway, node_id: sequencer_mod.NodeId) !void {
+        try self.sequencer.removeNode(node_id, self.alloc);
+    }
+
     /// Flush all storage to disk.
     pub fn flushAll(self: *Gateway) !void {
         try self.partitioned.flushAll();
@@ -1177,6 +1189,7 @@ fn collectNodePartitions(
             try scanTablePartitions(storage, mrg.target_id, at_seq, partition_count, out, alloc);
             try collectNodePartitions(mrg.source, storage, params, at_seq, partition_count, out, alloc);
         },
+        .ann_scan => |s| try scanTablePartitions(storage, s.table_id, at_seq, partition_count, out, alloc),
         .assert, .empty, .single_row => {},
     }
 }

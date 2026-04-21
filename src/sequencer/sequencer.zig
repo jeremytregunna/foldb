@@ -60,6 +60,7 @@ pub const SequencerError = error{
     NotLeader,
     PartitionError,
     SerializeError,
+    ConfigChangeInProgress,
 };
 
 /// The Sequencer: global ordering for TxnIntents across partition logs.
@@ -212,6 +213,34 @@ pub const Sequencer = struct {
         try self.transport.listen(port);
     }
 
+    /// Propose adding a new Raft voter. Pre-registers the peer address in the
+    /// TCP transport so AppendEntries can be sent immediately after the proposal.
+    /// Returns NotLeader if this node is not the leader, ConfigChangeInProgress if
+    /// another membership change is already in flight.
+    pub fn addNode(self: *Sequencer, node_id: NodeId, addr: []const u8, alloc: std.mem.Allocator) !void {
+        if (!self.isLeader()) return SequencerError.NotLeader;
+        try self.transport.addPeer(node_id, addr);
+        var outputs: std.ArrayList(raft_mod.Output) = .empty;
+        defer outputs.deinit(alloc);
+        _ = try self.raft.proposeConfigChange(&self.raft_log, .add_voter, node_id, &outputs) orelse
+            return SequencerError.ConfigChangeInProgress;
+        try self.flushOutputs(outputs.items, alloc);
+    }
+
+    /// Propose removing a Raft voter. Closes and deregisters the peer's transport
+    /// connection once the proposal is submitted.
+    /// Returns NotLeader if this node is not the leader, ConfigChangeInProgress if
+    /// another membership change is already in flight.
+    pub fn removeNode(self: *Sequencer, node_id: NodeId, alloc: std.mem.Allocator) !void {
+        if (!self.isLeader()) return SequencerError.NotLeader;
+        var outputs: std.ArrayList(raft_mod.Output) = .empty;
+        defer outputs.deinit(alloc);
+        _ = try self.raft.proposeConfigChange(&self.raft_log, .remove_voter, node_id, &outputs) orelse
+            return SequencerError.ConfigChangeInProgress;
+        try self.flushOutputs(outputs.items, alloc);
+        self.transport.removePeer(node_id);
+    }
+
     pub fn commitIndex(self: *const Sequencer) Seq {
         return self.raft.commit_index;
     }
@@ -306,6 +335,8 @@ pub const Sequencer = struct {
                     ) catch {};
                 },
                 .committed => {},
+                // Raft peer list is already updated internally by RaftNode when this fires.
+                // Transport was pre-registered in addNode / cleaned up in removeNode.
                 .apply_config => {},
             }
         }

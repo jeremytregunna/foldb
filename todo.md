@@ -4,7 +4,9 @@ Spec: `foldb-spec.md` | Plan: `PLAN.md`
 
 ## Current Focus
 
-**Next up:** Prompt 12 — HNSW ANN queries wired into SQL executor
+**Next up:** Prompt 13 — Full DST suite (10k seeds, kill-9, snapshot round-trip)
+
+**Completed:** Prompt 14 — Reconfiguration API (ordering layer only; data partition log replication deferred)
 
 ---
 
@@ -13,17 +15,17 @@ Spec: `foldb-spec.md` | Plan: `PLAN.md`
 | # | Milestone | Spec | Status |
 |---|-----------|------|--------|
 | M1 | Log (single node) | §5 | ✅ Done |
-| M2 | Log (replicated) | §5.4 | 🟡 Raft SM + TcpTransport done; 3-node cluster tested; no dynamic reconfig |
+| M2 | Log (replicated) | §5.4 | 🟡 Raft SM + TcpTransport done; 3-node cluster tested; ordering-layer reconfig done; data log replication deferred |
 | M3 | Storage | §6 | ✅ Done |
 | M4 | Fold Executor | §7 | ✅ Done |
 | M5 | SQL front-end | §10 | ✅ Done (CTEs skip type-check) |
 | M6 | Gateway | §9 | ✅ Done |
-| M7 | Sequencer + multi-partition log | §8 | 🟡 Multi-node Raft works; dynamic reconfig not implemented |
+| M7 | Sequencer + multi-partition log | §8 | 🟡 Multi-node Raft works; ordering-layer reconfig done; data partition log replication deferred |
 | M8 | Multi-partition execution | §7.3 | 🟡 Dataflow exists; not network-tested |
 | M9 | Tiered storage | §6.7, §13 | ✅ Done (S3 wired; snapshot scheduling + log truncation implemented) |
 | M10 | CDC | §12 | ✅ Done (manager + before-images; delivery hardened) |
-| M11 | Specialty indexes | §11 | 🟡 HNSW + JSON done; ANN queries not wired |
-| M12 | Operations | §13 | 🔴 No config, no auth, no reconfig API |
+| M11 | Specialty indexes | §11 | ✅ Done (HNSW + JSON; ANN queries wired via WHERE ANN(col, $param, k)) |
+| M12 | Operations | §13 | 🟡 Reconfig API done (ordering layer); auth (Prompt 7) and observability deferred |
 
 ---
 
@@ -41,14 +43,15 @@ Spec: `foldb-spec.md` | Plan: `PLAN.md`
 - [x] **Prompt 9** — Snapshot scheduling + snapshot_marker log entry
 - [x] **Prompt 10** — Log truncation after durable snapshot
 - [x] **Prompt 11** — CDC subscription hardening (next/ack/gap-free)
-- [ ] **Prompt 12** — HNSW ANN queries wired into SQL executor
+- [x] **Prompt 12** — HNSW ANN queries wired into SQL executor
 - [ ] **Prompt 13** — Full DST suite (10k seeds, kill-9, snapshot round-trip)
-- [ ] **Prompt 14** — Reconfiguration API (add/remove node)
+- [x] **Prompt 14** — Reconfiguration API (add/remove node — ordering layer)
 
 ---
 
 ## Deferred (Post-v1 / [OPEN] in spec)
 
+- Data partition log replication to new nodes (snapshot bootstrap + log forwarding on join)
 - WASM module execution (§10.6)
 - TLS (§16, marked [OPEN])
 - Full-text search (§11.3, marked [OPEN])

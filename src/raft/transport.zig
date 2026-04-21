@@ -152,6 +152,13 @@ pub const TcpTransport = struct {
         try self.peers.put(id, .{ .ip = ip, .port = port, .fd = -1 });
     }
 
+    /// Deregister a peer and close its connection if open.
+    pub fn removePeer(self: *TcpTransport, id: NodeId) void {
+        if (self.peers.fetchRemove(id)) |kv| {
+            if (kv.value.fd >= 0) _ = std.os.linux.close(@intCast(kv.value.fd));
+        }
+    }
+
     /// Send a message to a peer. Connects lazily; silently drops on failure.
     pub fn send(self: *TcpTransport, to: NodeId, msg: Message) void {
         if (self.fault_hook.shouldDrop(to)) return;
