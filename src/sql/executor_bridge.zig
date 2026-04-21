@@ -48,6 +48,8 @@ const evalExpr = eval_expr_mod.evalExpr;
 const freeRowValues = eval_expr_mod.freeRowValues;
 const AggAccum = agg_accum_mod.AggAccum;
 
+const vector_codec = storage_mod.vector_codec;
+
 pub const Storage = storage_mod.Storage;
 pub const PartitionedStorage = storage_mod.PartitionedStorage;
 pub const Row = storage_mod.Row;
@@ -355,6 +357,29 @@ pub const SqlExecutor = struct {
                 while (iter.next() catch null) |row| {
                     const r = try self.rowToValues(row, s.columns, ctx.alloc);
                     try out.append(ctx.alloc, r);
+                }
+            },
+            .ann_scan => |s| {
+                if (s.query_param >= ctx.params.len) return error.TypeMismatch;
+                const raw_bytes = switch (ctx.params[s.query_param]) {
+                    .bytes => |b| b,
+                    else => return error.TypeMismatch,
+                };
+                const query_vec = vector_codec.decode(raw_bytes, ctx.alloc) catch return error.TypeMismatch;
+                defer ctx.alloc.free(query_vec);
+                const matches = self.storage.vectorSearch(s.index_id, query_vec, s.k, ctx.seq -| 1, ctx.alloc) catch return error.TableNotFound;
+                defer {
+                    for (matches) |m| ctx.alloc.free(m.pk);
+                    ctx.alloc.free(matches);
+                }
+                for (matches) |m| {
+                    const row_opt = self.storage.get(s.table_id, m.pk, ctx.seq -| 1) catch return error.TableNotFound;
+                    if (row_opt) |row| {
+                        var r = row;
+                        defer r.deinit(ctx.alloc);
+                        const projected = try self.rowToValues(r, s.columns, ctx.alloc);
+                        try out.append(ctx.alloc, projected);
+                    }
                 }
             },
             .filter => |f| {

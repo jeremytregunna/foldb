@@ -216,6 +216,32 @@ pub const PartitionedStorage = struct {
         return .{ .partitions = parts, .alloc = alloc };
     }
 
+    /// ANN search across all partitions; results are merged and sorted by distance, top k returned.
+    pub fn vectorSearch(self: *PartitionedStorage, index_id: IndexId, query: []const f32, k: u32, at_seq: Seq, alloc: std.mem.Allocator) ![]Match {
+        if (self.partitions.len <= 1) return self.partitions[0].vectorSearch(index_id, query, k, at_seq, alloc);
+        var merged: std.ArrayListUnmanaged(Match) = .empty;
+        errdefer {
+            for (merged.items) |m| alloc.free(m.pk);
+            merged.deinit(alloc);
+        }
+        for (self.partitions) |p| {
+            const ms = p.vectorSearch(index_id, query, k, at_seq, alloc) catch |e| {
+                if (e == error.IndexNotFound) continue;
+                return e;
+            };
+            defer alloc.free(ms);
+            for (ms) |m| try merged.append(alloc, m);
+        }
+        std.sort.block(Match, merged.items, {}, struct {
+            fn lt(_: void, a: Match, b: Match) bool { return a.distance < b.distance; }
+        }.lt);
+        if (merged.items.len > k) {
+            for (merged.items[k..]) |m| alloc.free(m.pk);
+            merged.shrinkRetainingCapacity(k);
+        }
+        return merged.toOwnedSlice(alloc);
+    }
+
     /// Free the partitions slice. Does NOT deinit the Storage objects (caller owns them).
     pub fn deinit(self: *PartitionedStorage) void {
         self.alloc.free(self.partitions);

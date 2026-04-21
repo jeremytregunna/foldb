@@ -113,6 +113,15 @@ pub const ScanNode = struct {
     index_hint: ?schema_mod.IndexId = null, // set when a specialty index is applicable
 };
 
+pub const AnnScanNode = struct {
+    table_id: schema_mod.TableId,
+    index_id: schema_mod.IndexId,
+    columns: []const schema_mod.ColumnId,
+    /// 0-based index into the params array; must point to bytes-encoded f32 vector.
+    query_param: u32,
+    k: u32,
+};
+
 pub const PkLookupNode = struct {
     table_id: schema_mod.TableId,
     key_expr: *PlanExpr,
@@ -263,6 +272,7 @@ pub const MergePlan = struct {
 
 pub const PlanNode = union(enum) {
     scan: ScanNode,
+    ann_scan: AnnScanNode,
     pk_lookup: PkLookupNode,
     filter: FilterNode,
     project: ProjectNode,
@@ -566,12 +576,45 @@ pub const Planner = struct {
             node = join_node;
         }
 
-        // WHERE filter
+        // WHERE filter — or ANN vector search if WHERE is ANN(col, $param, k).
         if (q.where) |w| {
-            const pred = try self.planExpr(w);
-            const filter_node = try self.arena.create(PlanNode);
-            filter_node.* = .{ .filter = .{ .input = node, .predicate = pred } };
-            node = filter_node;
+            const is_ann = ann_blk: {
+                const fc = switch (w.*) {
+                    .fn_call => |fc| fc,
+                    else => break :ann_blk false,
+                };
+                if (!std.ascii.eqlIgnoreCase(fc.name, "ANN") or fc.args.len != 3) break :ann_blk false;
+                const scan = switch (node.*) {
+                    .scan => |s| s,
+                    else => break :ann_blk false,
+                };
+                const param_idx: u32 = switch (fc.args[1].*) {
+                    .param => |p| p,
+                    else => break :ann_blk false,
+                };
+                const k_raw: i128 = switch (fc.args[2].*) {
+                    .lit_int => |v| v,
+                    else => break :ann_blk false,
+                };
+                if (k_raw <= 0) break :ann_blk false;
+                const idx_id = scan.index_hint orelse break :ann_blk false;
+                const ann_node = try self.arena.create(PlanNode);
+                ann_node.* = .{ .ann_scan = .{
+                    .table_id = scan.table_id,
+                    .index_id = idx_id,
+                    .columns = scan.columns,
+                    .query_param = param_idx,
+                    .k = @intCast(k_raw),
+                } };
+                node = ann_node;
+                break :ann_blk true;
+            };
+            if (!is_ann) {
+                const pred = try self.planExpr(w);
+                const filter_node = try self.arena.create(PlanNode);
+                filter_node.* = .{ .filter = .{ .input = node, .predicate = pred } };
+                node = filter_node;
+            }
         }
 
         // GROUP BY + aggregates (also handles implicit aggregate: SELECT COUNT(*) FROM t with no GROUP BY)

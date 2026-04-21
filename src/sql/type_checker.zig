@@ -640,6 +640,8 @@ fn inferBuiltinReturn(name: []const u8, arg_count: usize, star: bool) TypeCheckE
         std.ascii.eqlIgnoreCase(name, "json_array")) return .json;
     if (std.ascii.eqlIgnoreCase(name, "array_agg")) return .bytes;
     if (std.ascii.eqlIgnoreCase(name, "string_agg")) return .string;
+    // ANN vector search predicate — consumed by the planner, evaluates to bool.
+    if (std.ascii.eqlIgnoreCase(name, "ANN")) return .bool;
     // Unknown function — allowed (could be a user WASM function)
     return .null_type;
 }

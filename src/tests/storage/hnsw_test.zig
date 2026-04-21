@@ -248,3 +248,59 @@ test "hnsw search empty index returns empty" {
     }
     try std.testing.expectEqual(@as(usize, 0), matches.len);
 }
+
+test "PartitionedStorage.vectorSearch merges results from multiple partitions" {
+    const alloc = std.testing.allocator;
+
+    const dir0 = try makeTempDir(alloc);
+    defer alloc.free(dir0);
+    defer rmDir(dir0, alloc);
+    const dir1 = try makeTempDir(alloc);
+    defer alloc.free(dir1);
+    defer rmDir(dir1, alloc);
+
+    var s0 = try Storage.init(dir0, alloc);
+    defer s0.deinit();
+    var s1 = try Storage.init(dir1, alloc);
+    defer s1.deinit();
+
+    const schema = storage.TableSchema{
+        .table_id = 1,
+        .columns = &.{.{ .col_type = .bytes, .nullable = false }},
+    };
+    const idx_desc = storage.IndexDesc{
+        .id = 300,
+        .table_id = 1,
+        .column_idx = 0,
+        .spec = .{ .vector = 4 },
+    };
+    try s0.registerTable(schema);
+    try s0.registerIndex(idx_desc);
+    try s1.registerTable(schema);
+    try s1.registerIndex(idx_desc);
+
+    // Partition 0 holds a vector near the x-axis; partition 1 holds one near the y-axis.
+    const vx: []const f32 = &.{ 1.0, 0.0, 0.0, 0.0 };
+    const vy: []const f32 = &.{ 0.0, 1.0, 0.0, 0.0 };
+    const bx = try encodeVec(vx, alloc);
+    defer alloc.free(bx);
+    const by = try encodeVec(vy, alloc);
+    defer alloc.free(by);
+
+    try s0.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "p0", .values = &.{.{ .bytes = bx }} }}, 1);
+    try s1.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "p1", .values = &.{.{ .bytes = by }} }}, 1);
+
+    var parts = [_]*Storage{ &s0, &s1 };
+    var ps = storage.PartitionedStorage{ .partitions = &parts, .alloc = alloc };
+
+    // Query near x-axis with k=2 — should get both results, x-axis entry first.
+    const matches = try ps.vectorSearch(300, vx, 2, 1, alloc);
+    defer {
+        for (matches) |m| alloc.free(m.pk);
+        alloc.free(matches);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), matches.len);
+    try std.testing.expectEqualStrings("p0", matches[0].pk);
+    try std.testing.expect(matches[0].distance < matches[1].distance);
+}

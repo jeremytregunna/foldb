@@ -2,6 +2,7 @@
 const std = @import("std");
 const testing = std.testing;
 const gateway_mod = @import("gateway.zig");
+const storage_mod = @import("storage.zig");
 
 const Gateway = gateway_mod.Gateway;
 const ColumnValue = gateway_mod.ColumnValue;
@@ -123,4 +124,135 @@ test "CREATE INDEX: non-existent table is rejected" {
 
     const result = gw.applyDdl("CREATE ORDERED INDEX idx_ghost ON ghost_table (id)");
     try testing.expectError(error.TableNotFound, result);
+}
+
+test "ANN: WHERE ANN(col, $1, k) returns nearest neighbours via HNSW index" {
+    const alloc = testing.allocator;
+    const dir = try makeTempDir();
+    defer {
+        removeDirRecursive(dir);
+        alloc.free(dir);
+    }
+    const gw = try Gateway.init(dir, alloc, .{});
+    defer gw.deinit();
+
+    // Table with an id (PK) and a 4-dimensional vector column stored as bytes.
+    try gw.applyDdl("CREATE TABLE vecs (id STRING NOT NULL, embedding BYTES NOT NULL, PRIMARY KEY (id))");
+    try gw.applyDdl("CREATE VECTOR(4) INDEX vec_idx ON vecs (embedding)");
+
+    // Insert three orthogonal unit vectors.
+    const insert_hash = blk: {
+        const res = try gw.register("INSERT INTO vecs (id, embedding) VALUES ($1, $2)");
+        break :blk res.hash;
+    };
+
+    const v1: []const f32 = &.{ 1.0, 0.0, 0.0, 0.0 };
+    const v2: []const f32 = &.{ 0.0, 1.0, 0.0, 0.0 };
+    const v3: []const f32 = &.{ 0.0, 0.0, 1.0, 0.0 };
+
+    for ([_]struct { id: []const u8, vec: []const f32 }{
+        .{ .id = "a", .vec = v1 },
+        .{ .id = "b", .vec = v2 },
+        .{ .id = "c", .vec = v3 },
+    }) |row| {
+        const encoded = try storage_mod.vector_codec.encode(row.vec, alloc);
+        defer alloc.free(encoded);
+        _ = try gw.execute(std.testing.io, insert_hash, &.{
+            .{ .string = row.id },
+            .{ .bytes = encoded },
+        }, &.{});
+    }
+
+    // ANN query: nearest to v1 = [1,0,0,0], top 1.
+    const query_hash = blk: {
+        const res = try gw.register("SELECT id FROM vecs WHERE ANN(embedding, $1, 1)");
+        break :blk res.hash;
+    };
+    const query_vec = try storage_mod.vector_codec.encode(v1, alloc);
+    defer alloc.free(query_vec);
+
+    var result = try gw.querySelect(query_hash, &.{.{ .bytes = query_vec }}, &.{});
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), result.rows.len);
+    try testing.expectEqualStrings("a", result.rows[0][0].?.string);
+}
+
+test "ANN: k > 1 returns multiple results ordered by distance" {
+    const alloc = testing.allocator;
+    const dir = try makeTempDir();
+    defer {
+        removeDirRecursive(dir);
+        alloc.free(dir);
+    }
+    const gw = try Gateway.init(dir, alloc, .{});
+    defer gw.deinit();
+
+    try gw.applyDdl("CREATE TABLE vecs (id STRING NOT NULL, embedding BYTES NOT NULL, PRIMARY KEY (id))");
+    try gw.applyDdl("CREATE VECTOR(4) INDEX vec_idx ON vecs (embedding)");
+
+    const insert_hash = blk: {
+        const res = try gw.register("INSERT INTO vecs (id, embedding) VALUES ($1, $2)");
+        break :blk res.hash;
+    };
+
+    const v1: []const f32 = &.{ 1.0, 0.0, 0.0, 0.0 };
+    const v2: []const f32 = &.{ 0.9, 0.1, 0.0, 0.0 }; // close to v1
+    const v3: []const f32 = &.{ 0.0, 0.0, 1.0, 0.0 }; // far from v1
+
+    for ([_]struct { id: []const u8, vec: []const f32 }{
+        .{ .id = "a", .vec = v1 },
+        .{ .id = "b", .vec = v2 },
+        .{ .id = "c", .vec = v3 },
+    }) |row| {
+        const encoded = try storage_mod.vector_codec.encode(row.vec, alloc);
+        defer alloc.free(encoded);
+        _ = try gw.execute(std.testing.io, insert_hash, &.{
+            .{ .string = row.id },
+            .{ .bytes = encoded },
+        }, &.{});
+    }
+
+    const query_hash = blk: {
+        const res = try gw.register("SELECT id FROM vecs WHERE ANN(embedding, $1, 2)");
+        break :blk res.hash;
+    };
+    const query_vec = try storage_mod.vector_codec.encode(v1, alloc);
+    defer alloc.free(query_vec);
+
+    var result = try gw.querySelect(query_hash, &.{.{ .bytes = query_vec }}, &.{});
+    defer result.deinit();
+
+    // Top 2 nearest to v1 should be "a" and "b", not "c".
+    try testing.expectEqual(@as(usize, 2), result.rows.len);
+    const ids = [_][]const u8{ result.rows[0][0].?.string, result.rows[1][0].?.string };
+    try testing.expect(std.mem.eql(u8, ids[0], "a") or std.mem.eql(u8, ids[0], "b"));
+    try testing.expect(std.mem.eql(u8, ids[1], "a") or std.mem.eql(u8, ids[1], "b"));
+    try testing.expect(!std.mem.eql(u8, ids[0], ids[1]));
+}
+
+test "ANN: empty index returns zero rows" {
+    const alloc = testing.allocator;
+    const dir = try makeTempDir();
+    defer {
+        removeDirRecursive(dir);
+        alloc.free(dir);
+    }
+    const gw = try Gateway.init(dir, alloc, .{});
+    defer gw.deinit();
+
+    try gw.applyDdl("CREATE TABLE vecs (id STRING NOT NULL, embedding BYTES NOT NULL, PRIMARY KEY (id))");
+    try gw.applyDdl("CREATE VECTOR(4) INDEX vec_idx ON vecs (embedding)");
+
+    const query_hash = blk: {
+        const res = try gw.register("SELECT id FROM vecs WHERE ANN(embedding, $1, 5)");
+        break :blk res.hash;
+    };
+    const query_vec = try storage_mod.vector_codec.encode(&[_]f32{ 1.0, 0.0, 0.0, 0.0 }, alloc);
+    defer alloc.free(query_vec);
+
+    var result = try gw.querySelect(query_hash, &.{.{ .bytes = query_vec }}, &.{});
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 0), result.rows.len);
 }
