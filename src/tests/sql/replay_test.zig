@@ -172,6 +172,7 @@ fn makeEntry(
 
 const Fixture = struct {
     storage: *Storage,
+    partitioned: *eb.PartitionedStorage,
     sr: *schema_mod.SchemaRegistry,
     reg: *registry_mod.SqlRegistry,
     exec: eb.SqlExecutor,
@@ -183,14 +184,17 @@ const Fixture = struct {
         storage.* = try Storage.init(dir, alloc);
         try registerStorage(storage);
 
+        const partitioned = try alloc.create(eb.PartitionedStorage);
+        partitioned.* = try eb.PartitionedStorage.fromSingle(storage, alloc);
+
         const sr = try alloc.create(schema_mod.SchemaRegistry);
         sr.* = try makeSchemaRegistry(alloc);
 
         const reg = try alloc.create(registry_mod.SqlRegistry);
         reg.* = registry_mod.SqlRegistry.init(alloc, sr);
 
-        const exec = eb.SqlExecutor.init(storage, reg, sr, alloc);
-        return .{ .storage = storage, .sr = sr, .reg = reg, .exec = exec, .dir = dir, .alloc = alloc };
+        const exec = eb.SqlExecutor.init(partitioned, reg, sr, alloc);
+        return .{ .storage = storage, .partitioned = partitioned, .sr = sr, .reg = reg, .exec = exec, .dir = dir, .alloc = alloc };
     }
 
     fn deinit(self: *Fixture) void {
@@ -198,6 +202,8 @@ const Fixture = struct {
         self.alloc.destroy(self.reg);
         self.sr.deinit();
         self.alloc.destroy(self.sr);
+        self.partitioned.deinit();
+        self.alloc.destroy(self.partitioned);
         self.storage.deinit();
         self.alloc.destroy(self.storage);
         removeDir(self.dir);
@@ -526,6 +532,7 @@ fn registerFkStorage(storage: *Storage) !void {
 
 const FkFixture = struct {
     storage: *Storage,
+    partitioned: *eb.PartitionedStorage,
     sr: *schema_mod.SchemaRegistry,
     reg: *registry_mod.SqlRegistry,
     exec: eb.SqlExecutor,
@@ -536,12 +543,14 @@ const FkFixture = struct {
         const storage = try alloc.create(Storage);
         storage.* = try Storage.init(dir, alloc);
         try registerFkStorage(storage);
+        const partitioned = try alloc.create(eb.PartitionedStorage);
+        partitioned.* = try eb.PartitionedStorage.fromSingle(storage, alloc);
         const sr = try alloc.create(schema_mod.SchemaRegistry);
         sr.* = try makeFkSchemaRegistry(alloc);
         const reg = try alloc.create(registry_mod.SqlRegistry);
         reg.* = registry_mod.SqlRegistry.init(alloc, sr);
-        const exec = eb.SqlExecutor.init(storage, reg, sr, alloc);
-        return .{ .storage = storage, .sr = sr, .reg = reg, .exec = exec, .dir = dir, .alloc = alloc };
+        const exec = eb.SqlExecutor.init(partitioned, reg, sr, alloc);
+        return .{ .storage = storage, .partitioned = partitioned, .sr = sr, .reg = reg, .exec = exec, .dir = dir, .alloc = alloc };
     }
 
     fn deinit(self: *FkFixture) void {
@@ -549,6 +558,8 @@ const FkFixture = struct {
         self.alloc.destroy(self.reg);
         self.sr.deinit();
         self.alloc.destroy(self.sr);
+        self.partitioned.deinit();
+        self.alloc.destroy(self.partitioned);
         self.storage.deinit();
         self.alloc.destroy(self.storage);
         removeDir(self.dir);

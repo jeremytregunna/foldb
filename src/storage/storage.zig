@@ -130,6 +130,95 @@ pub const ScanIterator = struct {
     }
 };
 
+/// Routing wrapper over N Storage partitions.
+/// Routes reads/writes by wyhash(key) % N. For N=1 all calls delegate directly
+/// to partitions[0] with zero routing overhead.
+pub const PartitionedStorage = struct {
+    partitions: []*Storage,
+    alloc: std.mem.Allocator,
+
+    fn partitionIdx(self: *const PartitionedStorage, key: []const u8) usize {
+        if (self.partitions.len <= 1) return 0;
+        return std.hash.Wyhash.hash(0, key) % self.partitions.len;
+    }
+
+    pub fn get(self: *PartitionedStorage, table_id: TableId, key: []const u8, at_seq: Seq) !?Row {
+        return self.partitions[self.partitionIdx(key)].get(table_id, key, at_seq);
+    }
+
+    /// Scatter scan across all partitions; merge-sort results by key.
+    /// Row ownership is transferred: merged ScanIterator owns all row heap data.
+    pub fn scan(self: *PartitionedStorage, table_id: TableId, range: KeyRange, at_seq: Seq, alloc: std.mem.Allocator) !ScanIterator {
+        if (self.partitions.len <= 1) return self.partitions[0].scan(table_id, range, at_seq, alloc);
+        var merged: std.ArrayList(Row) = .empty;
+        errdefer {
+            for (merged.items) |*r| r.deinit(alloc);
+            merged.deinit(alloc);
+        }
+        var found_any = false;
+        for (self.partitions) |p| {
+            const iter = p.scan(table_id, range, at_seq, alloc) catch |e| {
+                if (e == error.TableNotFound) continue;
+                return e;
+            };
+            found_any = true;
+            // Transfer row structs to merged; free only the original slice header.
+            // Row heap data (key, values) is now owned by merged.
+            try merged.appendSlice(alloc, iter.rows);
+            alloc.free(iter.rows);
+        }
+        if (!found_any) return error.TableNotFound;
+        const rows = try merged.toOwnedSlice(alloc);
+        std.sort.block(Row, rows, {}, struct {
+            fn lt(_: void, a: Row, b: Row) bool {
+                return std.mem.lessThan(u8, a.key, b.key);
+            }
+        }.lt);
+        return ScanIterator{ .rows = rows, .pos = 0, .alloc = alloc };
+    }
+
+    /// Group mutations by destination partition and apply each group.
+    pub fn apply(self: *PartitionedStorage, mutations: []const Mutation, at_seq: Seq) !void {
+        if (self.partitions.len <= 1) return self.partitions[0].apply(mutations, at_seq);
+        const n = self.partitions.len;
+        const groups = try self.alloc.alloc(std.ArrayListUnmanaged(Mutation), n);
+        defer self.alloc.free(groups);
+        for (groups) |*g| g.* = .empty;
+        defer for (groups) |*g| g.deinit(self.alloc);
+        for (mutations) |m| try groups[self.partitionIdx(m.key)].append(self.alloc, m);
+        for (groups, self.partitions) |*g, p| {
+            if (g.items.len > 0) try p.apply(g.items, at_seq);
+        }
+    }
+
+    /// Register a table schema on every partition (schema is global, not per-partition).
+    pub fn registerTable(self: *PartitionedStorage, schema: TableSchema) !void {
+        for (self.partitions) |p| try p.registerTable(schema);
+    }
+
+    /// Register a specialty index on every partition.
+    pub fn registerIndex(self: *PartitionedStorage, desc: IndexDesc) !void {
+        for (self.partitions) |p| try p.registerIndex(desc);
+    }
+
+    pub fn flushAll(self: *PartitionedStorage) !void {
+        for (self.partitions) |p| try p.flushAll();
+    }
+
+    /// Convenience: wrap a single Storage in a PartitionedStorage.
+    /// Allocates a 1-element partitions slice; call deinit() to free it.
+    pub fn fromSingle(storage: *Storage, alloc: std.mem.Allocator) !PartitionedStorage {
+        const parts = try alloc.alloc(*Storage, 1);
+        parts[0] = storage;
+        return .{ .partitions = parts, .alloc = alloc };
+    }
+
+    /// Free the partitions slice. Does NOT deinit the Storage objects (caller owns them).
+    pub fn deinit(self: *PartitionedStorage) void {
+        self.alloc.free(self.partitions);
+    }
+};
+
 const IndexEntry = union(enum) {
     json: json_index_mod.JsonPathIndex,
     vector: hnsw_mod.HnswIndex,
@@ -526,7 +615,7 @@ fn jsonBytes(vals: []const ColumnValue, col_idx: u32) ?[]const u8 {
     };
 }
 
-fn mkdirAll(path: []const u8) void {
+pub fn mkdirAll(path: []const u8) void {
     const null_path = std.heap.page_allocator.allocSentinel(u8, path.len, 0) catch return;
     defer std.heap.page_allocator.free(null_path);
     @memcpy(null_path[0..path.len], path);

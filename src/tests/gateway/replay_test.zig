@@ -115,10 +115,10 @@ fn readFileBytes(path: []const u8, alloc: std.mem.Allocator) ![]u8 {
     return bytes;
 }
 
-fn assertBytEqualSsts(dir_a: []const u8, dir_b: []const u8, table_id: u32, alloc: std.mem.Allocator) !void {
-    const tdir_a = try std.fmt.allocPrint(alloc, "{s}/t{d}", .{ dir_a, table_id });
+fn assertBytEqualSsts(dir_a: []const u8, dir_b: []const u8, partition: u32, table_id: u32, alloc: std.mem.Allocator) !void {
+    const tdir_a = try std.fmt.allocPrint(alloc, "{s}/p{d}/t{d}", .{ dir_a, partition, table_id });
     defer alloc.free(tdir_a);
-    const tdir_b = try std.fmt.allocPrint(alloc, "{s}/t{d}", .{ dir_b, table_id });
+    const tdir_b = try std.fmt.allocPrint(alloc, "{s}/p{d}/t{d}", .{ dir_b, partition, table_id });
     defer alloc.free(tdir_b);
 
     const files_a = try listSstFiles(tdir_a, alloc);
@@ -212,7 +212,7 @@ test "Gateway Replay: INSERT UPDATE DELETE produces byte-equal SSTables" {
     try gw_a.flushAll();
     try gw_b.flushAll();
 
-    try assertBytEqualSsts(dir_a, dir_b, 1, alloc);
+    try assertBytEqualSsts(dir_a, dir_b, 0, 1, alloc);
 }
 
 // ─── DST: multi-table workload ────────────────────────────────────────────────
@@ -292,8 +292,8 @@ test "Gateway Replay: multi-table workload produces byte-equal SSTables" {
     try gw_a.flushAll();
     try gw_b.flushAll();
 
-    try assertBytEqualSsts(dir_a, dir_b, 1, alloc); // users table
-    try assertBytEqualSsts(dir_a, dir_b, 2, alloc); // posts table
+    try assertBytEqualSsts(dir_a, dir_b, 0, 1, alloc); // users table
+    try assertBytEqualSsts(dir_a, dir_b, 0, 2, alloc); // posts table
 }
 
 // ─── DST: compaction-triggering load ─────────────────────────────────────────
@@ -366,7 +366,7 @@ test "Gateway Replay: compaction-triggering load produces byte-equal SSTables" {
     try gw_a.flushAll();
     try gw_b.flushAll();
 
-    try assertBytEqualSsts(dir_a, dir_b, 1, alloc);
+    try assertBytEqualSsts(dir_a, dir_b, 0, 1, alloc);
 }
 
 // ─── DST: JOIN query determinism ─────────────────────────────────────────────
@@ -477,6 +477,85 @@ test "Gateway Replay: JOIN queries produce identical results on two instances" {
     // Verify storage is byte-equal on both instances
     try gw_a.flushAll();
     try gw_b.flushAll();
-    try assertBytEqualSsts(dir_a, dir_b, 1, alloc); // users
-    try assertBytEqualSsts(dir_a, dir_b, 2, alloc); // depts
+    try assertBytEqualSsts(dir_a, dir_b, 0, 1, alloc); // users
+    try assertBytEqualSsts(dir_a, dir_b, 0, 2, alloc); // depts
+}
+
+// ─── DST: multi-partition data distribution ───────────────────────────────────
+
+// With partition_count=2, rows whose encoded PK hashes to different partitions
+// must land in different storage directories. This test verifies:
+//   1. Both p0 and p1 receive SSTs after 20 inserts (confirming actual split).
+//   2. A SELECT * across partition boundaries returns all 20 rows.
+//   3. Two independent Gateway instances with the same workload produce
+//      byte-equal SSTables on every partition.
+test "Gateway Replay: partition_count=2 splits data and produces byte-equal SSTables" {
+    const alloc = testing.allocator;
+
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
+    const base = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+
+    const dir_a = try makeTempDir(alloc, base + 200);
+    defer {
+        removeDir(dir_a);
+        alloc.free(dir_a);
+    }
+    const dir_b = try makeTempDir(alloc, base + 201);
+    defer {
+        removeDir(dir_b);
+        alloc.free(dir_b);
+    }
+
+    const gw_a = try Gateway.init(dir_a, alloc, .{ .partition_count = 2 });
+    defer gw_a.deinit();
+    const gw_b = try Gateway.init(dir_b, alloc, .{ .partition_count = 2 });
+    defer gw_b.deinit();
+
+    const ddl = "CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))";
+    try gw_a.applyDdl(ddl);
+    try gw_b.applyDdl(ddl);
+
+    const ins_a = (try gw_a.register("INSERT INTO items (id, val) VALUES ($1, $2)")).hash;
+    const ins_b = (try gw_b.register("INSERT INTO items (id, val) VALUES ($1, $2)")).hash;
+    try testing.expectEqualSlices(u8, &ins_a, &ins_b);
+
+    // 20 rows — statistically guaranteed to populate both partitions under wyhash % 2.
+    var i: i64 = 1;
+    while (i <= 20) : (i += 1) {
+        const p = [_]ColumnValue{ .{ .int64 = i }, .{ .int64 = i * 10 } };
+        _ = try gw_a.execute(std.testing.io, ins_a, &p, &.{});
+        _ = try gw_b.execute(std.testing.io, ins_b, &p, &.{});
+    }
+
+    // Scatter-gather SELECT must return all 20 rows across both partitions.
+    const sel_a = (try gw_a.register("SELECT id, val FROM items")).hash;
+    var rs_a = try gw_a.querySelect(sel_a, &.{}, &.{});
+    defer rs_a.deinit();
+    try testing.expectEqual(@as(usize, 20), rs_a.rows.len);
+
+    try gw_a.flushAll();
+    try gw_b.flushAll();
+
+    // Both partitions must have SSTs, confirming actual key distribution.
+    const p0_dir = try std.fmt.allocPrint(alloc, "{s}/p0/t1", .{dir_a});
+    defer alloc.free(p0_dir);
+    const p0_files = try listSstFiles(p0_dir, alloc);
+    defer {
+        for (p0_files) |f| alloc.free(f);
+        alloc.free(p0_files);
+    }
+    const p1_dir = try std.fmt.allocPrint(alloc, "{s}/p1/t1", .{dir_a});
+    defer alloc.free(p1_dir);
+    const p1_files = try listSstFiles(p1_dir, alloc);
+    defer {
+        for (p1_files) |f| alloc.free(f);
+        alloc.free(p1_files);
+    }
+    try testing.expect(p0_files.len > 0);
+    try testing.expect(p1_files.len > 0);
+
+    // Both gateways must agree, partition by partition.
+    try assertBytEqualSsts(dir_a, dir_b, 0, 1, alloc);
+    try assertBytEqualSsts(dir_a, dir_b, 1, 1, alloc);
 }

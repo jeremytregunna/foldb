@@ -117,7 +117,10 @@ pub const Gateway = struct {
     schema: sql_mod.SchemaRegistry,
     registry: sql_mod.SqlRegistry,
     sql_exec: sql_mod.SqlExecutor,
-    storage: storage_mod.Storage,
+    /// One Storage per data partition. Heap-allocated; owned by this gateway.
+    storages: []*storage_mod.Storage,
+    /// Routing wrapper over storages — used by sql_exec and reconnaissance.
+    partitioned: storage_mod.PartitionedStorage,
     /// Arena that owns storage-schema column slices allocated during DDL.
     storage_schema_arena: std.heap.ArenaAllocator,
     nondet_resolver: NondetResolver,
@@ -154,17 +157,49 @@ pub const Gateway = struct {
 
         gw.alloc = alloc;
         gw.storage_schema_arena = std.heap.ArenaAllocator.init(alloc);
-        gw.storage = try storage_mod.Storage.init(storage_dir, alloc);
-        gw.storage.fault_hook = opts.disk_fault;
-        errdefer gw.storage.deinit();
+
+        // Ensure the top-level storage directory exists before creating partition subdirs.
+        storage_mod.mkdirAll(storage_dir);
+
+        // Allocate one Storage per partition. Each lives at {storage_dir}/p{i}.
+        // Storage does not own its dir string; each dir is freed in deinit via s.dir.
+        const pc = opts.partition_count;
+        const storages = try alloc.alloc(*storage_mod.Storage, pc);
+        errdefer alloc.free(storages);
+        var n_inited: usize = 0;
+        errdefer for (storages[0..n_inited]) |s| {
+            const dir = s.dir;
+            s.flushAll() catch {};
+            s.deinit();
+            alloc.destroy(s);
+            alloc.free(dir);
+        };
+        for (0..pc) |i| {
+            const dir = try std.fmt.allocPrint(alloc, "{s}/p{d}", .{ storage_dir, i });
+            // dir is NOT freed here — Storage holds a reference; freed in deinit via s.dir.
+            const s = alloc.create(storage_mod.Storage) catch |e| {
+                alloc.free(dir);
+                return e;
+            };
+            s.* = storage_mod.Storage.init(dir, alloc) catch |e| {
+                alloc.destroy(s);
+                alloc.free(dir);
+                return e;
+            };
+            if (opts.disk_fault) |hook| s.fault_hook = hook;
+            storages[i] = s;
+            n_inited += 1;
+        }
+        gw.storages = storages;
+        gw.partitioned = .{ .partitions = storages, .alloc = alloc };
 
         gw.schema = sql_mod.SchemaRegistry.init(alloc);
         gw.registry = sql_mod.SqlRegistry.init(alloc, &gw.schema);
-        gw.sql_exec = sql_mod.SqlExecutor.init(&gw.storage, &gw.registry, &gw.schema, alloc);
+        gw.sql_exec = sql_mod.SqlExecutor.init(&gw.partitioned, &gw.registry, &gw.schema, alloc);
         gw.nondet_resolver = NondetResolver.init(opts.clock, opts.rand);
 
         const seq_cfg = sequencer_mod.Config{
-            .partition_count = 1,
+            .partition_count = opts.partition_count,
             .node_id = 1,
         };
         gw.sequencer = try sequencer_mod.Sequencer.init(storage_dir, seq_cfg, alloc);
@@ -199,8 +234,14 @@ pub const Gateway = struct {
         self.registry.deinit();
         self.schema.deinit();
         // Flush memtables to SSTables before teardown so data survives restart.
-        self.storage.flushAll() catch {};
-        self.storage.deinit();
+        for (self.storages) |s| {
+            const dir = s.dir;
+            s.flushAll() catch {};
+            s.deinit();
+            self.alloc.destroy(s);
+            self.alloc.free(dir);
+        }
+        self.alloc.free(self.storages);
         self.storage_schema_arena.deinit();
         self.alloc.destroy(self);
     }
@@ -268,7 +309,7 @@ pub const Gateway = struct {
         // On retry, re-run at the seq the executor assigned to the conflicting entry so
         // hints reflect state as of that point.
         var recon_seq: Seq = self.sql_exec.committed_seq;
-        var hints = try reconnaissanceScan(rq.plan, &self.storage, params, &self.schema, recon_seq, self.partition_count, self.alloc);
+        var hints = try reconnaissanceScan(rq.plan, &self.partitioned, params, &self.schema, recon_seq, self.partition_count, self.alloc);
         defer hints.deinit();
 
         const max_retries: usize = 3;
@@ -277,7 +318,7 @@ pub const Gateway = struct {
             if (attempt > 0) {
                 self.metrics.recon_retries.inc();
                 // Build new hints before freeing old ones so a failed alloc leaves hints valid.
-                const new_hints = try reconnaissanceScan(rq.plan, &self.storage, params, &self.schema, recon_seq, self.partition_count, self.alloc);
+                const new_hints = try reconnaissanceScan(rq.plan, &self.partitioned, params, &self.schema, recon_seq, self.partition_count, self.alloc);
                 hints.deinit();
                 hints = new_hints;
             }
@@ -541,7 +582,7 @@ pub const Gateway = struct {
         switch (stmt) {
             .create_table => |ct| {
                 const tbl = self.schema.getTable(ct.name) orelse return error.TableNotFound;
-                try self.storage.registerTable(try sqlTableToStorage(tbl, self.storage_schema_arena.allocator()));
+                try self.partitioned.registerTable(try sqlTableToStorage(tbl, self.storage_schema_arena.allocator()));
             },
             .create_index => |ci| {
                 const tbl = self.schema.getTable(ci.table) orelse return error.TableNotFound;
@@ -561,7 +602,7 @@ pub const Gateway = struct {
                     else => return,
                 };
                 const column_idx: u32 = if (idx.columns.len > 0) idx.columns[0] else 0;
-                try self.storage.registerIndex(.{
+                try self.partitioned.registerIndex(.{
                     .id = idx.id,
                     .table_id = tbl.id,
                     .column_idx = column_idx,
@@ -579,7 +620,7 @@ pub const Gateway = struct {
 
     /// Flush all storage to disk.
     pub fn flushAll(self: *Gateway) !void {
-        try self.storage.flushAll();
+        try self.partitioned.flushAll();
     }
 
     // ---- CDC subscription API (used by the net layer) ----
@@ -778,7 +819,7 @@ const ReconHints = struct {
 /// over-approximations.
 fn reconnaissanceScan(
     plan: sql_mod.plan.ExecutionPlan,
-    storage: *storage_mod.Storage,
+    storage: *storage_mod.PartitionedStorage,
     params: []const ColumnValue,
     schema: *const sql_mod.SchemaRegistry,
     at_seq: Seq,
@@ -851,7 +892,7 @@ fn appendPartitionUnique(
 /// Scan all rows in a table at at_seq and collect their partition IDs.
 /// Silently skips tables not yet registered in storage (no rows, no partitions).
 fn scanTablePartitions(
-    storage: *storage_mod.Storage,
+    storage: *storage_mod.PartitionedStorage,
     table_id: storage_mod.TableId,
     at_seq: Seq,
     partition_count: u32,
@@ -922,7 +963,7 @@ fn extractInsertRowKey(
 /// Falls back to partition 0 for rows whose PK expressions are complex.
 fn collectInsertPartitions(
     ins: sql_mod.plan.InsertPlan,
-    storage: *storage_mod.Storage,
+    storage: *storage_mod.PartitionedStorage,
     params: []const ColumnValue,
     schema: *const sql_mod.SchemaRegistry,
     at_seq: Seq,
@@ -954,7 +995,7 @@ fn collectInsertPartitions(
 /// For scan and DML nodes: enumerates rows from storage.
 fn collectNodePartitions(
     node: *const sql_mod.plan.PlanNode,
-    storage: *storage_mod.Storage,
+    storage: *storage_mod.PartitionedStorage,
     params: []const ColumnValue,
     at_seq: Seq,
     partition_count: u32,

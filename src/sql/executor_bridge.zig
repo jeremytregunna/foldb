@@ -49,6 +49,7 @@ const freeRowValues = eval_expr_mod.freeRowValues;
 const AggAccum = agg_accum_mod.AggAccum;
 
 pub const Storage = storage_mod.Storage;
+pub const PartitionedStorage = storage_mod.PartitionedStorage;
 pub const Row = storage_mod.Row;
 pub const ColumnValue = storage_mod.ColumnValue;
 pub const ColumnType = storage_mod.ColumnType;
@@ -88,7 +89,7 @@ pub const ResultSet = struct {
 
 /// High-level SQL executor wrapping the storage and SQL registry.
 pub const SqlExecutor = struct {
-    storage: *Storage,
+    storage: *storage_mod.PartitionedStorage,
     registry: *registry_mod.SqlRegistry,
     schema: *schema_mod.SchemaRegistry,
     committed_seq: Seq,
@@ -108,7 +109,7 @@ pub const SqlExecutor = struct {
     }
 
     pub fn init(
-        storage: *Storage,
+        storage: *storage_mod.PartitionedStorage,
         registry: *registry_mod.SqlRegistry,
         schema: *schema_mod.SchemaRegistry,
         alloc: std.mem.Allocator,

@@ -167,7 +167,7 @@ pub const CdcManager = struct {
     pub fn captureBeforeImages(
         self: *CdcManager,
         mutations: []const Mutation,
-        storage: *Storage,
+        storage: anytype,
         at_seq: Seq,
         alloc: std.mem.Allocator,
     ) !BeforeImages {

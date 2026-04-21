@@ -20,8 +20,8 @@ fn makeTempPath(alloc: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(alloc, "/tmp/sql_expr_{d}", .{ns});
 }
 
-fn makeExec(storage: *Storage, sr: *schema_mod.SchemaRegistry, reg: *registry_mod.SqlRegistry, alloc: std.mem.Allocator) eb.SqlExecutor {
-    return eb.SqlExecutor.init(storage, reg, sr, alloc);
+fn makeExec(ps: *eb.PartitionedStorage, sr: *schema_mod.SchemaRegistry, reg: *registry_mod.SqlRegistry, alloc: std.mem.Allocator) eb.SqlExecutor {
+    return eb.SqlExecutor.init(ps, reg, sr, alloc);
 }
 
 fn makeIntLit(alloc: std.mem.Allocator, n: i64) !*plan_mod.PlanExpr {
@@ -82,11 +82,13 @@ test "lower converts to lowercase" {
     defer alloc.free(tmp);
     var storage = try Storage.init(tmp, alloc);
     defer storage.deinit();
+    var ps = try eb.PartitionedStorage.fromSingle(&storage, alloc);
+    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = makeExec(&storage, &sr, &reg, alloc);
+    var exec = makeExec(&ps, &sr, &reg, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -106,11 +108,13 @@ test "upper converts to uppercase" {
     defer alloc.free(tmp);
     var storage = try Storage.init(tmp, alloc);
     defer storage.deinit();
+    var ps = try eb.PartitionedStorage.fromSingle(&storage, alloc);
+    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = makeExec(&storage, &sr, &reg, alloc);
+    var exec = makeExec(&ps, &sr, &reg, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -132,11 +136,13 @@ test "trim removes surrounding whitespace" {
     defer alloc.free(tmp);
     var storage = try Storage.init(tmp, alloc);
     defer storage.deinit();
+    var ps = try eb.PartitionedStorage.fromSingle(&storage, alloc);
+    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = makeExec(&storage, &sr, &reg, alloc);
+    var exec = makeExec(&ps, &sr, &reg, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -158,11 +164,13 @@ test "substr with start and length" {
     defer alloc.free(tmp);
     var storage = try Storage.init(tmp, alloc);
     defer storage.deinit();
+    var ps = try eb.PartitionedStorage.fromSingle(&storage, alloc);
+    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = makeExec(&storage, &sr, &reg, alloc);
+    var exec = makeExec(&ps, &sr, &reg, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -184,11 +192,13 @@ test "substr from middle" {
     defer alloc.free(tmp);
     var storage = try Storage.init(tmp, alloc);
     defer storage.deinit();
+    var ps = try eb.PartitionedStorage.fromSingle(&storage, alloc);
+    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = makeExec(&storage, &sr, &reg, alloc);
+    var exec = makeExec(&ps, &sr, &reg, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -211,11 +221,13 @@ test "replace substitutes all occurrences" {
     defer alloc.free(tmp);
     var storage = try Storage.init(tmp, alloc);
     defer storage.deinit();
+    var ps = try eb.PartitionedStorage.fromSingle(&storage, alloc);
+    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = makeExec(&storage, &sr, &reg, alloc);
+    var exec = makeExec(&ps, &sr, &reg, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -239,11 +251,13 @@ test "nullif returns null when values equal" {
     defer alloc.free(tmp);
     var storage = try Storage.init(tmp, alloc);
     defer storage.deinit();
+    var ps = try eb.PartitionedStorage.fromSingle(&storage, alloc);
+    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = makeExec(&storage, &sr, &reg, alloc);
+    var exec = makeExec(&ps, &sr, &reg, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -264,11 +278,13 @@ test "nullif returns value when different" {
     defer alloc.free(tmp);
     var storage = try Storage.init(tmp, alloc);
     defer storage.deinit();
+    var ps = try eb.PartitionedStorage.fromSingle(&storage, alloc);
+    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = makeExec(&storage, &sr, &reg, alloc);
+    var exec = makeExec(&ps, &sr, &reg, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -291,11 +307,13 @@ test "greatest returns max value" {
     defer alloc.free(tmp);
     var storage = try Storage.init(tmp, alloc);
     defer storage.deinit();
+    var ps = try eb.PartitionedStorage.fromSingle(&storage, alloc);
+    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = makeExec(&storage, &sr, &reg, alloc);
+    var exec = makeExec(&ps, &sr, &reg, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -317,11 +335,13 @@ test "least returns min value" {
     defer alloc.free(tmp);
     var storage = try Storage.init(tmp, alloc);
     defer storage.deinit();
+    var ps = try eb.PartitionedStorage.fromSingle(&storage, alloc);
+    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = makeExec(&storage, &sr, &reg, alloc);
+    var exec = makeExec(&ps, &sr, &reg, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -345,11 +365,13 @@ test "coalesce returns first non-null" {
     defer alloc.free(tmp);
     var storage = try Storage.init(tmp, alloc);
     defer storage.deinit();
+    var ps = try eb.PartitionedStorage.fromSingle(&storage, alloc);
+    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = makeExec(&storage, &sr, &reg, alloc);
+    var exec = makeExec(&ps, &sr, &reg, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -370,11 +392,13 @@ test "coalesce returns null when all null" {
     defer alloc.free(tmp);
     var storage = try Storage.init(tmp, alloc);
     defer storage.deinit();
+    var ps = try eb.PartitionedStorage.fromSingle(&storage, alloc);
+    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = makeExec(&storage, &sr, &reg, alloc);
+    var exec = makeExec(&ps, &sr, &reg, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -397,11 +421,13 @@ test "length returns character count" {
     defer alloc.free(tmp);
     var storage = try Storage.init(tmp, alloc);
     defer storage.deinit();
+    var ps = try eb.PartitionedStorage.fromSingle(&storage, alloc);
+    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = makeExec(&storage, &sr, &reg, alloc);
+    var exec = makeExec(&ps, &sr, &reg, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -423,11 +449,13 @@ test "binary add two integers" {
     defer alloc.free(tmp);
     var storage = try Storage.init(tmp, alloc);
     defer storage.deinit();
+    var ps = try eb.PartitionedStorage.fromSingle(&storage, alloc);
+    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = makeExec(&storage, &sr, &reg, alloc);
+    var exec = makeExec(&ps, &sr, &reg, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -448,11 +476,13 @@ test "CASE WHEN false THEN x ELSE y returns y" {
     defer alloc.free(tmp);
     var storage = try Storage.init(tmp, alloc);
     defer storage.deinit();
+    var ps = try eb.PartitionedStorage.fromSingle(&storage, alloc);
+    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = makeExec(&storage, &sr, &reg, alloc);
+    var exec = makeExec(&ps, &sr, &reg, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -478,11 +508,13 @@ test "hash_agg COUNT star on empty returns 0" {
     defer alloc.free(tmp);
     var storage = try Storage.init(tmp, alloc);
     defer storage.deinit();
+    var ps = try eb.PartitionedStorage.fromSingle(&storage, alloc);
+    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = makeExec(&storage, &sr, &reg, alloc);
+    var exec = makeExec(&ps, &sr, &reg, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -533,11 +565,13 @@ test "hash_join inner join matching rows" {
     defer alloc.free(tmp);
     var storage = try Storage.init(tmp, alloc);
     defer storage.deinit();
+    var ps = try eb.PartitionedStorage.fromSingle(&storage, alloc);
+    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = makeExec(&storage, &sr, &reg, alloc);
+    var exec = makeExec(&ps, &sr, &reg, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -597,11 +631,13 @@ test "hash_join inner join no match yields empty result" {
     defer alloc.free(tmp);
     var storage = try Storage.init(tmp, alloc);
     defer storage.deinit();
+    var ps = try eb.PartitionedStorage.fromSingle(&storage, alloc);
+    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = makeExec(&storage, &sr, &reg, alloc);
+    var exec = makeExec(&ps, &sr, &reg, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
