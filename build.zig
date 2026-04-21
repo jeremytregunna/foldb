@@ -916,6 +916,16 @@ pub fn build(b: *std.Build) void {
     const seq_tests = b.addTest(.{ .root_module = seq_test_module });
     const run_seq_tests = b.addRunArtifact(seq_tests);
 
+    // Sequencer TCP cluster tests
+    const seq_tcp_cluster_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sequencer/tcp_cluster_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    seq_tcp_cluster_test_module.addImport("sequencer.zig", sequencer_module);
+    const seq_tcp_cluster_tests = b.addTest(.{ .root_module = seq_tcp_cluster_test_module });
+    const run_seq_tcp_cluster_tests = b.addRunArtifact(seq_tcp_cluster_tests);
+
     // CDC unit tests
     const cdc_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/cdc/cdc_test.zig"),
@@ -1161,6 +1171,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_errors_tests.step);
     test_step.dependOn(&run_config_tests.step);
     test_step.dependOn(&run_raft_tcp_dst_tests.step);
+    test_step.dependOn(&run_seq_tcp_cluster_tests.step);
 
     // Raft consensus seed sweep executable
     const dst_sweep_module = b.createModule(.{

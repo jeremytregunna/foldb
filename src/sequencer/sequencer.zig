@@ -50,6 +50,8 @@ pub const Config = struct {
     election_timeout_max_ms: u32 = 300,
     /// Raft heartbeat interval (milliseconds).
     heartbeat_interval_ms: u32 = 50,
+    /// TCP port for inbound Raft messages. 0 = OS-assigned (useful in tests).
+    listen_port: u16 = 0,
     /// Peer nodes in the Raft group. Empty → single-node, self-elects immediately.
     peers: []const PeerAddr = &.{},
 };
@@ -73,6 +75,8 @@ pub const Sequencer = struct {
     next_epoch: EpochNum,
     alloc: std.mem.Allocator,
     metrics: obs.SequencerMetrics = .{},
+    /// TCP transport for Raft inter-node messaging.
+    transport: raft_mod.TcpTransport,
 
     /// Initialize a Sequencer at the given base path.
     /// Creates:
@@ -146,6 +150,14 @@ pub const Sequencer = struct {
             if (pl.current_seq > max_seq) max_seq = pl.current_seq;
         }
 
+        // Set up TCP transport.
+        var transport = raft_mod.TcpTransport.init(alloc, cfg.node_id);
+        errdefer transport.deinit();
+        if (cfg.peers.len > 0) {
+            try transport.listen(cfg.listen_port);
+            for (cfg.peers) |p| try transport.addPeer(p.id, p.addr);
+        }
+
         return Sequencer{
             .raft = raft_node,
             .raft_log = raft_log,
@@ -156,6 +168,7 @@ pub const Sequencer = struct {
             .next_seq = max_seq + 1,
             .next_epoch = 1,
             .alloc = alloc,
+            .transport = transport,
         };
     }
 
@@ -167,6 +180,7 @@ pub const Sequencer = struct {
         self.alloc.free(self.partition_logs);
         self.batcher.deinit();
         self.idempotency.deinit();
+        self.transport.deinit();
     }
 
     pub fn currentSeq(self: *const Sequencer) Seq {
@@ -175,6 +189,126 @@ pub const Sequencer = struct {
 
     pub fn partitionCount(self: *const Sequencer) u32 {
         return @intCast(self.partition_logs.len);
+    }
+
+    pub fn isLeader(self: *const Sequencer) bool {
+        return self.raft.role == .leader;
+    }
+
+    /// Return the TCP port the transport is bound to.
+    /// Only valid if the transport is listening (multi-node config).
+    pub fn boundPort(self: *const Sequencer) !u16 {
+        return self.transport.boundPort();
+    }
+
+    /// Add an address for a peer to the TCP transport after init.
+    /// Useful in tests where ports are assigned by the OS and not known at init time.
+    pub fn addTransportPeer(self: *Sequencer, id: NodeId, addr: []const u8) !void {
+        try self.transport.addPeer(id, addr);
+    }
+
+    /// Start listening on the given port (call after init when listen_port wasn't set).
+    pub fn startListening(self: *Sequencer, port: u16) !void {
+        try self.transport.listen(port);
+    }
+
+    pub fn commitIndex(self: *const Sequencer) Seq {
+        return self.raft.commit_index;
+    }
+
+    /// Propose a raw payload directly to the Raft ordering log. Returns the committed seq
+    /// on this node (entry may still be in-flight on followers). Errors if not leader.
+    pub fn proposeRaw(self: *Sequencer, payload: []const u8, alloc: std.mem.Allocator) !Seq {
+        var outputs: std.ArrayList(raft_mod.Output) = .empty;
+        defer outputs.deinit(alloc);
+        const seq = try self.raft.propose(
+            &self.raft_log,
+            .txn_intent,
+            payload,
+            &outputs,
+        ) orelse return SequencerError.NotLeader;
+        try self.flushOutputs(outputs.items, alloc);
+        return seq;
+    }
+
+    /// Drive one cycle: drain TCP inbox → dispatch messages → tick Raft timer → flush outputs.
+    /// The caller's tick loop should call this at the configured tick_interval_ms rate.
+    pub fn tickOnce(self: *Sequencer, alloc: std.mem.Allocator) !void {
+        // Drain all pending inbound TCP messages.
+        while (try self.transport.pollOnce(alloc)) {}
+
+        var inbox: std.ArrayList(raft_mod.Envelope) = .empty;
+        defer inbox.deinit(alloc);
+        try self.transport.drainInbox(&inbox, alloc);
+
+        // Dispatch each inbound message to the Raft state machine.
+        var outputs: std.ArrayList(raft_mod.Output) = .empty;
+        defer outputs.deinit(alloc);
+
+        for (inbox.items) |env| {
+            switch (env.msg) {
+                .append_entries => |args| {
+                    defer {
+                        for (args.entries) |entry| alloc.free(@constCast(&entry).payload);
+                        alloc.free(@constCast(args.entries));
+                    }
+                    try self.raft.handleAppendEntries(&self.raft_log, args, &outputs);
+                },
+                .append_entries_result => |result| {
+                    try self.raft.handleAppendEntriesResult(&self.raft_log, env.from, result, &outputs);
+                },
+                .request_vote => |args| {
+                    try self.raft.handleRequestVote(&self.raft_log, args, &outputs);
+                },
+                .request_vote_result => |result| {
+                    try self.raft.handleRequestVoteResult(&self.raft_log, env.from, result, &outputs);
+                },
+            }
+            try self.flushOutputs(outputs.items, alloc);
+            outputs.clearRetainingCapacity();
+        }
+
+        // Advance Raft timers.
+        try self.raft.tick(&self.raft_log, &outputs);
+        try self.flushOutputs(outputs.items, alloc);
+    }
+
+    /// Process Raft output effects: send messages, persist state, build AppendEntries.
+    fn flushOutputs(self: *Sequencer, outputs: []const raft_mod.Output, alloc: std.mem.Allocator) !void {
+        for (outputs) |output| {
+            switch (output) {
+                .send => |s| self.transport.send(s.to, s.msg),
+                .send_entries => |se| {
+                    const entries = try self.raft_log.read(
+                        se.from_index,
+                        self.raft.cfg.max_append_batch,
+                        alloc,
+                    );
+                    defer {
+                        for (entries) |*e| e.deinit(alloc);
+                        alloc.free(entries);
+                    }
+                    self.transport.send(se.to, .{ .append_entries = .{
+                        .term = se.term,
+                        .leader_id = se.leader_id,
+                        .prev_log_index = se.prev_log_index,
+                        .prev_log_term = se.prev_log_term,
+                        .entries = entries,
+                        .leader_commit = se.leader_commit,
+                    } });
+                },
+                .persist => |p| {
+                    raft_mod.savePersistentState(
+                        self.raft_path,
+                        alloc,
+                        p.term,
+                        p.voted_for,
+                    ) catch {};
+                },
+                .committed => {},
+                .apply_config => {},
+            }
+        }
     }
 
     /// Return a pointer to the log for the given partition (for reading committed entries).
@@ -258,19 +392,7 @@ fn doCommit(sequencer: *Sequencer, submit: ValidatedSubmit) anyerror!SubmitResul
     };
     _ = ordering_seq;
 
-    for (outputs.items) |output| {
-        switch (output) {
-            .persist => |p| {
-                raft_mod.savePersistentState(
-                    sequencer.raft_path,
-                    sequencer.alloc,
-                    p.term,
-                    p.voted_for,
-                ) catch {};
-            },
-            else => {},
-        }
-    }
+    try sequencer.flushOutputs(outputs.items, sequencer.alloc);
 
     // Sequencer→data-log boundary: write the opaque intent payload at the assigned
     // global seq. Raft replicated only the ordering decision above; the intent bytes
