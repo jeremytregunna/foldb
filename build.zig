@@ -788,6 +788,7 @@ pub fn build(b: *std.Build) void {
     main_module.addImport("gateway.zig", gateway_module);
     main_module.addImport("server.zig", net_server_module);
     main_module.addImport("config.zig", config_module);
+    main_module.addImport("sequencer.zig", sequencer_module);
 
     // Client library
     const client_module = b.createModule(.{

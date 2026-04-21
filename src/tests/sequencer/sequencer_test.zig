@@ -202,3 +202,52 @@ test "Sequencer: committed entry readable from partition log" {
     try testing.expectEqual(@as(usize, 1), entries.len);
     try testing.expectEqual(result.seq, entries[0].header.seq);
 }
+
+test "Sequencer: config derives tick counts correctly" {
+    // 150ms / 10ms = 15 ticks min, 300ms / 10ms = 30 ticks max, 50ms / 10ms = 5 heartbeat
+    const cfg = Config{
+        .tick_interval_ms = 10,
+        .election_timeout_min_ms = 150,
+        .election_timeout_max_ms = 300,
+        .heartbeat_interval_ms = 50,
+    };
+    const tick_ms = cfg.tick_interval_ms;
+    try testing.expectEqual(@as(u32, 15), cfg.election_timeout_min_ms / tick_ms);
+    try testing.expectEqual(@as(u32, 30), cfg.election_timeout_max_ms / tick_ms);
+    try testing.expectEqual(@as(u32, 5), cfg.heartbeat_interval_ms / tick_ms);
+
+    // Verify a sequencer initialised with these values starts correctly
+    const path = try makeTempDir("ticks");
+    defer {
+        removeDirRecursive(path);
+        testing.allocator.free(path);
+    }
+    var seq = try Sequencer.init(path, cfg, testing.allocator);
+    defer seq.deinit();
+    // Single-node with these tick ratios must still elect itself
+    try testing.expect(seq.raft.role == .leader);
+}
+
+test "Sequencer: config with peers registers peer IDs in RaftNode" {
+    const path = try makeTempDir("peers");
+    defer {
+        removeDirRecursive(path);
+        testing.allocator.free(path);
+    }
+    const peers = [_]sequencer_mod.PeerAddr{
+        .{ .id = 2, .addr = "127.0.0.1:7434" },
+        .{ .id = 3, .addr = "127.0.0.1:7435" },
+    };
+    const cfg = Config{
+        .node_id = 1,
+        .peers = &peers,
+    };
+    var seq = try Sequencer.init(path, cfg, testing.allocator);
+    defer seq.deinit();
+    // 2 peers registered in RaftNode
+    try testing.expectEqual(@as(usize, 2), seq.raft.peers.len);
+    try testing.expectEqual(@as(u64, 2), seq.raft.peers[0].id);
+    try testing.expectEqual(@as(u64, 3), seq.raft.peers[1].id);
+    // Multi-node: not yet leader (needs quorum to elect)
+    try testing.expect(seq.raft.role != .leader);
+}

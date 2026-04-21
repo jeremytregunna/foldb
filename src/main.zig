@@ -2,6 +2,7 @@ const std = @import("std");
 const gateway_mod = @import("gateway.zig");
 const server = @import("server.zig");
 const config_mod = @import("config.zig");
+const sequencer_mod = @import("sequencer.zig");
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
@@ -34,16 +35,33 @@ pub fn main(init: std.process.Init) !void {
     const storage_dir = storage_dir_override orelse cfg.storage_dir;
     const port = port_override orelse cfg.listen_port;
 
-    std.debug.print("foldb starting: storage={s} port={d} node_id={d} partitions={d}\n", .{
+    // Build PeerAddr slice from config peer strings.
+    // Peer NodeIds are assigned sequentially starting from 1, skipping self.
+    const peer_addrs = try alloc.alloc(sequencer_mod.PeerAddr, cfg.peers.len);
+    defer alloc.free(peer_addrs);
+    var next_id: u64 = 1;
+    for (cfg.peers, 0..) |addr, i| {
+        while (next_id == cfg.node_id) next_id += 1;
+        peer_addrs[i] = .{ .id = next_id, .addr = addr };
+        next_id += 1;
+    }
+
+    std.debug.print("foldb starting: storage={s} port={d} node_id={d} partitions={d} peers={d}\n", .{
         storage_dir,
         port,
         cfg.node_id,
         cfg.partition_count,
+        cfg.peers.len,
     });
 
     const gw = try gateway_mod.Gateway.init(storage_dir, alloc, .{
         .partition_count = cfg.partition_count,
         .node_id = cfg.node_id,
+        .tick_interval_ms = 10,
+        .election_timeout_min_ms = cfg.election_timeout_min_ms,
+        .election_timeout_max_ms = cfg.election_timeout_max_ms,
+        .heartbeat_interval_ms = cfg.heartbeat_interval_ms,
+        .peers = peer_addrs,
     });
     defer gw.deinit();
 

@@ -145,6 +145,11 @@ pub const Gateway = struct {
         disk_fault: ?storage_mod.DiskFaultHook = null,
         partition_count: u32 = 1,
         node_id: u64 = 1,
+        tick_interval_ms: u32 = 10,
+        election_timeout_min_ms: u32 = 150,
+        election_timeout_max_ms: u32 = 300,
+        heartbeat_interval_ms: u32 = 50,
+        peers: []const sequencer_mod.PeerAddr = &.{},
     };
 
     /// Initialize and heap-allocate a Gateway. Caller owns the pointer; call `deinit` to free.
@@ -202,6 +207,11 @@ pub const Gateway = struct {
         const seq_cfg = sequencer_mod.Config{
             .partition_count = opts.partition_count,
             .node_id = opts.node_id,
+            .tick_interval_ms = opts.tick_interval_ms,
+            .election_timeout_min_ms = opts.election_timeout_min_ms,
+            .election_timeout_max_ms = opts.election_timeout_max_ms,
+            .heartbeat_interval_ms = opts.heartbeat_interval_ms,
+            .peers = opts.peers,
         };
         gw.sequencer = try sequencer_mod.Sequencer.init(storage_dir, seq_cfg, alloc);
         errdefer gw.sequencer.deinit();

@@ -29,6 +29,12 @@ pub const TxnIntent = log_mod.TxnIntent;
 pub const LogEntry = log_mod.LogEntry;
 pub const EntryKind = log_mod.EntryKind;
 
+/// A peer node in the Raft group: its NodeId and Raft listener address.
+pub const PeerAddr = struct {
+    id: NodeId,
+    addr: []const u8, // "host:port"
+};
+
 /// Sequencer config.
 pub const Config = struct {
     /// Number of data partition logs.
@@ -37,11 +43,15 @@ pub const Config = struct {
     max_epoch_size: usize = epoch_mod.DEFAULT_MAX_BATCH_SIZE,
     /// Node ID for the Sequencer's Raft group.
     node_id: NodeId = 1,
-    /// Raft election timeout (ticks).
-    election_timeout_min: u32 = 5,
-    election_timeout_max: u32 = 10,
-    /// Raft heartbeat interval (ticks).
-    heartbeat_interval: u32 = 2,
+    /// How often the tick loop fires (milliseconds).
+    tick_interval_ms: u32 = 10,
+    /// Raft election timeout bounds (milliseconds).
+    election_timeout_min_ms: u32 = 150,
+    election_timeout_max_ms: u32 = 300,
+    /// Raft heartbeat interval (milliseconds).
+    heartbeat_interval_ms: u32 = 50,
+    /// Peer nodes in the Raft group. Empty → single-node, self-elects immediately.
+    peers: []const PeerAddr = &.{},
 };
 
 pub const SequencerError = error{
@@ -83,23 +93,35 @@ pub const Sequencer = struct {
         var raft_log = try Log.initPartitioned(raft_path, cfg.node_id, seq_partition_id);
         errdefer raft_log.deinit();
 
-        // Initialize RaftNode with 0 peers (single-node, immediately becomes leader)
+        // Derive Raft tick counts from millisecond config values.
+        const tick_ms = if (cfg.tick_interval_ms == 0) 1 else cfg.tick_interval_ms;
+        const election_min = @max(1, cfg.election_timeout_min_ms / tick_ms);
+        const election_max = @max(1, cfg.election_timeout_max_ms / tick_ms);
+        const heartbeat = @max(1, cfg.heartbeat_interval_ms / tick_ms);
+
+        // Build peer NodeId list from PeerAddr slice.
+        const peer_ids = try alloc.alloc(NodeId, cfg.peers.len);
+        defer alloc.free(peer_ids);
+        for (cfg.peers, 0..) |p, i| peer_ids[i] = p.id;
+
         const raft_cfg = raft_mod.Config{
-            .election_timeout_min = cfg.election_timeout_min,
-            .election_timeout_max = cfg.election_timeout_max,
-            .heartbeat_interval = cfg.heartbeat_interval,
+            .election_timeout_min = election_min,
+            .election_timeout_max = election_max,
+            .heartbeat_interval = heartbeat,
             .max_append_batch = 64,
         };
-        var raft_node = try raft_mod.RaftNode.init(alloc, cfg.node_id, &.{}, raft_cfg, cfg.node_id);
+        var raft_node = try raft_mod.RaftNode.init(alloc, cfg.node_id, peer_ids, raft_cfg, cfg.node_id);
         errdefer raft_node.deinit();
 
-        // Tick enough times to elect self as leader (0 peers → immediate)
+        // Single-node: tick until self-elected. Multi-node: leave election to the tick loop.
         var outputs: std.ArrayList(raft_mod.Output) = .empty;
         defer outputs.deinit(alloc);
-        for (0..cfg.election_timeout_max + 1) |_| {
-            try raft_node.tick(&raft_log, &outputs);
-            outputs.clearRetainingCapacity();
-            if (raft_node.role == .leader) break;
+        if (cfg.peers.len == 0) {
+            for (0..election_max + 1) |_| {
+                try raft_node.tick(&raft_log, &outputs);
+                outputs.clearRetainingCapacity();
+                if (raft_node.role == .leader) break;
+            }
         }
 
         // Create data partition logs
