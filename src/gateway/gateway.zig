@@ -117,6 +117,16 @@ const SnapshotWriterCtx = struct {
     next_seq: *sequencer_mod.Seq,
 };
 
+/// Context for the post-snapshot truncation hook. Stable once set in init.
+const TruncateCtx = struct { gateway: *Gateway };
+
+fn postSnapshotImpl(ptr: *anyopaque, snapshot_seq: sequencer_mod.Seq) void {
+    const ctx: *TruncateCtx = @ptrCast(@alignCast(ptr));
+    const gw = ctx.gateway;
+    if (snapshot_seq > gw.durable_snapshot_seq) gw.durable_snapshot_seq = snapshot_seq;
+    gw.truncateLog() catch {};
+}
+
 fn snapshotLogWriteImpl(ptr: *anyopaque, manifest_key: []const u8, seq: u64, partition_id: u32, alloc: std.mem.Allocator) anyerror!void {
     const ctx: *SnapshotWriterCtx = @ptrCast(@alignCast(ptr));
     const payload = storage_mod.SnapshotMarkerPayload{
@@ -159,6 +169,10 @@ pub const Gateway = struct {
     s3_store: ?*storage_mod.S3ObjectStore = null,
     /// Per-partition context structs for snapshot log writers. Freed in deinit.
     snapshot_writer_ctxs: []SnapshotWriterCtx = &.{},
+    /// Highest seq for which a snapshot has been durably uploaded. Updated by postSnapshotImpl.
+    durable_snapshot_seq: sequencer_mod.Seq = 0,
+    /// Stable context for the post-snapshot truncation hook. Initialized in init.
+    truncate_ctx: TruncateCtx = undefined,
     /// Last error detail set by gateway operations (table/column context).
     /// Reset at the start of each operation that may set it.
     error_detail: [256]u8 = undefined,
@@ -240,6 +254,8 @@ pub const Gateway = struct {
         gw.partitioned = .{ .partitions = storages, .alloc = alloc };
         gw.s3_store = null;
         gw.snapshot_writer_ctxs = &.{};
+        gw.durable_snapshot_seq = 0;
+        gw.truncate_ctx = .{ .gateway = gw };
 
         // Wire S3 tiered storage when credentials are provided.
         if (opts.s3_access_key.len > 0 and opts.s3_bucket.len > 0) {
@@ -307,6 +323,10 @@ pub const Gateway = struct {
                             .writeFn = &snapshotLogWriteImpl,
                         },
                         .partition_id = @intCast(i),
+                        .post_snapshot = .{
+                            .ptr = &gw.truncate_ctx,
+                            .hookFn = &postSnapshotImpl,
+                        },
                     });
                 }
             }
@@ -350,6 +370,21 @@ pub const Gateway = struct {
         if (self.s3_store) |s3| self.alloc.destroy(s3);
         if (self.snapshot_writer_ctxs.len > 0) self.alloc.free(self.snapshot_writer_ctxs);
         self.alloc.destroy(self);
+    }
+
+    /// Truncate sealed log segments that predate the durable snapshot.
+    /// Safe point is min(durable_snapshot_seq, min CDC cursor across all subscribers).
+    /// Errors are swallowed — truncation is best-effort and does not affect correctness.
+    pub fn truncateLog(self: *Gateway) !void {
+        var safe_seq = self.durable_snapshot_seq;
+        if (safe_seq == 0) return;
+        for (self.cdc.subscriptions.items) |sub| {
+            if (sub.cursor < safe_seq) safe_seq = sub.cursor;
+        }
+        for (self.sequencer.partition_logs) |*log| {
+            log.notifySnapshot(safe_seq);
+            try log.truncate_prefix(safe_seq);
+        }
     }
 
     /// Returns true if the registered query is a pure SELECT (no mutations).

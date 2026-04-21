@@ -4,7 +4,7 @@ Spec: `foldb-spec.md` | Plan: `PLAN.md`
 
 ## Current Focus
 
-**Next up:** Prompt 10 — Log truncation after durable snapshot
+**Next up:** Prompt 11 — CDC subscription hardening (next/ack/gap-free)
 
 ---
 
@@ -20,7 +20,7 @@ Spec: `foldb-spec.md` | Plan: `PLAN.md`
 | M6 | Gateway | §9 | ✅ Done |
 | M7 | Sequencer + multi-partition log | §8 | 🟡 Multi-node Raft works; dynamic reconfig not implemented |
 | M8 | Multi-partition execution | §7.3 | 🟡 Dataflow exists; not network-tested |
-| M9 | Tiered storage | §6.7, §13 | 🟡 S3 wired into gateway; snapshot scheduling + log truncation pending |
+| M9 | Tiered storage | §6.7, §13 | ✅ Done (S3 wired; snapshot scheduling + log truncation implemented) |
 | M10 | CDC | §12 | 🟡 Manager + before-images; delivery not hardened |
 | M11 | Specialty indexes | §11 | 🟡 HNSW + JSON done; ANN queries not wired |
 | M12 | Operations | §13 | 🔴 No config, no auth, no reconfig API |
@@ -39,7 +39,7 @@ Spec: `foldb-spec.md` | Plan: `PLAN.md`
 - [ ] **Prompt 7** — Auth enforcement
 - [x] **Prompt 8** — Wire S3ObjectStore into Gateway
 - [x] **Prompt 9** — Snapshot scheduling + snapshot_marker log entry
-- [ ] **Prompt 10** — Log truncation after durable snapshot
+- [x] **Prompt 10** — Log truncation after durable snapshot
 - [ ] **Prompt 11** — CDC subscription hardening (next/ack/gap-free)
 - [ ] **Prompt 12** — HNSW ANN queries wired into SQL executor
 - [ ] **Prompt 13** — Full DST suite (10k seeds, kill-9, snapshot round-trip)

@@ -110,6 +110,49 @@ test "snapshot_marker is written to partition log after interval" {
     try testing.expect(found_marker);
 }
 
+test "durable_snapshot_seq advances after snapshot fires" {
+    const alloc = testing.allocator;
+    const dir = try makeTempDir();
+    defer alloc.free(dir);
+    defer removeDirRecursive(dir);
+
+    var obj_store = storage_mod.MemoryObjectStore.init(alloc);
+    defer obj_store.deinit();
+
+    const gw = try Gateway.init(dir, alloc, .{
+        .snapshot_interval_entries = 3,
+        .snapshot_store = obj_store.objectStore(),
+    });
+    defer gw.deinit();
+
+    try gw.applyDdl("CREATE TABLE items (id STRING NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
+
+    const insert_hash = blk: {
+        const res = try gw.register("INSERT INTO items (id, val) VALUES ($1, $2)");
+        break :blk res.hash;
+    };
+
+    // Before any inserts, no snapshot has fired.
+    try testing.expectEqual(@as(u64, 0), gw.durable_snapshot_seq);
+
+    // Insert enough rows to trigger the snapshot (interval = 3).
+    for (0..4) |i| {
+        const id_str = try std.fmt.allocPrint(alloc, "row{d}", .{i});
+        defer alloc.free(id_str);
+        const params = [_]ColumnValue{
+            .{ .string = id_str },
+            .{ .int64 = @intCast(i) },
+        };
+        _ = try gw.execute(std.testing.io, insert_hash, &params, &.{});
+    }
+
+    // Hook must have advanced durable_snapshot_seq.
+    try testing.expect(gw.durable_snapshot_seq > 0);
+
+    // truncateLog must be idempotent when called again (no sealed segments to remove).
+    try gw.truncateLog();
+}
+
 test "no snapshot_marker when snapshot_store is not configured" {
     const alloc = testing.allocator;
     const dir = try makeTempDir();
