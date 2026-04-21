@@ -226,6 +226,26 @@ pub fn build(b: *std.Build) void {
     const raft_cluster_tests = b.addTest(.{ .root_module = raft_cluster_test_module });
     const run_raft_cluster_tests = b.addRunArtifact(raft_cluster_tests);
 
+    // Raft TCP transport tests
+    const raft_transport_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/raft/transport_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    raft_transport_test_module.addImport("raft.zig", raft_module);
+    const raft_transport_tests = b.addTest(.{ .root_module = raft_transport_test_module });
+    const run_raft_transport_tests = b.addRunArtifact(raft_transport_tests);
+
+    // Raft TCP transport DST tests
+    const raft_tcp_dst_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/raft/tcp_dst_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    raft_tcp_dst_test_module.addImport("raft.zig", raft_module);
+    const raft_tcp_dst_tests = b.addTest(.{ .root_module = raft_tcp_dst_test_module });
+    const run_raft_tcp_dst_tests = b.addRunArtifact(raft_tcp_dst_tests);
+
     // Linearizability tests
     const raft_linear_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/raft/linearizability_test.zig"),
@@ -1094,6 +1114,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_log_durability_tests.step);
     test_step.dependOn(&run_raft_rpc_tests.step);
     test_step.dependOn(&run_raft_node_tests.step);
+    test_step.dependOn(&run_raft_transport_tests.step);
     test_step.dependOn(&run_storage_codec_tests.step);
     test_step.dependOn(&run_storage_block_tests.step);
     test_step.dependOn(&run_storage_sstable_tests.step);
@@ -1139,6 +1160,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_net_codec_tests.step);
     test_step.dependOn(&run_errors_tests.step);
     test_step.dependOn(&run_config_tests.step);
+    test_step.dependOn(&run_raft_tcp_dst_tests.step);
 
     // Raft consensus seed sweep executable
     const dst_sweep_module = b.createModule(.{
@@ -1176,4 +1198,5 @@ pub fn build(b: *std.Build) void {
     dst_step.dependOn(&run_sim_txn_dst_tests.step);
     dst_step.dependOn(&run_sim_subquery_dst_tests.step);
     dst_step.dependOn(&run_sim_occ_dst_tests.step);
+    dst_step.dependOn(&run_raft_tcp_dst_tests.step);
 }
