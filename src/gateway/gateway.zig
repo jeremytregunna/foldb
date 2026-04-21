@@ -144,6 +144,7 @@ pub const Gateway = struct {
         rand: RandSource = .{},
         disk_fault: ?storage_mod.DiskFaultHook = null,
         partition_count: u32 = 1,
+        node_id: u64 = 1,
     };
 
     /// Initialize and heap-allocate a Gateway. Caller owns the pointer; call `deinit` to free.
@@ -200,7 +201,7 @@ pub const Gateway = struct {
 
         const seq_cfg = sequencer_mod.Config{
             .partition_count = opts.partition_count,
-            .node_id = 1,
+            .node_id = opts.node_id,
         };
         gw.sequencer = try sequencer_mod.Sequencer.init(storage_dir, seq_cfg, alloc);
         errdefer gw.sequencer.deinit();

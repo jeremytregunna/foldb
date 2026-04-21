@@ -609,6 +609,23 @@ pub fn build(b: *std.Build) void {
     // Wire sequencer into lib.zig now that it exists
     lib_module.addImport("sequencer.zig", sequencer_module);
 
+    // Config module
+    const config_module = b.createModule(.{
+        .root_source_file = b.path("src/config/config.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Config tests
+    const config_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/config/config_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    config_test_module.addImport("config.zig", config_module);
+    const config_tests = b.addTest(.{ .root_module = config_test_module });
+    const run_config_tests = b.addRunArtifact(config_tests);
+
     // Errors module (centralized human-readable error messages)
     const errors_module = b.createModule(.{
         .root_source_file = b.path("src/errors.zig"),
@@ -646,6 +663,7 @@ pub fn build(b: *std.Build) void {
     gateway_module.addImport("types.zig", executor_module);
     gateway_module.addImport("cdc.zig", cdc_module);
     gateway_module.addImport("errors.zig", errors_module);
+    gateway_module.addImport("config.zig", config_module);
 
     // Sim transaction DST test
     const sim_txn_dst_test_module = b.createModule(.{
@@ -769,6 +787,7 @@ pub fn build(b: *std.Build) void {
     // Wire gateway + server into the main binary
     main_module.addImport("gateway.zig", gateway_module);
     main_module.addImport("server.zig", net_server_module);
+    main_module.addImport("config.zig", config_module);
 
     // Client library
     const client_module = b.createModule(.{
@@ -1118,6 +1137,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_net_frame_tests.step);
     test_step.dependOn(&run_net_codec_tests.step);
     test_step.dependOn(&run_errors_tests.step);
+    test_step.dependOn(&run_config_tests.step);
 
     // Raft consensus seed sweep executable
     const dst_sweep_module = b.createModule(.{

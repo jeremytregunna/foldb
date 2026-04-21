@@ -1,27 +1,50 @@
 const std = @import("std");
 const gateway_mod = @import("gateway.zig");
 const server = @import("server.zig");
+const config_mod = @import("config.zig");
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
 
-    var storage_dir: []const u8 = "/tmp/foldb-data";
-    var port: u16 = 7432;
+    var config_path: ?[]const u8 = null;
+    var storage_dir_override: ?[]const u8 = null;
+    var port_override: ?u16 = null;
 
     var it = std.process.Args.Iterator.init(init.minimal.args);
     _ = it.skip(); // skip argv[0]
     while (it.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--storage-dir")) {
-            if (it.next()) |val| storage_dir = val;
+        if (std.mem.eql(u8, arg, "--config")) {
+            if (it.next()) |val| config_path = val;
+        } else if (std.mem.eql(u8, arg, "--storage-dir")) {
+            if (it.next()) |val| storage_dir_override = val;
         } else if (std.mem.eql(u8, arg, "--port")) {
-            if (it.next()) |val| port = try std.fmt.parseInt(u16, val, 10);
+            if (it.next()) |val| port_override = try std.fmt.parseInt(u16, val, 10);
         }
     }
 
-    std.debug.print("foldb starting: storage={s} port={d}\n", .{ storage_dir, port });
+    var parsed: ?config_mod.ParsedConfig = null;
+    defer if (parsed) |*p| p.deinit();
 
-    const gw = try gateway_mod.Gateway.init(storage_dir, alloc, .{});
+    const cfg: config_mod.Config = if (config_path) |path| blk: {
+        parsed = try config_mod.fromFile(path, alloc);
+        break :blk parsed.?.value;
+    } else config_mod.Config{};
+
+    const storage_dir = storage_dir_override orelse cfg.storage_dir;
+    const port = port_override orelse cfg.listen_port;
+
+    std.debug.print("foldb starting: storage={s} port={d} node_id={d} partitions={d}\n", .{
+        storage_dir,
+        port,
+        cfg.node_id,
+        cfg.partition_count,
+    });
+
+    const gw = try gateway_mod.Gateway.init(storage_dir, alloc, .{
+        .partition_count = cfg.partition_count,
+        .node_id = cfg.node_id,
+    });
     defer gw.deinit();
 
     try server.serve(io, port, gw, alloc);
