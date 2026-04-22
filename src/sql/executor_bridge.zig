@@ -1468,4 +1468,3 @@ fn buildReturningResultSet(
         .alloc = alloc,
     };
 }
-

@@ -1081,8 +1081,14 @@ fn evalLiteralExpr(expr: *const sql_mod.plan.PlanExpr, params: []const ColumnVal
 fn encodeLiteralKey(expr: *const sql_mod.plan.PlanExpr, params: []const ColumnValue, alloc: std.mem.Allocator) ?[]const u8 {
     const val = evalLiteralExpr(expr, params) orelse return null;
     var buf: std.ArrayList(u8) = .empty;
-    sql_mod.key_encode.encodeKeyComponent(&buf, val, alloc) catch { buf.deinit(alloc); return null; };
-    return buf.toOwnedSlice(alloc) catch { buf.deinit(alloc); return null; };
+    sql_mod.key_encode.encodeKeyComponent(&buf, val, alloc) catch {
+        buf.deinit(alloc);
+        return null;
+    };
+    return buf.toOwnedSlice(alloc) catch {
+        buf.deinit(alloc);
+        return null;
+    };
 }
 
 /// Try to build the encoded primary key for a row in an INSERT VALUES clause.
@@ -1104,11 +1110,23 @@ fn extractInsertRowKey(
             buf.deinit(alloc);
             return null;
         };
-        if (idx >= row_exprs.len) { buf.deinit(alloc); return null; }
-        const val = evalLiteralExpr(row_exprs[idx], params) orelse { buf.deinit(alloc); return null; };
-        sql_mod.key_encode.encodeKeyComponent(&buf, val, alloc) catch { buf.deinit(alloc); return null; };
+        if (idx >= row_exprs.len) {
+            buf.deinit(alloc);
+            return null;
+        }
+        const val = evalLiteralExpr(row_exprs[idx], params) orelse {
+            buf.deinit(alloc);
+            return null;
+        };
+        sql_mod.key_encode.encodeKeyComponent(&buf, val, alloc) catch {
+            buf.deinit(alloc);
+            return null;
+        };
     }
-    return buf.toOwnedSlice(alloc) catch { buf.deinit(alloc); return null; };
+    return buf.toOwnedSlice(alloc) catch {
+        buf.deinit(alloc);
+        return null;
+    };
 }
 
 /// Collect write partitions for an INSERT plan.

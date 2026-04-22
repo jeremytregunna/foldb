@@ -85,7 +85,10 @@ const TestCluster = struct {
 /// Build a 3-node cluster wired over TCP loopback with OS-assigned ports.
 fn initCluster(tag: []const u8, alloc: std.mem.Allocator) !TestCluster {
     const base = try makeTempDir(tag);
-    errdefer { removeDirRecursive(base); alloc.free(base); }
+    errdefer {
+        removeDirRecursive(base);
+        alloc.free(base);
+    }
 
     // Create the base directory so node subdirs can be mkdir'd inside it.
     {
@@ -176,7 +179,9 @@ test "3-node TCP cluster: leader election" {
 
     // Exactly one leader.
     var leader_count: usize = 0;
-    for (&tc.nodes) |*n| { if (n.isLeader()) leader_count += 1; }
+    for (&tc.nodes) |*n| {
+        if (n.isLeader()) leader_count += 1;
+    }
     try testing.expectEqual(@as(usize, 1), leader_count);
 }
 
@@ -230,7 +235,10 @@ test "3-node TCP cluster: multiple entries replicate in order" {
         for (&tc.nodes) |*n| {
             if (n.commitIndex() >= last_seq) committed += 1;
         }
-        if (committed >= 2) { majority_committed = true; break; }
+        if (committed >= 2) {
+            majority_committed = true;
+            break;
+        }
     }
     try testing.expect(majority_committed);
 }

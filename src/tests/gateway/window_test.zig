@@ -281,7 +281,7 @@ test "LAST_VALUE: returns last value in partition" {
     try insertSale(s.gw, 3, 10, 300);
 
     const q = (try s.gw.register(
-        "SELECT id, LAST_VALUE(amount) OVER (PARTITION BY dept ORDER BY id) FROM sales",
+        "SELECT id, LAST_VALUE(amount) OVER (PARTITION BY dept ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM sales",
     )).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
     defer rs.deinit();
@@ -301,7 +301,7 @@ test "LAST_VALUE: partitioned — each dept sees its own last" {
     try insertSale(s.gw, 4, 20, 60);
 
     const q = (try s.gw.register(
-        "SELECT id, LAST_VALUE(amount) OVER (PARTITION BY dept ORDER BY id) FROM sales",
+        "SELECT id, LAST_VALUE(amount) OVER (PARTITION BY dept ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM sales",
     )).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
     defer rs.deinit();
@@ -325,7 +325,7 @@ test "NTH_VALUE: returns Nth value in partition (1-indexed)" {
     try insertSale(s.gw, 3, 10, 300);
 
     const q = (try s.gw.register(
-        "SELECT id, NTH_VALUE(amount, 2) OVER (PARTITION BY dept ORDER BY id) FROM sales",
+        "SELECT id, NTH_VALUE(amount, 2) OVER (PARTITION BY dept ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM sales",
     )).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
     defer rs.deinit();

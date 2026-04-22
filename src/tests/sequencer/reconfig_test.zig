@@ -65,7 +65,10 @@ fn initSingleNode(dir: []const u8, alloc: std.mem.Allocator) !Sequencer {
 test "addNode: returns NotLeader when called on a non-leader" {
     const alloc = testing.allocator;
     const dir = try makeTempDir("add_notleader");
-    defer { removeDirRecursive(dir); alloc.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        alloc.free(dir);
+    }
 
     // Two-peer config: node 1 knows about node 2, so it won't self-elect.
     const peers = [_]sequencer_mod.PeerAddr{
@@ -90,7 +93,10 @@ test "addNode: returns NotLeader when called on a non-leader" {
 test "addNode: leader stages config change and registers transport peer" {
     const alloc = testing.allocator;
     const dir = try makeTempDir("add_leader");
-    defer { removeDirRecursive(dir); alloc.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        alloc.free(dir);
+    }
 
     var seq = try initSingleNode(dir, alloc);
     defer seq.deinit();
@@ -111,7 +117,10 @@ test "addNode: leader stages config change and registers transport peer" {
 test "addNode: second call while config change is in flight returns ConfigChangeInProgress" {
     const alloc = testing.allocator;
     const dir = try makeTempDir("add_inflight");
-    defer { removeDirRecursive(dir); alloc.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        alloc.free(dir);
+    }
 
     var seq = try initSingleNode(dir, alloc);
     defer seq.deinit();
@@ -125,7 +134,10 @@ test "addNode: second call while config change is in flight returns ConfigChange
 test "removeNode: leader stages remove config change" {
     const alloc = testing.allocator;
     const dir = try makeTempDir("remove_leader");
-    defer { removeDirRecursive(dir); alloc.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        alloc.free(dir);
+    }
 
     // Start with a two-peer config so there is a peer to remove.
     // Node 1 self-elects (no real peer at the placeholder address).
@@ -156,7 +168,10 @@ test "removeNode: leader stages remove config change" {
 test "removeNode: returns NotLeader when called on a non-leader" {
     const alloc = testing.allocator;
     const dir = try makeTempDir("remove_notleader");
-    defer { removeDirRecursive(dir); alloc.free(dir); }
+    defer {
+        removeDirRecursive(dir);
+        alloc.free(dir);
+    }
 
     const peers = [_]sequencer_mod.PeerAddr{
         .{ .id = 2, .addr = "127.0.0.1:1" },

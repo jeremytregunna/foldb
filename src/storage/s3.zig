@@ -522,7 +522,10 @@ test "extractBody: no separator returns empty" {
 test "parseXmlKeys: single key" {
     const xml = "<ListBucketResult><Contents><Key>foo/bar.bin</Key></Contents></ListBucketResult>";
     const keys = try parseXmlKeys(xml, testing.allocator);
-    defer { for (keys) |k| testing.allocator.free(k); testing.allocator.free(keys); }
+    defer {
+        for (keys) |k| testing.allocator.free(k);
+        testing.allocator.free(keys);
+    }
     try testing.expectEqual(@as(usize, 1), keys.len);
     try testing.expectEqualStrings("foo/bar.bin", keys[0]);
 }
@@ -530,7 +533,10 @@ test "parseXmlKeys: single key" {
 test "parseXmlKeys: multiple keys" {
     const xml = "<ListBucketResult><Contents><Key>a</Key></Contents><Contents><Key>b</Key></Contents></ListBucketResult>";
     const keys = try parseXmlKeys(xml, testing.allocator);
-    defer { for (keys) |k| testing.allocator.free(k); testing.allocator.free(keys); }
+    defer {
+        for (keys) |k| testing.allocator.free(k);
+        testing.allocator.free(keys);
+    }
     try testing.expectEqual(@as(usize, 2), keys.len);
     try testing.expectEqualStrings("a", keys[0]);
     try testing.expectEqualStrings("b", keys[1]);

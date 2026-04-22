@@ -226,12 +226,29 @@ pub const AssertPlan = struct {
     message: []const u8,
 };
 
+pub const FrameMode = enum { rows, range };
+
+pub const FrameBound = union(enum) {
+    unbounded_preceding,
+    preceding: *PlanExpr,
+    current_row,
+    following: *PlanExpr,
+    unbounded_following,
+};
+
+pub const FrameSpec = struct {
+    mode: FrameMode,
+    start: FrameBound,
+    end: FrameBound,
+};
+
 pub const WindowFnSpec = struct {
     fn_name: []const u8,
     args: []const *PlanExpr,
     partition_by: []const *PlanExpr,
     order_by: []const SortKey,
     result_col: u32,
+    frame: ?FrameSpec,
 };
 
 pub const WindowNode = struct {
@@ -726,12 +743,21 @@ pub const Planner = struct {
                                     .nulls_first = ob.nulls_first orelse !ob.asc,
                                 });
                             }
+                            const frame: ?FrameSpec = if (wf.window.frame) |f| .{
+                                .mode = switch (f.mode) {
+                                    .rows => .rows,
+                                    .range => .range,
+                                },
+                                .start = try self.planFrameBound(f.start),
+                                .end = try self.planFrameBound(f.end),
+                            } else null;
                             try win_specs.append(self.arena, .{
                                 .fn_name = wf.call.name,
                                 .args = try args_pe.toOwnedSlice(self.arena),
                                 .partition_by = try pb_pe.toOwnedSlice(self.arena),
                                 .order_by = try ob_keys.toOwnedSlice(self.arena),
                                 .result_col = pos,
+                                .frame = frame,
                             });
                             try self.window_fn_cols.append(self.arena, .{
                                 .fn_name = wf.call.name,
@@ -1152,6 +1178,16 @@ pub const Planner = struct {
             .on_condition = on_condition,
             .target_width = target_width,
             .whens = try whens.toOwnedSlice(self.arena),
+        };
+    }
+
+    fn planFrameBound(self: *Planner, b: ast.WindowFrame.Bound) PlanError!FrameBound {
+        return switch (b) {
+            .unbounded_preceding => .unbounded_preceding,
+            .current_row => .current_row,
+            .unbounded_following => .unbounded_following,
+            .preceding => |e| .{ .preceding = try self.planExpr(e) },
+            .following => |e| .{ .following = try self.planExpr(e) },
         };
     }
 

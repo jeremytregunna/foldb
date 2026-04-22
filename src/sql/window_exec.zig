@@ -12,6 +12,151 @@ const evalExpr = eval_expr_mod.evalExpr;
 const planValueToColumnValue = type_conv.planValueToColumnValue;
 const aggKeyEquals = type_conv.aggKeyEquals;
 
+// ---------------------------------------------------------------------------
+// Frame helpers
+// ---------------------------------------------------------------------------
+
+/// Returns true when the ORDER BY keys of two rows (by sorted-array index) are equal.
+fn orderKeysEqual(
+    a_sorted_pos: usize,
+    b_sorted_pos: usize,
+    sorted: []const usize,
+    rows: []const []const ?ColumnValue,
+    order_by: []const plan_mod.SortKey,
+    ctx: EvalCtx,
+) bool {
+    if (order_by.len == 0) return true;
+    var ctx_a = ctx;
+    var ctx_b = ctx;
+    ctx_a.row = rows[sorted[a_sorted_pos]];
+    ctx_b.row = rows[sorted[b_sorted_pos]];
+    for (order_by) |sk| {
+        const va = evalExpr(sk.expr, ctx_a) catch return false;
+        const vb = evalExpr(sk.expr, ctx_b) catch return false;
+        if (!va.eql(vb)) return false;
+    }
+    return true;
+}
+
+/// For RANGE CURRENT ROW as a start bound: first sorted position whose ORDER BY
+/// key equals that of `pos`.
+fn rangeCurrentRowStart(
+    pos: usize,
+    sorted: []const usize,
+    rows: []const []const ?ColumnValue,
+    order_by: []const plan_mod.SortKey,
+    ctx: EvalCtx,
+) usize {
+    var i: usize = pos;
+    while (i > 0 and orderKeysEqual(i - 1, pos, sorted, rows, order_by, ctx)) {
+        i -= 1;
+    }
+    return i;
+}
+
+/// For RANGE CURRENT ROW as an end bound: last sorted position whose ORDER BY
+/// key equals that of `pos`.
+fn rangeCurrentRowEnd(
+    pos: usize,
+    sorted: []const usize,
+    rows: []const []const ?ColumnValue,
+    order_by: []const plan_mod.SortKey,
+    ctx: EvalCtx,
+) usize {
+    var i: usize = pos;
+    while (i + 1 < sorted.len and orderKeysEqual(i + 1, pos, sorted, rows, order_by, ctx)) {
+        i += 1;
+    }
+    return i;
+}
+
+/// Resolve a single frame bound to a sorted-array index (inclusive).
+/// `is_start` distinguishes start vs. end for RANGE CURRENT ROW peer-group logic.
+fn resolveFrameBound(
+    bound: plan_mod.FrameBound,
+    mode: plan_mod.FrameMode,
+    pos: usize,
+    sorted: []const usize,
+    rows: []const []const ?ColumnValue,
+    order_by: []const plan_mod.SortKey,
+    ctx: EvalCtx,
+    is_start: bool,
+) usize {
+    const last = if (sorted.len > 0) sorted.len - 1 else 0;
+    return switch (bound) {
+        .unbounded_preceding => 0,
+        .unbounded_following => last,
+        .current_row => switch (mode) {
+            .rows => pos,
+            .range => if (is_start)
+                rangeCurrentRowStart(pos, sorted, rows, order_by, ctx)
+            else
+                rangeCurrentRowEnd(pos, sorted, rows, order_by, ctx),
+        },
+        .preceding => |e| switch (mode) {
+            .rows => blk: {
+                var row_ctx = ctx;
+                row_ctx.row = rows[sorted[pos]];
+                const v = evalExpr(e, row_ctx) catch break :blk pos;
+                const offset: usize = switch (v) {
+                    .int_val => |n| if (n >= 0) @as(usize, @intCast(n)) else 0,
+                    else => break :blk pos,
+                };
+                break :blk if (pos >= offset) pos - offset else 0;
+            },
+            // Offset RANGE requires type-specific arithmetic on the ORDER BY key;
+            // fall back to CURRENT ROW semantics until implemented.
+            .range => rangeCurrentRowStart(pos, sorted, rows, order_by, ctx),
+        },
+        .following => |e| switch (mode) {
+            .rows => blk: {
+                var row_ctx = ctx;
+                row_ctx.row = rows[sorted[pos]];
+                const v = evalExpr(e, row_ctx) catch break :blk pos;
+                const offset: usize = switch (v) {
+                    .int_val => |n| if (n >= 0) @as(usize, @intCast(n)) else 0,
+                    else => break :blk pos,
+                };
+                const result = pos + offset;
+                break :blk @min(result, last);
+            },
+            .range => rangeCurrentRowEnd(pos, sorted, rows, order_by, ctx),
+        },
+    };
+}
+
+/// Compute the inclusive [start, end] frame bounds for a given sorted position.
+///
+/// Default frames (SQL standard):
+///   - ORDER BY present, no explicit frame → RANGE UNBOUNDED PRECEDING TO CURRENT ROW
+///   - No ORDER BY, no explicit frame      → ROWS UNBOUNDED PRECEDING TO UNBOUNDED FOLLOWING
+fn computeFrameBounds(
+    frame: ?plan_mod.FrameSpec,
+    pos: usize,
+    sorted: []const usize,
+    rows: []const []const ?ColumnValue,
+    order_by: []const plan_mod.SortKey,
+    ctx: EvalCtx,
+) struct { start: usize, end: usize } {
+    const last = if (sorted.len > 0) sorted.len - 1 else 0;
+    if (frame == null) {
+        if (order_by.len > 0) {
+            // Default: RANGE UNBOUNDED PRECEDING TO CURRENT ROW
+            return .{ .start = 0, .end = rangeCurrentRowEnd(pos, sorted, rows, order_by, ctx) };
+        } else {
+            return .{ .start = 0, .end = last };
+        }
+    }
+    const f = frame.?;
+    const s = resolveFrameBound(f.start, f.mode, pos, sorted, rows, order_by, ctx, true);
+    const e = resolveFrameBound(f.end, f.mode, pos, sorted, rows, order_by, ctx, false);
+    return .{ .start = @min(s, last), .end = @min(e, last) };
+}
+
+// ---------------------------------------------------------------------------
+// Main entry point
+// ---------------------------------------------------------------------------
+
 pub fn computeWindowFnForAll(
     wf: plan_mod.WindowFnSpec,
     rows: []const []const ?ColumnValue,
@@ -190,45 +335,57 @@ pub fn computeWindowFnForAll(
             }
         } else if (std.ascii.eqlIgnoreCase(wf.fn_name, "first_value")) {
             if (sorted.len == 0 or wf.args.len == 0) continue;
-            var row_ctx = ctx;
-            row_ctx.row = rows[sorted[0]];
-            const v = evalExpr(wf.args[0], row_ctx) catch continue;
-            const cv = planValueToColumnValue(v, ctx.alloc) catch null;
-            for (sorted) |ri| {
-                results[ri][fn_idx] = if (cv) |c| c.dupe(ctx.alloc) catch null else null;
+            for (sorted, 0..) |ri, pos| {
+                const bounds = computeFrameBounds(wf.frame, pos, sorted, rows, wf.order_by, ctx);
+                if (bounds.start > bounds.end) {
+                    results[ri][fn_idx] = null;
+                    continue;
+                }
+                var row_ctx = ctx;
+                row_ctx.row = rows[sorted[bounds.start]];
+                const v = evalExpr(wf.args[0], row_ctx) catch continue;
+                results[ri][fn_idx] = planValueToColumnValue(v, ctx.alloc) catch null;
             }
-            if (cv) |c| c.freeIfOwned(ctx.alloc);
         } else if (std.ascii.eqlIgnoreCase(wf.fn_name, "last_value")) {
             if (sorted.len == 0 or wf.args.len == 0) continue;
-            var row_ctx = ctx;
-            row_ctx.row = rows[sorted[sorted.len - 1]];
-            const v = evalExpr(wf.args[0], row_ctx) catch continue;
-            const cv = planValueToColumnValue(v, ctx.alloc) catch null;
-            for (sorted) |ri| {
-                results[ri][fn_idx] = if (cv) |c| c.dupe(ctx.alloc) catch null else null;
+            for (sorted, 0..) |ri, pos| {
+                const bounds = computeFrameBounds(wf.frame, pos, sorted, rows, wf.order_by, ctx);
+                if (bounds.start > bounds.end) {
+                    results[ri][fn_idx] = null;
+                    continue;
+                }
+                var row_ctx = ctx;
+                row_ctx.row = rows[sorted[bounds.end]];
+                const v = evalExpr(wf.args[0], row_ctx) catch continue;
+                results[ri][fn_idx] = planValueToColumnValue(v, ctx.alloc) catch null;
             }
-            if (cv) |c| c.freeIfOwned(ctx.alloc);
         } else if (std.ascii.eqlIgnoreCase(wf.fn_name, "nth_value")) {
             if (sorted.len == 0 or wf.args.len < 2) continue;
-            var row_ctx0 = ctx;
-            row_ctx0.row = rows[sorted[0]];
-            const n: usize = blk: {
-                const nv = evalExpr(wf.args[1], row_ctx0) catch break :blk 0;
-                break :blk switch (nv) {
-                    .int_val => |iv| if (iv >= 1) @as(usize, @intCast(iv - 1)) else 0,
-                    else => 0,
+            for (sorted, 0..) |ri, pos| {
+                const bounds = computeFrameBounds(wf.frame, pos, sorted, rows, wf.order_by, ctx);
+                if (bounds.start > bounds.end) {
+                    results[ri][fn_idx] = null;
+                    continue;
+                }
+                var row_ctx0 = ctx;
+                row_ctx0.row = rows[sorted[pos]];
+                const n: usize = blk: {
+                    const nv = evalExpr(wf.args[1], row_ctx0) catch break :blk 0;
+                    break :blk switch (nv) {
+                        .int_val => |iv| if (iv >= 1) @as(usize, @intCast(iv - 1)) else 0,
+                        else => 0,
+                    };
                 };
-            };
-            const cv: ?ColumnValue = if (n < sorted.len) blk: {
+                const frame_pos = bounds.start + n;
+                if (frame_pos > bounds.end) {
+                    results[ri][fn_idx] = null;
+                    continue;
+                }
                 var row_ctx = ctx;
-                row_ctx.row = rows[sorted[n]];
-                const v = evalExpr(wf.args[0], row_ctx) catch break :blk null;
-                break :blk planValueToColumnValue(v, ctx.alloc) catch null;
-            } else null;
-            for (sorted) |ri| {
-                results[ri][fn_idx] = if (cv) |c| c.dupe(ctx.alloc) catch null else null;
+                row_ctx.row = rows[sorted[frame_pos]];
+                const v = evalExpr(wf.args[0], row_ctx) catch continue;
+                results[ri][fn_idx] = planValueToColumnValue(v, ctx.alloc) catch null;
             }
-            if (cv) |c| c.freeIfOwned(ctx.alloc);
         }
         // Unknown window functions leave result as null
     }

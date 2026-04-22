@@ -97,7 +97,7 @@ const EAGAIN: isize = -11;
 const EWOULDBLOCK: isize = -11;
 
 const PeerConn = struct {
-    ip: u32,   // network byte order (big-endian)
+    ip: u32, // network byte order (big-endian)
     port: u16, // host byte order
     fd: std.posix.fd_t, // -1 = not connected
 };

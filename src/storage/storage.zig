@@ -233,7 +233,9 @@ pub const PartitionedStorage = struct {
             for (ms) |m| try merged.append(alloc, m);
         }
         std.sort.block(Match, merged.items, {}, struct {
-            fn lt(_: void, a: Match, b: Match) bool { return a.distance < b.distance; }
+            fn lt(_: void, a: Match, b: Match) bool {
+                return a.distance < b.distance;
+            }
         }.lt);
         if (merged.items.len > k) {
             for (merged.items[k..]) |m| alloc.free(m.pk);
