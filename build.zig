@@ -746,6 +746,29 @@ pub fn build(b: *std.Build) void {
     const sim_recovery_tests = b.addTest(.{ .root_module = sim_recovery_test_module });
     const run_sim_recovery_tests = b.addRunArtifact(sim_recovery_tests);
 
+    // Sim kill-9 mid-flush recovery test
+    const sim_kill9_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sim/kill9_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sim_kill9_test_module.addImport("sim.zig", sim_module);
+    sim_kill9_test_module.addImport("gateway.zig", gateway_module);
+    sim_kill9_test_module.addImport("storage.zig", storage_module);
+    const sim_kill9_tests = b.addTest(.{ .root_module = sim_kill9_test_module });
+    const run_sim_kill9_tests = b.addRunArtifact(sim_kill9_tests);
+
+    // Sim seed sweep DST (200 seeds × 20 ops determinism check)
+    const sim_sweep_dst_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sim/sweep_dst_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sim_sweep_dst_module.addImport("sim.zig", sim_module);
+    sim_sweep_dst_module.addImport("gateway.zig", gateway_module);
+    const sim_sweep_dst_tests = b.addTest(.{ .root_module = sim_sweep_dst_module });
+    const run_sim_sweep_dst_tests = b.addRunArtifact(sim_sweep_dst_tests);
+
     // Sim snapshot round-trip DST
     const sim_snapshot_dst_module = b.createModule(.{
         .root_source_file = b.path("src/tests/sim/snapshot_dst_test.zig"),
@@ -1259,4 +1282,6 @@ pub fn build(b: *std.Build) void {
     dst_step.dependOn(&run_sim_occ_dst_tests.step);
     dst_step.dependOn(&run_raft_tcp_dst_tests.step);
     dst_step.dependOn(&run_sim_snapshot_dst_tests.step);
+    dst_step.dependOn(&run_sim_kill9_tests.step);
+    dst_step.dependOn(&run_sim_sweep_dst_tests.step);
 }
