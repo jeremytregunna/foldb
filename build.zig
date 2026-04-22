@@ -803,6 +803,7 @@ pub fn build(b: *std.Build) void {
     net_conn_module.addImport("messages.zig", net_messages_module);
     net_conn_module.addImport("gateway.zig", gateway_module);
     net_conn_module.addImport("errors.zig", errors_module);
+    net_conn_module.addImport("config.zig", config_module);
 
     const net_server_module = b.createModule(.{
         .root_source_file = b.path("src/net/server.zig"),
@@ -812,6 +813,7 @@ pub fn build(b: *std.Build) void {
     net_server_module.addImport("frame.zig", net_frame_module);
     net_server_module.addImport("conn.zig", net_conn_module);
     net_server_module.addImport("gateway.zig", gateway_module);
+    net_server_module.addImport("config.zig", config_module);
 
     // Wire gateway + server into the main binary
     main_module.addImport("gateway.zig", gateway_module);

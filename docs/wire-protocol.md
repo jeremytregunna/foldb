@@ -268,9 +268,10 @@ Hello:  u8 server_version_len + version bytes + u8 auth_method_count + method by
 
 | Value | Name | Notes |
 |-------|------|-------|
-| `0x00` | None | No credentials. |
-| `0x01` | Plain | User + password. TLS required. |
-| `0x02` | Token | Bearer token. TLS required. |
+| `0x00` | None | No credentials. Accepted only in open mode (no users configured). |
+| `0x02` | Token | Bearer token derived via HMAC-SHA256. |
+
+`0x01` (Plain) is removed. Servers must not advertise it; clients must not send it. Auth failures use `Error(AuthFailed, Fatal)`.
 
 ### 8.3 Auth (C→S, stream 0)
 
@@ -279,14 +280,11 @@ Auth payload:
   method:                u8
   client_max_frame_size: u32   (effective S→C cap = min(server_max, client_max); 0xFFFFFFFF = no constraint)
 
-  // Plain: u8 user_len + user + u16 password_len + password
   // Token: u16 token_len + token
   // None:  (nothing)
 ```
 
 `client_max_frame_size` is present for all methods. The client is responsible for choosing a value large enough to receive any single row or CDC event; too-small values cause `Error(FrameTooLarge)` on the affected stream. On `FrameTooLarge` during CDC, the client may re-subscribe from `acked_seq + 1` after raising the cap.
-
-Server receiving Plain or Token over non-TLS → `Error(TlsRequired, Fatal)`, connection closed, credentials not inspected.
 
 ### 8.4 AuthOk (S→C, stream 0)
 
@@ -497,7 +495,7 @@ S→C  Y
      [TLS handshake]
 
 S→C  Hello  stream=0
-C→S  Auth   stream=0  Plain
+C→S  Auth   stream=0  Token
 S→C  AuthOk stream=0
 
 C→S  RegisterQuery  stream=1

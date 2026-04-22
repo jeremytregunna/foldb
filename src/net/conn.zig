@@ -7,6 +7,8 @@ const msg = @import("messages.zig");
 const gateway_mod = @import("gateway.zig");
 const errors = @import("errors.zig");
 
+const config_mod = @import("config.zig");
+
 const FrameHeader = frame.FrameHeader;
 const Kind = frame.Kind;
 const Flags = frame.Flags;
@@ -36,8 +38,10 @@ pub const Conn = struct {
     ddl_hashes: std.AutoHashMap([32]u8, void),
     alloc: std.mem.Allocator,
     gw: *gateway_mod.Gateway,
+    /// Registered users from config. Empty slice = open access.
+    users: []const config_mod.UserEntry,
 
-    fn init(fd: std.posix.fd_t, gw: *gateway_mod.Gateway, alloc: std.mem.Allocator) Conn {
+    fn init(fd: std.posix.fd_t, gw: *gateway_mod.Gateway, users: []const config_mod.UserEntry, alloc: std.mem.Allocator) Conn {
         return .{
             .fd = fd,
             .max_payload = frame.PRE_HELLO_CAP,
@@ -46,6 +50,7 @@ pub const Conn = struct {
             .ddl_hashes = std.AutoHashMap([32]u8, void).init(alloc),
             .alloc = alloc,
             .gw = gw,
+            .users = users,
         };
     }
 
@@ -114,10 +119,14 @@ pub const Conn = struct {
     fn sendHello(self: *Conn) !void {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(self.alloc);
-        const auth_methods = [_]u8{ 0x00, 0x01 }; // None, Plain
+        // Advertise token-only when users are configured; none+token when open.
+        const auth_methods: []const u8 = if (self.users.len > 0)
+            &[_]u8{0x02} // token only
+        else
+            &[_]u8{ 0x00, 0x02 }; // none, token
         try msg.encodeHello(&out, self.alloc, .{
             .server_version = SERVER_VERSION,
-            .auth_methods = &auth_methods,
+            .auth_methods = auth_methods,
             .max_frame_payload_size = frame.DEFAULT_MAX_PAYLOAD,
         });
         try frame.sendFrame(self.fd, 0, .hello, .none, null, out.items);
@@ -153,16 +162,25 @@ pub const Conn = struct {
         self.max_payload = effective;
         self.negotiated = true;
 
-        // Validate credentials
-        switch (auth.payload) {
-            .none => {}, // accepted
-            .plain => |p| {
-                // M13: accept any credentials (auth enforcement deferred)
-                _ = p;
+        // Validate credentials.
+        // When users list is empty the server is open: none and token both accepted.
+        // When users list is non-empty a matching token is required.
+        const auth_ok = switch (auth.payload) {
+            .none => self.users.len == 0,
+            .token => |t| blk: {
+                if (self.users.len == 0) break :blk true;
+                // Always scan every entry to avoid leaking which entry matched.
+                var matched = false;
+                for (self.users) |u| {
+                    if (tokenEql(t.token, u.token)) matched = true;
+                }
+                break :blk matched;
             },
-            .token => |t| {
-                _ = t;
-            },
+        };
+
+        if (!auth_ok) {
+            self.sendFatalError(.auth_failed, "authentication failed");
+            return error.ProtocolError;
         }
 
         // Send AuthOk (empty payload)
@@ -171,8 +189,8 @@ pub const Conn = struct {
 
     // ---- main dispatch loop ----
 
-    pub fn run(fd: std.posix.fd_t, gw: *gateway_mod.Gateway, alloc: std.mem.Allocator) !void {
-        var conn = Conn.init(fd, gw, alloc);
+    pub fn run(fd: std.posix.fd_t, gw: *gateway_mod.Gateway, users: []const config_mod.UserEntry, alloc: std.mem.Allocator) !void {
+        var conn = Conn.init(fd, gw, users, alloc);
         defer conn.deinit();
         defer _ = std.os.linux.close(@intCast(fd));
 
@@ -877,6 +895,17 @@ fn gatewayErrToCode(e: anyerror) msg.ErrorCode {
         error.SchemaBreakingChange => .schema_conflict,
         else => .server_error,
     };
+}
+
+/// Constant-time byte-slice equality. Returns false immediately when lengths
+/// differ (length is not secret — all valid tokens are 44 bytes), then XORs
+/// every byte pair without early exit to avoid timing sidechannels.
+fn tokenEql(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    var acc: u8 = 0;
+    for (a, b) |x, y| acc |= x ^ y;
+    // Branchless: produce 1 iff acc == 0.
+    return @as(bool, @bitCast(@as(u1, @truncate((@as(u9, acc) -% 1) >> 8))));
 }
 
 fn isDdl(sql: []const u8) bool {

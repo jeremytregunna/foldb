@@ -3,6 +3,7 @@ const std = @import("std");
 const frame = @import("frame.zig");
 const conn_mod = @import("conn.zig");
 const gateway_mod = @import("gateway.zig");
+const config_mod = @import("config.zig");
 
 /// Set by SIGINT/SIGTERM/SIGHUP handlers; polled in the accept loop to trigger clean shutdown.
 var shutdown_requested = std.atomic.Value(bool).init(false);
@@ -157,13 +158,14 @@ fn handleConn(
     io: std.Io,
     client_fd: std.posix.fd_t,
     gw: *gateway_mod.Gateway,
+    users: []const config_mod.UserEntry,
     alloc: std.mem.Allocator,
     registry: *ConnRegistry,
 ) !void {
     _ = io;
     registry.add(client_fd);
     defer registry.remove(client_fd);
-    try conn_mod.Conn.run(client_fd, gw, alloc);
+    try conn_mod.Conn.run(client_fd, gw, users, alloc);
 }
 
 /// Main server loop. Accepts connections and spawns a concurrent task per connection.
@@ -172,6 +174,7 @@ pub fn serve(
     io: std.Io,
     port: u16,
     gw: *gateway_mod.Gateway,
+    users: []const config_mod.UserEntry,
     alloc: std.mem.Allocator,
 ) !void {
     installSignalHandlers();
@@ -188,7 +191,7 @@ pub fn serve(
             if (shutdown_requested.load(.acquire)) break;
             continue;
         };
-        group.async(io, handleConn, .{ io, client_fd, gw, alloc, &registry });
+        group.async(io, handleConn, .{ io, client_fd, gw, users, alloc, &registry });
     }
 
     // Close all active client fds to unblock their blocking reads.

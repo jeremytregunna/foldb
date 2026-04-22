@@ -11,7 +11,6 @@ pub const Cursor = codec.Cursor;
 
 pub const AuthMethod = enum(u8) {
     none = 0x00,
-    plain = 0x01,
     token = 0x02,
     _,
 };
@@ -50,18 +49,12 @@ pub fn freeHello(h: Hello, alloc: std.mem.Allocator) void {
 
 // ---- Auth (C→S, stream 0) ----
 
-pub const AuthPlain = struct {
-    user: []const u8,
-    password: []const u8,
-};
-
 pub const AuthToken = struct {
     token: []const u8,
 };
 
 pub const AuthPayload = union(AuthMethod) {
     none: void,
-    plain: AuthPlain,
     token: AuthToken,
 };
 
@@ -76,12 +69,6 @@ pub fn encodeAuth(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, a:
     try appendU32Le(out, alloc, a.client_max_frame_size);
     switch (a.payload) {
         .none => {},
-        .plain => |p| {
-            try appendU8(out, alloc, @intCast(p.user.len));
-            try out.appendSlice(alloc, p.user);
-            try appendU16Le(out, alloc, @intCast(p.password.len));
-            try out.appendSlice(alloc, p.password);
-        },
         .token => |t| {
             try appendU16Le(out, alloc, @intCast(t.token.len));
             try out.appendSlice(alloc, t.token);
@@ -93,20 +80,12 @@ pub fn decodeAuth(cur: *Cursor, alloc: std.mem.Allocator) !Auth {
     const method_byte = try cur.readU8();
     const method_raw: AuthMethod = @enumFromInt(method_byte);
     const method = switch (method_raw) {
-        .none, .plain, .token => method_raw,
+        .none, .token => method_raw,
         _ => return error.ProtocolError,
     };
     const client_max = try cur.readU32Le();
     const payload: AuthPayload = switch (method) {
         .none => .none,
-        .plain => blk: {
-            const user = try cur.readU8LenPrefixedAlloc(alloc);
-            errdefer alloc.free(user);
-            const pw_len = try cur.readU16Le();
-            const pw_raw = try cur.readSlice(pw_len);
-            const pw = try alloc.dupe(u8, pw_raw);
-            break :blk .{ .plain = .{ .user = user, .password = pw } };
-        },
         .token => blk: {
             const tok_len = try cur.readU16Le();
             const tok_raw = try cur.readSlice(tok_len);
@@ -121,10 +100,6 @@ pub fn decodeAuth(cur: *Cursor, alloc: std.mem.Allocator) !Auth {
 pub fn freeAuth(a: Auth, alloc: std.mem.Allocator) void {
     switch (a.payload) {
         .none => {},
-        .plain => |p| {
-            alloc.free(p.user);
-            alloc.free(p.password);
-        },
         .token => |t| alloc.free(t.token),
     }
 }

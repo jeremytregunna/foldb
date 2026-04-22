@@ -27,7 +27,11 @@ test "Config: round-trip JSON" {
         \\  "s3_bucket": "foldb-backup",
         \\  "s3_access_key": "AKID",
         \\  "s3_secret_key": "SECRET",
-        \\  "users": ["alice", "bob"]
+        \\  "auth_secret": "mysecret",
+        \\  "users": [
+        \\    {"name": "alice", "token": "tok_alice"},
+        \\    {"name": "bob",   "token": "tok_bob"}
+        \\  ]
         \\}
     ;
 
@@ -51,9 +55,12 @@ test "Config: round-trip JSON" {
     try std.testing.expectEqualStrings("foldb-backup", cfg.s3_bucket);
     try std.testing.expectEqualStrings("AKID", cfg.s3_access_key);
     try std.testing.expectEqualStrings("SECRET", cfg.s3_secret_key);
+    try std.testing.expectEqualStrings("mysecret", cfg.auth_secret);
     try std.testing.expectEqual(@as(usize, 2), cfg.users.len);
-    try std.testing.expectEqualStrings("alice", cfg.users[0]);
-    try std.testing.expectEqualStrings("bob", cfg.users[1]);
+    try std.testing.expectEqualStrings("alice", cfg.users[0].name);
+    try std.testing.expectEqualStrings("tok_alice", cfg.users[0].token);
+    try std.testing.expectEqualStrings("bob", cfg.users[1].name);
+    try std.testing.expectEqualStrings("tok_bob", cfg.users[1].token);
 }
 
 test "Config: partial JSON uses defaults" {

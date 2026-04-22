@@ -1,5 +1,12 @@
 const std = @import("std");
 
+/// A user credential stored in the config. `token` is the HMAC-SHA256 of
+/// (name + ":" + password) under the server's auth_secret, base64-encoded.
+pub const UserEntry = struct {
+    name: []const u8,
+    token: []const u8,
+};
+
 pub const Config = struct {
     node_id: u64 = 1,
     storage_dir: []const u8 = "/var/lib/foldb",
@@ -15,7 +22,11 @@ pub const Config = struct {
     s3_bucket: []const u8 = "",
     s3_access_key: []const u8 = "",
     s3_secret_key: []const u8 = "",
-    users: []const []const u8 = &.{},
+    /// Server-side secret used only by the `add-user` CLI to derive tokens.
+    /// Never sent over the wire. Empty = no secret configured.
+    auth_secret: []const u8 = "",
+    /// Registered users. Empty = open access (no auth required).
+    users: []const UserEntry = &.{},
 };
 
 pub const ParsedConfig = struct {
@@ -135,14 +146,28 @@ pub fn fromSlice(json_text: []const u8, alloc: std.mem.Allocator) !ParsedConfig 
         .string => |s| try a.dupe(u8, s),
         else => return error.InvalidConfig,
     };
+    if (obj.get("auth_secret")) |v| cfg.auth_secret = switch (v) {
+        .string => |s| try a.dupe(u8, s),
+        else => return error.InvalidConfig,
+    };
     if (obj.get("users")) |v| switch (v) {
         .array => |arr| {
-            const users = try a.alloc([]const u8, arr.items.len);
+            const users = try a.alloc(UserEntry, arr.items.len);
             for (arr.items, 0..) |item, i| {
-                users[i] = switch (item) {
-                    .string => |s| try a.dupe(u8, s),
+                switch (item) {
+                    .object => |o| {
+                        const name = switch (o.get("name") orelse return error.InvalidConfig) {
+                            .string => |s| try a.dupe(u8, s),
+                            else => return error.InvalidConfig,
+                        };
+                        const token = switch (o.get("token") orelse return error.InvalidConfig) {
+                            .string => |s| try a.dupe(u8, s),
+                            else => return error.InvalidConfig,
+                        };
+                        users[i] = .{ .name = name, .token = token };
+                    },
                     else => return error.InvalidConfig,
-                };
+                }
             }
             cfg.users = users;
         },

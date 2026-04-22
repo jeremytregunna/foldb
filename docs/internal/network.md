@@ -82,7 +82,7 @@ Self-describing: a tag byte identifies the type, followed by fixed-width or leng
 - Does not implement compression — flag bit reserved, not yet enforced.
 - Does not pool or reuse connections on the server side — each connection is a one-shot task.
 - Does not retry failed requests.
-- Does not enforce authentication credentials — the auth protocol (Hello/Auth/AuthOk) is handled entirely within the network layer (`conn.zig`), but credential validation is currently deferred (all credentials accepted).
+- **Enforces authentication credentials** — `conn.zig` validates tokens against the configured user list during the `Auth` handshake step. If the server's `users` list is non-empty, a valid `Token` credential matching a known token is required; `None` auth is rejected. If the `users` list is empty, the server operates in open mode and accepts either `None` or `Token` (unvalidated). Failed auth sends `Error(AuthFailed, Fatal)` and closes the connection. The `Plain` auth method is not supported on the wire.
 
 ## Source Files
 
