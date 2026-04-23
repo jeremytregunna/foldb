@@ -7,6 +7,11 @@ pub fn build(b: *std.Build) void {
     // Standard optimization options.
     const optimize = b.standardOptimizeOption(.{});
 
+    // DST seed count — override with -Ddst-seeds=N (e.g. zig build dst-test -Ddst-seeds=10000)
+    const dst_seeds = b.option(usize, "dst-seeds", "Number of seeds for DST sweep tests (default: 200)") orelse 200;
+    const dst_seeds_options = b.addOptions();
+    dst_seeds_options.addOption(usize, "dst_seeds", dst_seeds);
+
     // Create modules with target and optimize
     const lib_module = b.createModule(.{
         .root_source_file = b.path("src/lib.zig"),
@@ -256,6 +261,17 @@ pub fn build(b: *std.Build) void {
     raft_linear_test_module.addImport("log.zig", log_module);
     const raft_linear_tests = b.addTest(.{ .root_module = raft_linear_test_module });
     const run_raft_linear_tests = b.addRunArtifact(raft_linear_tests);
+
+    // Raft consensus seed sweep DST
+    const raft_sweep_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/raft/raft_sweep_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    raft_sweep_test_module.addImport("raft.zig", raft_module);
+    raft_sweep_test_module.addOptions("options", dst_seeds_options);
+    const raft_sweep_tests = b.addTest(.{ .root_module = raft_sweep_test_module });
+    const run_raft_sweep_tests = b.addRunArtifact(raft_sweep_tests);
 
     // Storage module (all storage files belong to this single module)
     const storage_module = b.createModule(.{
@@ -766,6 +782,7 @@ pub fn build(b: *std.Build) void {
     });
     sim_sweep_dst_module.addImport("sim.zig", sim_module);
     sim_sweep_dst_module.addImport("gateway.zig", gateway_module);
+    sim_sweep_dst_module.addOptions("options", dst_seeds_options);
     const sim_sweep_dst_tests = b.addTest(.{ .root_module = sim_sweep_dst_module });
     const run_sim_sweep_dst_tests = b.addRunArtifact(sim_sweep_dst_tests);
 
@@ -1244,26 +1261,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_seq_tcp_cluster_tests.step);
     test_step.dependOn(&run_seq_reconfig_tests.step);
 
-    // Raft consensus seed sweep executable
-    const dst_sweep_module = b.createModule(.{
-        .root_source_file = b.path("src/cmd/dst_sweep.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    dst_sweep_module.addImport("raft.zig", raft_module);
-
-    const dst_sweep_exe = b.addExecutable(.{
-        .name = "raft-sweep",
-        .root_module = dst_sweep_module,
-    });
-    b.installArtifact(dst_sweep_exe);
-
-    const run_dst_sweep = b.addRunArtifact(dst_sweep_exe);
-    if (b.args) |bargs| run_dst_sweep.addArgs(bargs);
-
-    const dst_sweep_step = b.step("raft-sweep", "Run Raft consensus seed sweep (pass -- --seeds N)");
-    dst_sweep_step.dependOn(&run_dst_sweep.step);
-
     // Deterministic simulation tests
     const dst_step = b.step("dst-test", "Run deterministic simulation tests");
     dst_step.dependOn(&run_raft_cluster_tests.step);
@@ -1281,6 +1278,7 @@ pub fn build(b: *std.Build) void {
     dst_step.dependOn(&run_sim_subquery_dst_tests.step);
     dst_step.dependOn(&run_sim_occ_dst_tests.step);
     dst_step.dependOn(&run_raft_tcp_dst_tests.step);
+    dst_step.dependOn(&run_raft_sweep_tests.step);
     dst_step.dependOn(&run_sim_snapshot_dst_tests.step);
     dst_step.dependOn(&run_sim_kill9_tests.step);
     dst_step.dependOn(&run_sim_sweep_dst_tests.step);

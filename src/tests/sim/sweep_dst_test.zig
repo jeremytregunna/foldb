@@ -206,13 +206,13 @@ fn runSweepSeed(seed: u64, n_ops: usize, alloc: std.mem.Allocator) !void {
 // Tests
 // ---------------------------------------------------------------------------
 
-test "sweep: determinism across 200 seeds (20 ops each)" {
-    // 200 seeds drawn from a stride across u64 space for good coverage.
-    // Each seed uses a lightweight 20-op workload so the sweep completes fast.
-    const N_SEEDS = 200;
-    const STRIDE = 0x9E37_79B9_7F4A_7C15; // golden-ratio stride for u64
+test "sweep: determinism across N seeds (20 ops each)" {
+    // Seed count set via -Ddst-seeds=N at build time (default: 200).
+    // Seeds drawn via golden-ratio stride across u64 space for good coverage.
+    const n = @import("options").dst_seeds;
+    const STRIDE = 0x9E37_79B9_7F4A_7C15;
     var seed: u64 = 0;
-    for (0..N_SEEDS) |_| {
+    for (0..n) |_| {
         try runSweepSeed(seed, 20, testing.allocator);
         seed +%= STRIDE;
     }
