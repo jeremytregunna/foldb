@@ -17,6 +17,22 @@ pub const EntryKind = log_mod.EntryKind;
 
 pub const CdcOperation = enum { insert, update, delete };
 
+/// A simple test-and-set spinlock. Suitable for short, rarely-contended critical sections.
+/// Zig 0.16 has no std.Thread.Mutex; std.Io.Mutex requires an Io instance.
+const SpinMutex = struct {
+    locked: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn lock(self: *SpinMutex) void {
+        while (self.locked.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    fn unlock(self: *SpinMutex) void {
+        self.locked.store(false, .release);
+    }
+};
+
 /// A single row change within a committed transaction.
 pub const CdcEffect = struct {
     table_id: TableId,
@@ -72,72 +88,161 @@ pub const BeforeImages = struct {
 };
 
 /// At-least-once ordered CDC event delivery for a single consumer.
+///
+/// Concurrency model:
+///   - push() may be called from multiple producer threads (executor threads).
+///     It uses a lock-free Treiber stack: each push is a CAS-prepend, no locks.
+///   - next() and ack() are called from a single consumer thread only.
+///     They operate on a consumer-private local buffer; no synchronisation needed
+///     once the inbox has been drained into it.
+///   - cursor is written only by the consumer (ack) and read by producers (push).
+///     It is an atomic value with release/acquire ordering.
+///
+/// The inbox is an atomic singly-linked list (Treiber stack). Producers prepend;
+/// the consumer atomically swaps the head to null, reverses the chain to restore
+/// insertion order, and appends into the local buffer.
 pub const CdcSubscription = struct {
     id: u64,
     /// If set, only events touching this table are delivered.
     table_filter: ?TableId,
-    /// Highest sequence number acked by the consumer.
-    cursor: Seq,
-    pending: std.ArrayListUnmanaged(CdcEvent),
+    /// Highest sequence number acked by the consumer. Written by ack(), read by push().
+    cursor: std.atomic.Value(Seq),
+    /// Lock-free inbox: producers CAS-prepend InboxNodes here.
+    inbox: std.atomic.Value(?*InboxNode),
+    /// Consumer-private buffer. Only next() and ack() access this — no locking needed.
+    local: std.ArrayListUnmanaged(CdcEvent),
     alloc: std.mem.Allocator,
+
+    const InboxNode = struct {
+        event: CdcEvent,
+        next: ?*InboxNode,
+    };
 
     pub fn init(id: u64, table_filter: ?TableId, from_seq: Seq, alloc: std.mem.Allocator) CdcSubscription {
         return .{
             .id = id,
             .table_filter = table_filter,
-            .cursor = from_seq,
-            .pending = .empty,
+            .cursor = std.atomic.Value(Seq).init(from_seq),
+            .inbox = std.atomic.Value(?*InboxNode).init(null),
+            .local = .empty,
             .alloc = alloc,
         };
     }
 
     pub fn deinit(self: *CdcSubscription) void {
-        for (self.pending.items) |*e| e.deinit();
-        self.pending.deinit(self.alloc);
+        // Drain the inbox.
+        var node = self.inbox.swap(null, .acquire);
+        while (node) |n| {
+            var e = n.event;
+            e.deinit();
+            const nx = n.next;
+            self.alloc.destroy(n);
+            node = nx;
+        }
+        // Drain the local consumer buffer.
+        for (self.local.items) |*e| e.deinit();
+        self.local.deinit(self.alloc);
     }
 
     /// Dequeue up to `out.len` events into `out`. Returns count written. Caller owns events.
+    /// Must be called from the single consumer thread only.
     pub fn next(self: *CdcSubscription, out: []CdcEvent) !usize {
-        const n = @min(out.len, self.pending.items.len);
-        for (0..n) |i| out[i] = self.pending.items[i];
-        const total = self.pending.items.len;
-        for (n..total) |i| self.pending.items[i - n] = self.pending.items[i];
-        self.pending.shrinkRetainingCapacity(total - n);
+        // Drain the inbox into local (inbox nodes are in reverse order — reverse them back).
+        var node = self.inbox.swap(null, .acquire);
+        if (node != null) {
+            // Collect into a temporary slice for reversal.
+            var tmp: std.ArrayListUnmanaged(*InboxNode) = .empty;
+            defer tmp.deinit(self.alloc);
+            while (node) |n| {
+                try tmp.append(self.alloc, n);
+                node = n.next;
+            }
+            var i = tmp.items.len;
+            while (i > 0) {
+                i -= 1;
+                const n = tmp.items[i];
+                try self.local.append(self.alloc, n.event);
+                self.alloc.destroy(n);
+            }
+        }
+        // Serve from the local buffer.
+        const n = @min(out.len, self.local.items.len);
+        for (0..n) |i| out[i] = self.local.items[i];
+        const total = self.local.items.len;
+        for (n..total) |i| self.local.items[i - n] = self.local.items[i];
+        self.local.shrinkRetainingCapacity(total - n);
         return n;
     }
 
     /// Record that all events up to and including `seq` have been processed.
-    /// Prunes any events still in the pending queue that are now below the cursor —
-    /// this handles the case where ack() is called ahead of next().
-    pub fn ack(self: *CdcSubscription, seq: Seq) void {
-        if (seq > self.cursor) self.cursor = seq;
+    /// Drains any pending inbox items into the local buffer first, then prunes
+    /// both buffers — so ack() before next() correctly discards covered events.
+    /// Must be called from the single consumer thread only.
+    pub fn ack(self: *CdcSubscription, seq: Seq) !void {
+        const cur = self.cursor.load(.monotonic);
+        if (seq > cur) self.cursor.store(seq, .release);
+        const new_cur = if (seq > cur) seq else cur;
+
+        // Drain inbox into local (same logic as next(), reused here).
+        var node = self.inbox.swap(null, .acquire);
+        if (node != null) {
+            var tmp: std.ArrayListUnmanaged(*InboxNode) = .empty;
+            defer tmp.deinit(self.alloc);
+            while (node) |n| {
+                try tmp.append(self.alloc, n);
+                node = n.next;
+            }
+            var i = tmp.items.len;
+            while (i > 0) {
+                i -= 1;
+                const n = tmp.items[i];
+                try self.local.append(self.alloc, n.event);
+                self.alloc.destroy(n);
+            }
+        }
+
+        // Prune local buffer up to new_cur.
         var i: usize = 0;
-        while (i < self.pending.items.len and self.pending.items[i].seq <= self.cursor) : (i += 1) {
-            self.pending.items[i].deinit();
+        while (i < self.local.items.len and self.local.items[i].seq <= new_cur) : (i += 1) {
+            self.local.items[i].deinit();
         }
         if (i > 0) {
-            const new_len = self.pending.items.len - i;
-            std.mem.copyForwards(CdcEvent, self.pending.items[0..new_len], self.pending.items[i..]);
-            self.pending.shrinkRetainingCapacity(new_len);
+            const new_len = self.local.items.len - i;
+            std.mem.copyForwards(CdcEvent, self.local.items[0..new_len], self.local.items[i..]);
+            self.local.shrinkRetainingCapacity(new_len);
         }
     }
 
+    /// Push an event from a producer thread. Lock-free: CAS-prepend onto the inbox stack.
     fn push(self: *CdcSubscription, event: CdcEvent) !void {
-        // Skip events already covered by the cursor (e.g. on reconnect with from_seq).
-        if (event.seq <= self.cursor) {
+        // Skip events already covered by the consumer's cursor.
+        if (event.seq <= self.cursor.load(.acquire)) {
             var e = event;
             e.deinit();
             return;
         }
-        try self.pending.append(self.alloc, event);
+        const node = try self.alloc.create(InboxNode);
+        node.* = .{ .event = event, .next = null };
+        var head = self.inbox.load(.monotonic);
+        while (true) {
+            node.next = head;
+            if (self.inbox.cmpxchgWeak(head, node, .release, .monotonic)) |actual| {
+                head = actual;
+            } else break;
+        }
     }
 };
 
 /// Manages CDC subscriptions and orchestrates event dispatch from the executor.
+///
+/// Concurrency: the subscriptions list is protected by a mutex. subscribe(),
+/// unsubscribe(), dispatch(), minCursor(), and findById() all acquire it.
+/// push() on individual subscriptions is lock-free (see CdcSubscription).
 pub const CdcManager = struct {
     subscriptions: std.ArrayListUnmanaged(*CdcSubscription),
     next_id: u64,
     alloc: std.mem.Allocator,
+    mutex: SpinMutex = .{},
     metrics: obs.CdcMetrics = .{},
 
     pub fn init(alloc: std.mem.Allocator) CdcManager {
@@ -156,10 +261,12 @@ pub const CdcManager = struct {
     /// Pass null for `table_filter` to receive events for all tables.
     /// `from_seq` sets the initial cursor (events at or before this seq are skipped).
     pub fn subscribe(self: *CdcManager, table_filter: ?TableId, from_seq: Seq) !*CdcSubscription {
-        const id = self.next_id;
-        self.next_id += 1;
         const sub = try self.alloc.create(CdcSubscription);
         errdefer self.alloc.destroy(sub);
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const id = self.next_id;
+        self.next_id += 1;
         sub.* = CdcSubscription.init(id, table_filter, from_seq, self.alloc);
         try self.subscriptions.append(self.alloc, sub);
         self.metrics.subscriptions_active.set(@intCast(self.subscriptions.items.len));
@@ -168,6 +275,8 @@ pub const CdcManager = struct {
 
     /// Remove and destroy the subscription with the given id.
     pub fn unsubscribe(self: *CdcManager, id: u64) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         for (self.subscriptions.items, 0..) |sub, i| {
             if (sub.id == id) {
                 sub.deinit();
@@ -177,6 +286,29 @@ pub const CdcManager = struct {
                 return;
             }
         }
+    }
+
+    /// Minimum cursor across all active subscriptions, or 0 if none.
+    /// Used by log truncation to determine the safe truncation point.
+    pub fn minCursor(self: *CdcManager) Seq {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var min: Seq = std.math.maxInt(Seq);
+        for (self.subscriptions.items) |sub| {
+            const c = sub.cursor.load(.acquire);
+            if (c < min) min = c;
+        }
+        return if (min == std.math.maxInt(Seq)) 0 else min;
+    }
+
+    /// Find a subscription by ID. Returns null if not found or already unsubscribed.
+    pub fn findById(self: *CdcManager, id: u64) ?*CdcSubscription {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.subscriptions.items) |sub| {
+            if (sub.id == id) return sub;
+        }
+        return null;
     }
 
     /// Capture before-images for mutations. Call BEFORE storage.apply().
@@ -231,6 +363,8 @@ pub const CdcManager = struct {
         before: BeforeImages,
         alloc: std.mem.Allocator,
     ) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         if (self.subscriptions.items.len == 0 or mutations.len == 0) return;
 
         for (self.subscriptions.items) |sub| {

@@ -604,7 +604,7 @@ pub const Conn = struct {
                         self.sendStreamError(stream_id, .protocol_error, "malformed AckCdc");
                         return;
                     };
-                    sub.ack(ack.acked_seq);
+                    sub.ack(ack.acked_seq) catch {};
                     const new_credits: u64 = @min(
                         std.math.maxInt(u64) - state.credits,
                         ack.add_credits,

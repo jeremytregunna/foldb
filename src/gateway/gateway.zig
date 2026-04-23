@@ -380,9 +380,8 @@ pub const Gateway = struct {
     pub fn truncateLog(self: *Gateway) !void {
         var safe_seq = self.durable_snapshot_seq;
         if (safe_seq == 0) return;
-        for (self.cdc.subscriptions.items) |sub| {
-            if (sub.cursor < safe_seq) safe_seq = sub.cursor;
-        }
+        const min_cdc = self.cdc.minCursor();
+        if (min_cdc > 0 and min_cdc < safe_seq) safe_seq = min_cdc;
         for (self.sequencer.partition_logs) |*log| {
             log.notifySnapshot(safe_seq);
             try log.truncate_prefix(safe_seq);
@@ -796,10 +795,7 @@ pub const Gateway = struct {
 
     /// Look up an active CDC subscription by ID (returns null if not found).
     pub fn getCdcSub(self: *Gateway, id: u64) ?*cdc_mod.CdcSubscription {
-        for (self.cdc.subscriptions.items) |sub| {
-            if (sub.id == id) return sub;
-        }
-        return null;
+        return self.cdc.findById(id);
     }
 
     /// Resolve a table name to its numeric ID via the schema registry.

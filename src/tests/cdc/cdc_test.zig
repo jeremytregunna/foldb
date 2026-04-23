@@ -352,7 +352,7 @@ test "CDC: ack advances cursor" {
     try applyWithCdc(&mgr, &storage, &.{m1}, 1, 0, testing.allocator);
     try applyWithCdc(&mgr, &storage, &.{m2}, 2, 0, testing.allocator);
 
-    try testing.expectEqual(@as(Seq, 0), sub.cursor);
+    try testing.expectEqual(@as(Seq, 0), sub.cursor.load(.monotonic));
 
     var buf: [2]CdcEvent = undefined;
     const n = try sub.next(&buf);
@@ -360,8 +360,8 @@ test "CDC: ack advances cursor" {
     buf[0].deinit();
     buf[1].deinit();
 
-    sub.ack(2);
-    try testing.expectEqual(@as(Seq, 2), sub.cursor);
+    try sub.ack(2);
+    try testing.expectEqual(@as(Seq, 2), sub.cursor.load(.monotonic));
 }
 
 test "CDC: no events for empty mutation list" {
@@ -890,8 +890,8 @@ test "CDC: ack before next prunes already-queued events" {
     try applyWithCdc(&mgr, &storage, &.{m3}, 3, 0, testing.allocator);
 
     // Ack seq=2 before calling next() — events 1 and 2 should be pruned from pending.
-    sub.ack(2);
-    try testing.expectEqual(@as(Seq, 2), sub.cursor);
+    try sub.ack(2);
+    try testing.expectEqual(@as(Seq, 2), sub.cursor.load(.monotonic));
 
     var buf: [3]CdcEvent = undefined;
     const n = try sub.next(&buf);

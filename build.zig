@@ -1013,6 +1013,18 @@ pub fn build(b: *std.Build) void {
     const cdc_tests = b.addTest(.{ .root_module = cdc_test_module });
     const run_cdc_tests = b.addRunArtifact(cdc_tests);
 
+    // CDC concurrent tests
+    const cdc_concurrent_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/cdc/cdc_concurrent_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cdc_concurrent_test_module.addImport("cdc.zig", cdc_module);
+    cdc_concurrent_test_module.addImport("storage.zig", storage_module);
+    cdc_concurrent_test_module.addImport("log.zig", log_module);
+    const cdc_concurrent_tests = b.addTest(.{ .root_module = cdc_concurrent_test_module });
+    const run_cdc_concurrent_tests = b.addRunArtifact(cdc_concurrent_tests);
+
     // Gateway unit tests
     const gateway_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/gateway/gateway_test.zig"),
@@ -1235,6 +1247,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_sql_executor_expr_tests.step);
     test_step.dependOn(&run_sql_fk_tests.step);
     test_step.dependOn(&run_cdc_tests.step);
+    test_step.dependOn(&run_cdc_concurrent_tests.step);
     test_step.dependOn(&run_gateway_tests.step);
     test_step.dependOn(&run_gateway_snapshot_tests.step);
     test_step.dependOn(&run_gateway_txn_tests.step);
