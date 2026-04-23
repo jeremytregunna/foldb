@@ -4,6 +4,74 @@ const server = @import("server.zig");
 const config_mod = @import("config.zig");
 const sequencer_mod = @import("sequencer.zig");
 
+const version = "0.1.0";
+
+const help_root =
+    \\foldb v{s} — replicated deterministic database
+    \\
+    \\Usage: foldb <command> [options]
+    \\
+    \\Commands:
+    \\  serve       Start the database server (default)
+    \\  gen-secret  Generate an auth_secret for token-based auth
+    \\  add-user    Derive a user token and print the config snippet
+    \\
+    \\Options:
+    \\  -h, --help     Show this help
+    \\  -V, --version  Print version
+    \\
+    \\Run 'foldb <command> --help' for command-specific options.
+    \\
+;
+
+const help_serve =
+    \\Usage: foldb serve [options]
+    \\
+    \\Start the database server. All options can also be set via a config file.
+    \\
+    \\Options:
+    \\  --config <path>       JSON config file (see docs/internal/config.md)
+    \\  --storage-dir <path>  Override storage directory from config
+    \\  --port <port>         Override listen port from config
+    \\  -h, --help            Show this help
+    \\
+    \\Defaults (no config file): storage=/var/lib/foldb port=7432 node_id=1
+    \\
+;
+
+const help_gen_secret =
+    \\Usage: foldb gen-secret
+    \\
+    \\Generate a random auth_secret and print the config snippet to add.
+    \\Run this once, then add the printed value to your config file.
+    \\
+    \\Options:
+    \\  -h, --help  Show this help
+    \\
+;
+
+const help_add_user =
+    \\Usage: foldb add-user --config <path> --name <name> --password <password>
+    \\
+    \\Derive a token for a user and print the config snippet to add.
+    \\Requires auth_secret to already be set in the config (see gen-secret).
+    \\
+    \\Options:
+    \\  --config <path>      Config file containing auth_secret
+    \\  --name <name>        Username
+    \\  --password <secret>  Password (used to derive token; not stored)
+    \\  -h, --help           Show this help
+    \\
+;
+
+fn isHelp(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help");
+}
+
+fn isVersion(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version");
+}
+
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
@@ -11,28 +79,61 @@ pub fn main(init: std.process.Init) !void {
     var it = std.process.Args.Iterator.init(init.minimal.args);
     _ = it.skip(); // skip argv[0]
 
-    const subcommand = it.next() orelse "serve";
+    const subcommand = it.next() orelse {
+        std.debug.print(help_root, .{version});
+        return;
+    };
+
+    if (isHelp(subcommand) or std.mem.eql(u8, subcommand, "help")) {
+        std.debug.print(help_root, .{version});
+        return;
+    }
+
+    if (isVersion(subcommand)) {
+        std.debug.print("{s}\n", .{version});
+        return;
+    }
 
     if (std.mem.eql(u8, subcommand, "gen-secret")) {
-        return cmdGenSecret(alloc);
+        return cmdGenSecret(&it);
     }
 
     if (std.mem.eql(u8, subcommand, "add-user")) {
         return cmdAddUser(alloc, &it);
     }
 
-    // Default: serve. If subcommand is not a known command, treat it as a flag.
-    // Re-parse all args from scratch since we consumed one above.
-    var it2 = std.process.Args.Iterator.init(init.minimal.args);
-    _ = it2.skip();
-    return cmdServe(io, alloc, &it2);
+    if (std.mem.eql(u8, subcommand, "serve")) {
+        return cmdServe(io, alloc, &it);
+    }
+
+    // Unknown subcommand — check if it looks like a flag for bare `foldb --flag` usage,
+    // otherwise error rather than silently falling through to serve.
+    if (std.mem.startsWith(u8, subcommand, "-")) {
+        // Re-parse all args including the first one we consumed.
+        var it2 = std.process.Args.Iterator.init(init.minimal.args);
+        _ = it2.skip();
+        return cmdServe(io, alloc, &it2);
+    }
+
+    std.debug.print("error: unknown command '{s}'\n\n", .{subcommand});
+    std.debug.print(help_root, .{version});
+    std.process.exit(1);
 }
 
 // ---------------------------------------------------------------------------
 // gen-secret: generate a random auth_secret and print it
 // ---------------------------------------------------------------------------
 
-fn cmdGenSecret(_: std.mem.Allocator) !void {
+fn cmdGenSecret(it: *std.process.Args.Iterator) !void {
+    while (it.next()) |arg| {
+        if (isHelp(arg)) {
+            std.debug.print(help_gen_secret, .{});
+            return;
+        }
+        std.debug.print("error: unknown argument '{s}'\n\n", .{arg});
+        std.debug.print(help_gen_secret, .{});
+        std.process.exit(1);
+    }
     var secret: [32]u8 = undefined;
     _ = std.os.linux.getrandom(&secret, secret.len, 0);
     var encoded_buf: [std.base64.standard.Encoder.calcSize(32)]u8 = undefined;
@@ -53,26 +154,35 @@ fn cmdAddUser(alloc: std.mem.Allocator, it: *std.process.Args.Iterator) !void {
     var password: ?[]const u8 = null;
 
     while (it.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--config")) {
+        if (isHelp(arg)) {
+            std.debug.print(help_add_user, .{});
+            return;
+        } else if (std.mem.eql(u8, arg, "--config")) {
             config_path = it.next();
         } else if (std.mem.eql(u8, arg, "--name")) {
             name = it.next();
         } else if (std.mem.eql(u8, arg, "--password")) {
             password = it.next();
+        } else {
+            std.debug.print("error: unknown argument '{s}'\n\n", .{arg});
+            std.debug.print(help_add_user, .{});
+            std.process.exit(1);
         }
     }
 
     const cfg_path = config_path orelse {
-        std.debug.print("usage: foldb add-user --config <path> --name <name> --password <password>\n", .{});
-        return error.MissingArgs;
+        std.debug.print(help_add_user, .{});
+        std.process.exit(1);
     };
     const user_name = name orelse {
-        std.debug.print("error: --name is required\n", .{});
-        return error.MissingArgs;
+        std.debug.print("error: --name is required\n\n", .{});
+        std.debug.print(help_add_user, .{});
+        std.process.exit(1);
     };
     const user_pw = password orelse {
-        std.debug.print("error: --password is required\n", .{});
-        return error.MissingArgs;
+        std.debug.print("error: --password is required\n\n", .{});
+        std.debug.print(help_add_user, .{});
+        std.process.exit(1);
     };
 
     var pc = config_mod.fromFile(cfg_path, alloc) catch |e| {
@@ -116,13 +226,25 @@ fn cmdServe(io: std.Io, alloc: std.mem.Allocator, it: *std.process.Args.Iterator
     var port_override: ?u16 = null;
 
     while (it.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--config")) {
+        if (isHelp(arg)) {
+            std.debug.print(help_serve, .{});
+            return;
+        } else if (std.mem.eql(u8, arg, "--config")) {
             if (it.next()) |val| config_path = val;
         } else if (std.mem.eql(u8, arg, "--storage-dir")) {
             if (it.next()) |val| storage_dir_override = val;
         } else if (std.mem.eql(u8, arg, "--port")) {
             if (it.next()) |val| port_override = try std.fmt.parseInt(u16, val, 10);
+        } else {
+            std.debug.print("error: unknown argument '{s}'\n\n", .{arg});
+            std.debug.print(help_serve, .{});
+            std.process.exit(1);
         }
+    }
+
+    if (config_path == null and storage_dir_override == null) {
+        std.debug.print(help_serve, .{});
+        std.process.exit(1);
     }
 
     var parsed: ?config_mod.ParsedConfig = null;

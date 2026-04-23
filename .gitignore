@@ -28,7 +28,9 @@ build.zig.zon
 *.lcov
 coverage/
 
-.pi/
+# Coding harnesses... add more when you find them
+/.pi/
+/.claude/
 
 # S3 integration test credentials — never commit
 test-s3.json
@@ -55,3 +57,6 @@ Desktop.ini
 
 # Linux
 .nfs*
+
+# knowledgebase
+/knowledge/

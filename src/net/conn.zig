@@ -719,7 +719,7 @@ pub const Conn = struct {
         const state = self.streams.getPtr(stream_id) orelse return;
         if (state.kind != .subscription) return;
         const sub = self.gw.getCdcSub(state.sub_id) orelse return;
-        sub.ack(ack.acked_seq);
+        try sub.ack(ack.acked_seq);
         const new_credits: u64 = @min(
             std.math.maxInt(u64) - state.credits,
             ack.add_credits,
