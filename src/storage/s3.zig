@@ -14,16 +14,16 @@ pub const S3Config = struct {
     access_key: []const u8,
     secret_key: []const u8,
     region: []const u8,
-    /// IPv4 address for the TCP connection.
-    endpoint_ip: [4]u8,
-    endpoint_port: u16,
-    /// Hostname used in the Host header and AWS signing (e.g. "s3.amazonaws.com",
-    /// "minio.local", "192.168.1.1"). May differ from endpoint_ip for virtual-hosted style.
+    /// Hostname or IPv4 address for both the TCP connection and the HTTP Host
+    /// header (e.g. "s3.amazonaws.com", "minio.local", "127.0.0.1").
     endpoint_host: []const u8,
+    endpoint_port: u16,
     bucket: []const u8,
     /// path = S3-compatible / MinIO default; virtual_hosted = AWS S3 standard.
     bucket_style: BucketStyle = .path,
     alloc: std.mem.Allocator,
+    /// Used for hostname resolution and TCP connection via std.Io.net.
+    io: std.Io,
 };
 
 pub const S3ObjectStore = struct {
@@ -66,10 +66,10 @@ pub const S3ObjectStore = struct {
         const auth = try buildAuth(a, self.config, "PUT", sign_uri, host, "", &ts_buf, &date_buf, &body_hash);
         defer a.free(auth);
 
-        const req = try std.fmt.allocPrint(a, "PUT {s} HTTP/1.1\r\nHost: {s}\r\nContent-Length: {d}\r\nContent-Type: application/octet-stream\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\n\r\n", .{ uri, host, data.len, &body_hash, &ts_buf, auth });
+        const req = try std.fmt.allocPrint(a, "PUT {s} HTTP/1.1\r\nHost: {s}\r\nContent-Length: {d}\r\nContent-Type: application/octet-stream\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ uri, host, data.len, &body_hash, &ts_buf, auth });
         defer a.free(req);
 
-        const fd = try connect(self.config.endpoint_ip, self.config.endpoint_port);
+        const fd = try connect(self.config.endpoint_host, self.config.endpoint_port, self.config.io);
         defer _ = std.os.linux.close(@intCast(fd));
         try sendAll(fd, req);
         try sendAll(fd, data);
@@ -102,7 +102,7 @@ pub const S3ObjectStore = struct {
         const req = try std.fmt.allocPrint(a, "GET {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ uri, host, empty_hash, &ts_buf, auth });
         defer a.free(req);
 
-        const fd = try connect(self.config.endpoint_ip, self.config.endpoint_port);
+        const fd = try connect(self.config.endpoint_host, self.config.endpoint_port, self.config.io);
         defer _ = std.os.linux.close(@intCast(fd));
         try sendAll(fd, req);
 
@@ -138,7 +138,7 @@ pub const S3ObjectStore = struct {
         const req = try std.fmt.allocPrint(a, "DELETE {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ uri, host, empty_hash, &ts_buf, auth });
         defer a.free(req);
 
-        const fd = try connect(self.config.endpoint_ip, self.config.endpoint_port);
+        const fd = try connect(self.config.endpoint_host, self.config.endpoint_port, self.config.io);
         defer _ = std.os.linux.close(@intCast(fd));
         try sendAll(fd, req);
 
@@ -170,7 +170,7 @@ pub const S3ObjectStore = struct {
         const req = try std.fmt.allocPrint(a, "HEAD {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ uri, host, empty_hash, &ts_buf, auth });
         defer a.free(req);
 
-        const fd = try connect(self.config.endpoint_ip, self.config.endpoint_port);
+        const fd = try connect(self.config.endpoint_host, self.config.endpoint_port, self.config.io);
         defer _ = std.os.linux.close(@intCast(fd));
         try sendAll(fd, req);
 
@@ -190,7 +190,10 @@ pub const S3ObjectStore = struct {
         const empty_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
         // Canonical query string (params sorted alphabetically).
-        const query = try std.fmt.allocPrint(a, "list-type=2&prefix={s}", .{prefix});
+        // Prefix value must be percent-encoded per AWS Signature V4.
+        const encoded_prefix = try uriEncodeValue(a, prefix);
+        defer a.free(encoded_prefix);
+        const query = try std.fmt.allocPrint(a, "list-type=2&prefix={s}", .{encoded_prefix});
         defer a.free(query);
 
         // Full request URI includes query; signing URI is path only.
@@ -209,7 +212,7 @@ pub const S3ObjectStore = struct {
         const req = try std.fmt.allocPrint(a, "GET {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ list_uri, host, empty_hash, &ts_buf, auth });
         defer a.free(req);
 
-        const fd = try connect(self.config.endpoint_ip, self.config.endpoint_port);
+        const fd = try connect(self.config.endpoint_host, self.config.endpoint_port, self.config.io);
         defer _ = std.os.linux.close(@intCast(fd));
         try sendAll(fd, req);
 
@@ -223,29 +226,10 @@ pub const S3ObjectStore = struct {
 
 // ---- helpers ----
 
-fn connect(ip: [4]u8, port: u16) !std.posix.fd_t {
-    const AF_INET: u32 = 2;
-    const SOCK_STREAM: u32 = 1;
-    const SOCK_CLOEXEC: u32 = 0o2000000;
-
-    const raw_fd = std.os.linux.socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    const fd_i: isize = @bitCast(raw_fd);
-    if (fd_i < 0) return error.SocketError;
-    const fd: std.posix.fd_t = @intCast(fd_i);
-
-    var addr_buf: [16]u8 = std.mem.zeroes([16]u8);
-    std.mem.writeInt(u16, addr_buf[0..2], 2, .little);
-    std.mem.writeInt(u16, addr_buf[2..4], port, .big);
-    addr_buf[4] = ip[0];
-    addr_buf[5] = ip[1];
-    addr_buf[6] = ip[2];
-    addr_buf[7] = ip[3];
-
-    const rc = std.os.linux.connect(fd, @ptrCast(&addr_buf), 16);
-    const rc_i: isize = @bitCast(rc);
-    if (rc_i < 0) return error.ConnectError;
-
-    return fd;
+fn connect(host: []const u8, port: u16, io: std.Io) !std.posix.fd_t {
+    const hn = try std.Io.net.HostName.init(host);
+    const stream = try hn.connect(io, port, .{ .mode = .stream });
+    return stream.socket.handle;
 }
 
 fn sendAll(fd: std.posix.fd_t, data: []const u8) !void {
@@ -394,6 +378,27 @@ fn isLeap(y: u64) bool {
     return (y % 4 == 0 and y % 100 != 0) or (y % 400 == 0);
 }
 
+/// Percent-encode a query parameter value per AWS Signature V4.
+/// Unreserved characters (A-Z a-z 0-9 - _ . ~) are left as-is; everything
+/// else, including '/', is encoded as %XX.
+fn uriEncodeValue(alloc: std.mem.Allocator, value: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    for (value) |c| {
+        const unreserved = std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~';
+        if (unreserved) {
+            try out.append(alloc, c);
+        } else {
+            try out.appendSlice(alloc, &[_]u8{ '%', hexChar(c >> 4), hexChar(c & 0xF) });
+        }
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn hexChar(nibble: u8) u8 {
+    return if (nibble < 10) '0' + nibble else 'A' + nibble - 10;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -405,12 +410,12 @@ fn testConfig(bucket_style: BucketStyle) S3Config {
         .access_key = "testkey",
         .secret_key = "testsecret",
         .region = "us-east-1",
-        .endpoint_ip = .{ 127, 0, 0, 1 },
-        .endpoint_port = 9000,
         .endpoint_host = "minio.local",
+        .endpoint_port = 9000,
         .bucket = "mybucket",
         .bucket_style = bucket_style,
         .alloc = testing.allocator,
+        .io = std.testing.io,
     };
 }
 

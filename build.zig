@@ -1282,4 +1282,20 @@ pub fn build(b: *std.Build) void {
     dst_step.dependOn(&run_sim_snapshot_dst_tests.step);
     dst_step.dependOn(&run_sim_kill9_tests.step);
     dst_step.dependOn(&run_sim_sweep_dst_tests.step);
+
+    // S3 snapshot integration test — requires test-s3.json in the project root.
+    // Skips gracefully if the file is absent or S3 fields are not populated.
+    const s3_integration_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/integration/s3_snapshot_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    s3_integration_module.addImport("config.zig", config_module);
+    s3_integration_module.addImport("gateway.zig", gateway_module);
+    s3_integration_module.addImport("storage.zig", storage_module);
+    const s3_integration_tests = b.addTest(.{ .root_module = s3_integration_module });
+    const run_s3_integration = b.addRunArtifact(s3_integration_tests);
+
+    const s3_integration_step = b.step("s3-integration", "Run S3 snapshot integration test (requires test-s3.json)");
+    s3_integration_step.dependOn(&run_s3_integration.step);
 }

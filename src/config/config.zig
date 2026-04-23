@@ -1,5 +1,39 @@
 const std = @import("std");
 
+/// Parsed S3 endpoint: hostname and port extracted from the endpoint URL.
+pub const ParsedS3Endpoint = struct {
+    /// Hostname or IPv4 literal — passed directly to the S3 client for both
+    /// TCP connection and the HTTP Host header.
+    host: []const u8,
+    port: u16,
+};
+
+/// Parse an S3 endpoint URL into host and port.
+///
+///   "http://127.0.0.1:9000"   → host="127.0.0.1"       port=9000
+///   "https://s3.example.com"  → host="s3.example.com"  port=443
+///   "http://minio:9000"       → host="minio"            port=9000
+///
+/// The S3 client handles hostname resolution at connect time.
+pub fn parseS3Endpoint(endpoint: []const u8) !ParsedS3Endpoint {
+    var rest = endpoint;
+    var default_port: u16 = 443;
+    if (std.mem.startsWith(u8, rest, "https://")) {
+        rest = rest[8..];
+    } else if (std.mem.startsWith(u8, rest, "http://")) {
+        rest = rest[7..];
+        default_port = 80;
+    }
+    var host = rest;
+    var port = default_port;
+    if (std.mem.lastIndexOfScalar(u8, rest, ':')) |colon| {
+        host = rest[0..colon];
+        port = std.fmt.parseInt(u16, rest[colon + 1 ..], 10) catch return error.InvalidS3Endpoint;
+    }
+    if (host.len == 0) return error.InvalidS3Endpoint;
+    return .{ .host = host, .port = port };
+}
+
 /// A user credential stored in the config. `token` is the HMAC-SHA256 of
 /// (name + ":" + password) under the server's auth_secret, base64-encoded.
 pub const UserEntry = struct {
@@ -22,6 +56,7 @@ pub const Config = struct {
     s3_bucket: []const u8 = "",
     s3_access_key: []const u8 = "",
     s3_secret_key: []const u8 = "",
+    s3_region: []const u8 = "",
     /// Server-side secret used only by the `add-user` CLI to derive tokens.
     /// Never sent over the wire. Empty = no secret configured.
     auth_secret: []const u8 = "",
@@ -143,6 +178,10 @@ pub fn fromSlice(json_text: []const u8, alloc: std.mem.Allocator) !ParsedConfig 
         else => return error.InvalidConfig,
     };
     if (obj.get("s3_secret_key")) |v| cfg.s3_secret_key = switch (v) {
+        .string => |s| try a.dupe(u8, s),
+        else => return error.InvalidConfig,
+    };
+    if (obj.get("s3_region")) |v| cfg.s3_region = switch (v) {
         .string => |s| try a.dupe(u8, s),
         else => return error.InvalidConfig,
     };

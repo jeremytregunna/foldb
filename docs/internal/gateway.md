@@ -68,6 +68,8 @@ S3 object store support is configured via `Options`:
 
 When both `s3_access_key` and `s3_bucket` are non-empty, `init()` heap-allocates an `S3ObjectStore` (`?*S3ObjectStore`) and wires it into all storage partitions via `setObjectStore()`. It is heap-allocated so the `*anyopaque` VTable pointer remains stable. Freed in `deinit()`.
 
+**S3 is optional.** When not configured, the gateway starts in degraded mode: snapshots are disabled, log truncation does not occur, and recovery requires full log replay from the beginning. A warning is printed at startup. See `docs/internal/config.md` for S3 setup and validation rules.
+
 ## Error Conditions
 
 | Error | Meaning |

@@ -190,7 +190,8 @@ pub const Gateway = struct {
         heartbeat_interval_ms: u32 = 50,
         peers: []const sequencer_mod.PeerAddr = &.{},
         // S3 / object storage (all optional — zero values disable tiering).
-        s3_endpoint_ip: [4]u8 = .{ 0, 0, 0, 0 },
+        /// Required when S3 credentials are provided; used for hostname resolution and connection.
+        s3_io: ?std.Io = null,
         s3_endpoint_host: []const u8 = "",
         s3_endpoint_port: u16 = 0,
         s3_access_key: []const u8 = "",
@@ -259,15 +260,16 @@ pub const Gateway = struct {
 
         // Wire S3 tiered storage when credentials are provided.
         if (opts.s3_access_key.len > 0 and opts.s3_bucket.len > 0) {
+            const s3_io = opts.s3_io orelse return error.IoRequiredForS3;
             const s3 = try alloc.create(storage_mod.S3ObjectStore);
             errdefer alloc.destroy(s3);
             s3.* = storage_mod.S3ObjectStore.init(.{
                 .access_key = opts.s3_access_key,
                 .secret_key = opts.s3_secret_key,
                 .region = opts.s3_region,
-                .endpoint_ip = opts.s3_endpoint_ip,
-                .endpoint_port = opts.s3_endpoint_port,
                 .endpoint_host = opts.s3_endpoint_host,
+                .endpoint_port = opts.s3_endpoint_port,
+                .io = s3_io,
                 .bucket = opts.s3_bucket,
                 .bucket_style = opts.s3_bucket_style,
                 .alloc = alloc,

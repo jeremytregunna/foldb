@@ -136,6 +136,29 @@ fn cmdServe(io: std.Io, alloc: std.mem.Allocator, it: *std.process.Args.Iterator
     const storage_dir = storage_dir_override orelse cfg.storage_dir;
     const port = port_override orelse cfg.listen_port;
 
+    // Validate S3 config: all-or-nothing. Partial configuration is a mistake.
+    const s3_fields_set = @as(u8, if (cfg.s3_endpoint.len > 0) 1 else 0) +
+        @as(u8, if (cfg.s3_bucket.len > 0) 1 else 0) +
+        @as(u8, if (cfg.s3_access_key.len > 0) 1 else 0) +
+        @as(u8, if (cfg.s3_secret_key.len > 0) 1 else 0);
+    const s3_enabled = s3_fields_set == 4;
+    if (s3_fields_set > 0 and s3_fields_set < 4) {
+        std.debug.print("error: S3 is partially configured — set all of s3_endpoint, s3_bucket, s3_access_key, s3_secret_key or none of them.\n", .{});
+        return error.InvalidConfig;
+    }
+    if (s3_enabled and cfg.s3_region.len == 0) {
+        std.debug.print("error: s3_region is required when S3 is configured.\n", .{});
+        return error.InvalidConfig;
+    }
+
+    const s3ep: config_mod.ParsedS3Endpoint = if (s3_enabled)
+        config_mod.parseS3Endpoint(cfg.s3_endpoint) catch {
+            std.debug.print("error: could not parse s3_endpoint — expected http[s]://host[:port]\n", .{});
+            return error.InvalidConfig;
+        }
+    else
+        .{ .host = "", .port = 0 };
+
     // Build PeerAddr slice from config peer strings.
     // Peer NodeIds are assigned sequentially starting from 1, skipping self.
     const peer_addrs = try alloc.alloc(sequencer_mod.PeerAddr, cfg.peers.len);
@@ -147,14 +170,21 @@ fn cmdServe(io: std.Io, alloc: std.mem.Allocator, it: *std.process.Args.Iterator
         next_id += 1;
     }
 
-    std.debug.print("foldb starting: storage={s} port={d} node_id={d} partitions={d} peers={d} auth={s}\n", .{
+    std.debug.print("foldb starting: storage={s} port={d} node_id={d} partitions={d} peers={d} auth={s} s3={s}\n", .{
         storage_dir,
         port,
         cfg.node_id,
         cfg.partition_count,
         cfg.peers.len,
         if (cfg.users.len > 0) "token" else "open",
+        if (s3_enabled) "enabled" else "disabled",
     });
+
+    if (!s3_enabled) {
+        std.debug.print("warning: S3 is not configured. Snapshots and log truncation are disabled. " ++
+            "Recovery requires full log replay from the beginning. " ++
+            "See docs/internal/config.md for S3 setup.\n", .{});
+    }
 
     const gw = try gateway_mod.Gateway.init(storage_dir, alloc, .{
         .partition_count = cfg.partition_count,
@@ -164,6 +194,13 @@ fn cmdServe(io: std.Io, alloc: std.mem.Allocator, it: *std.process.Args.Iterator
         .election_timeout_max_ms = cfg.election_timeout_max_ms,
         .heartbeat_interval_ms = cfg.heartbeat_interval_ms,
         .peers = peer_addrs,
+        .s3_io = if (s3_enabled) io else null,
+        .s3_endpoint_host = s3ep.host,
+        .s3_endpoint_port = s3ep.port,
+        .s3_access_key = cfg.s3_access_key,
+        .s3_secret_key = cfg.s3_secret_key,
+        .s3_region = cfg.s3_region,
+        .s3_bucket = cfg.s3_bucket,
     });
     defer gw.deinit();
 

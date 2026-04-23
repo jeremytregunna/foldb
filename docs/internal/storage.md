@@ -45,6 +45,8 @@ Mutations route to the memtable. When the memtable fills, it is flushed to L0. W
 
 A snapshot captures table state at a given seq and writes a manifest to the object store (if configured). A post-snapshot hook signals the executor to truncate logs and evict idempotency caches. L3 consistency is best-effort — object store PUTs may lag or fail.
 
+**Object store is optional.** When S3 is not configured, snapshots are disabled and the log is never truncated. Recovery requires full log replay. See `docs/internal/config.md`.
+
 ## Learned Indexes
 
 For large, stable, read-heavy tables, the in-memory level index can be replaced with a small learned model (piecewise linear regression, RMI design) that predicts key position within ±32 entries, followed by a bounded binary search. This is an optimization only — it is disabled if model error exceeds a threshold, falling back to standard binary search.

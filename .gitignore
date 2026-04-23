@@ -30,6 +30,9 @@ coverage/
 
 .pi/
 
+# S3 integration test credentials — never commit
+test-s3.json
+
 # Neovim
 *.swp
 *.swo

@@ -1,51 +1,70 @@
-# Foldb
+# folddb
 
-A database for folded data written in Zig.
-
-## Features
-
-- Fast and efficient data storage
-- Zig-native implementation
-- Cross-platform support
+A replicated, deterministic state machine database written in Zig. The log is the source of truth; state is `fold(log)` — a pure function cached in an LSM tree. Strict serializable isolation, one global sequence number, no wall clocks inside the fold.
 
 ## Requirements
 
-- [Zig](https://ziglang.org/) 0.11.0 or later
+- [Zig](https://ziglang.org/) 0.16.0
 
 ## Building
 
 ```bash
-# Build in release mode
-zig build
-
-# Build in debug mode
-zig build -Doptimize=Debug
-
-# Run the application
-zig build run
-
-# Run tests
-zig build test
+zig build                        # release build
+zig build -Doptimize=Debug       # debug build
+zig build test                   # unit + integration tests
+zig build dst-test               # deterministic simulation tests (200 seeds)
+zig build dst-test -Ddst-seeds=10000  # DST at higher seed count
 ```
 
-## Installation
+## Running
 
 ```bash
-zig build install
+foldb serve --config config.json
 ```
 
-## Project Structure
+Minimal config (single node, no auth, no S3):
 
+```json
+{
+  "node_id": 1,
+  "storage_dir": "/var/lib/foldb",
+  "partition_count": 1,
+  "listen_port": 7432
+}
 ```
-foldb/
-├── build.zig          # Build configuration
-├── src/
-│   ├── lib.zig        # Core library
-│   └── main.zig       # Application entry point
-├── .gitignore         # Git ignore rules
-└── README.md          # This file
+
+See `docs/internal/config.md` for the full field reference.
+
+## S3 / Object Storage
+
+S3 is optional. Without it, the server runs in degraded mode: snapshots and log truncation are disabled, and recovery requires full log replay from the beginning. Suitable for development; not for production.
+
+To enable, add to your config:
+
+```json
+{
+  "s3_endpoint": "http://1.2.3.4:9000",
+  "s3_bucket": "foldb",
+  "s3_access_key": "...",
+  "s3_secret_key": "...",
+  "s3_region": "us-east-1"
+}
 ```
 
-## License
+Only IPv4 endpoints are supported. See `docs/internal/config.md`.
 
-MIT License
+## Auth
+
+Auth is opt-in. To enable token-based auth:
+
+```bash
+foldb gen-secret                                          # add auth_secret to config
+foldb add-user --config config.json --name alice --password hunter2
+```
+
+Add the printed `UserEntry` to your config's `users` array. See `docs/internal/auth.md`.
+
+## Architecture
+
+- `docs/internal/` — subsystem reference docs
+- `foldb-spec.md` — full engineering specification
