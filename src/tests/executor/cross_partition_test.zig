@@ -24,7 +24,7 @@ const ExecResult = executor_mod.ExecResult;
 const AbortCode = executor_mod.AbortCode;
 const LogEntry = executor_mod.LogEntry;
 const EntryKind = executor_mod.EntryKind;
-const serializeTxnIntent = executor_mod.serializeTxnIntent;
+const serialize_txn_intent = executor_mod.serialize_txn_intent;
 const ResolvedValue = executor_mod.ResolvedValue;
 
 const TableSchema = storage_mod.TableSchema;
@@ -261,7 +261,7 @@ fn makeEntry(
 ) !LogEntry {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(alloc);
-    try serializeTxnIntent(hash, 0, seq, 0, read_hint, write_hint, params, &.{}, &payload, alloc);
+    try serialize_txn_intent(hash, 0, seq, 0, read_hint, write_hint, params, &.{}, &payload, alloc);
     const payload_copy = try alloc.dupe(u8, payload.items);
     return LogEntry.create(seq, 1, .txn_intent, payload_copy);
 }
@@ -289,8 +289,8 @@ fn setupPartitionSet(alloc: std.mem.Allocator, dirs: []const []const u8) !struct
         try storages[i].registerTable(accountsSchema());
     }
     var ps = try PartitionSet.init(storages, alloc);
-    try ps.registerAll(HASH_SETUP, handlerSetup);
-    try ps.registerCrossAll(HASH_TRANSFER, TRANSFER_HANDLER);
+    try ps.register_all(HASH_SETUP, handlerSetup);
+    try ps.register_cross_all(HASH_TRANSFER, TRANSFER_HANDLER);
     return .{ .ps = ps, .storages = storages, .obj_store = obj_store };
 }
 
@@ -329,7 +329,7 @@ test "cross-partition transfer: happy path" {
     defer alloc.free(p0);
     const e1 = try makeEntry(alloc, 1, &HASH_SETUP, &.{0}, &.{0}, p0);
     defer alloc.free(e1.payload);
-    const r1 = try setup.ps.runEntry(e1);
+    const r1 = try setup.ps.run_entry(e1);
     defer alloc.free(r1);
     try testing.expectEqual(@as(usize, 1), r1.len);
     try testing.expect(r1[0].result == .ok);
@@ -339,7 +339,7 @@ test "cross-partition transfer: happy path" {
     defer alloc.free(p1);
     const e2 = try makeEntry(alloc, 2, &HASH_SETUP, &.{1}, &.{1}, p1);
     defer alloc.free(e2.payload);
-    const r2 = try setup.ps.runEntry(e2);
+    const r2 = try setup.ps.run_entry(e2);
     defer alloc.free(r2);
     try testing.expectEqual(@as(usize, 1), r2.len);
     try testing.expect(r2[0].result == .ok);
@@ -349,7 +349,7 @@ test "cross-partition transfer: happy path" {
     defer alloc.free(tp);
     const e3 = try makeEntry(alloc, 3, &HASH_TRANSFER, &.{0}, &.{ 0, 1 }, tp);
     defer alloc.free(e3.payload);
-    const r3 = try setup.ps.runEntry(e3);
+    const r3 = try setup.ps.run_entry(e3);
     defer alloc.free(r3);
 
     try testing.expectEqual(@as(usize, 2), r3.len);
@@ -397,7 +397,7 @@ test "cross-partition transfer: insufficient funds aborts all partitions" {
     defer alloc.free(p0);
     const e1 = try makeEntry(alloc, 1, &HASH_SETUP, &.{0}, &.{0}, p0);
     defer alloc.free(e1.payload);
-    const r1 = try setup.ps.runEntry(e1);
+    const r1 = try setup.ps.run_entry(e1);
     defer alloc.free(r1);
     try testing.expect(r1[0].result == .ok);
 
@@ -406,7 +406,7 @@ test "cross-partition transfer: insufficient funds aborts all partitions" {
     defer alloc.free(p1);
     const e2 = try makeEntry(alloc, 2, &HASH_SETUP, &.{1}, &.{1}, p1);
     defer alloc.free(e2.payload);
-    const r2 = try setup.ps.runEntry(e2);
+    const r2 = try setup.ps.run_entry(e2);
     defer alloc.free(r2);
     try testing.expect(r2[0].result == .ok);
 
@@ -415,7 +415,7 @@ test "cross-partition transfer: insufficient funds aborts all partitions" {
     defer alloc.free(tp);
     const e3 = try makeEntry(alloc, 3, &HASH_TRANSFER, &.{0}, &.{ 0, 1 }, tp);
     defer alloc.free(e3.payload);
-    const r3 = try setup.ps.runEntry(e3);
+    const r3 = try setup.ps.run_entry(e3);
     defer alloc.free(r3);
 
     try testing.expectEqual(@as(usize, 2), r3.len);
@@ -459,7 +459,7 @@ test "PartitionSet: single-partition fast path" {
     const entry = try makeEntry(alloc, 1, &HASH_SETUP, &.{1}, &.{1}, params);
     defer alloc.free(entry.payload);
 
-    const results = try setup.ps.runEntry(entry);
+    const results = try setup.ps.run_entry(entry);
     defer alloc.free(results);
 
     try testing.expectEqual(@as(usize, 1), results.len);
@@ -499,7 +499,7 @@ test "PartitionSet: missing cross-partition handler returns abort" {
     const entry = try makeEntry(alloc, 1, &HASH_SETUP, &.{}, &.{ 0, 1 }, params);
     defer alloc.free(entry.payload);
 
-    const results = try setup.ps.runEntry(entry);
+    const results = try setup.ps.run_entry(entry);
     defer alloc.free(results);
 
     try testing.expectEqual(@as(usize, 2), results.len);
@@ -559,9 +559,9 @@ test "cross-partition replay equivalence" {
 
     // Run on both sets
     for (entries) |e| {
-        const rA = try setupA.ps.runEntry(e);
+        const rA = try setupA.ps.run_entry(e);
         alloc.free(rA);
-        const rB = try setupB.ps.runEntry(e);
+        const rB = try setupB.ps.run_entry(e);
         alloc.free(rB);
     }
 
@@ -610,7 +610,7 @@ test "PartitionSet: crc mismatch returns bad_params abort" {
     defer alloc.free(entry.payload);
     entry.header.payload_crc = 0xDEADBEEF; // corrupt
 
-    const results = try setup.ps.runEntry(entry);
+    const results = try setup.ps.run_entry(entry);
     defer alloc.free(results);
 
     try testing.expectEqual(@as(usize, 1), results.len);
@@ -636,7 +636,7 @@ test "PartitionSet: invalid payload returns bad_params abort" {
     const entry = LogEntry.create(1, 1, .txn_intent, garbage);
     defer alloc.free(entry.payload);
 
-    const results = try setup.ps.runEntry(entry);
+    const results = try setup.ps.run_entry(entry);
     defer alloc.free(results);
 
     try testing.expectEqual(@as(usize, 1), results.len);
@@ -663,7 +663,7 @@ test "PartitionSet: single-partition write_set_hint out of range" {
     const entry = try makeEntry(alloc, 1, &HASH_SETUP, &.{}, &.{99}, params);
     defer alloc.free(entry.payload);
 
-    const results = try setup.ps.runEntry(entry);
+    const results = try setup.ps.run_entry(entry);
     defer alloc.free(results);
 
     try testing.expectEqual(@as(usize, 1), results.len);
@@ -691,7 +691,7 @@ test "PartitionSet: cross-partition write_set_hint partition out of range" {
     const entry = try makeEntry(alloc, 1, &HASH_TRANSFER, &.{}, &.{ 0, 99 }, tp);
     defer alloc.free(entry.payload);
 
-    const results = try setup.ps.runEntry(entry);
+    const results = try setup.ps.run_entry(entry);
     defer alloc.free(results);
 
     try testing.expectEqual(@as(usize, 2), results.len);
@@ -732,14 +732,14 @@ test "PartitionSet: non-ConstraintViolation error in Phase C propagates" {
             }
         }.f,
     };
-    try ps.registerCrossAll(HASH_BOOM, boom_handler);
+    try ps.register_cross_all(HASH_BOOM, boom_handler);
 
     const params = try encodeSetupParams(alloc, "x", 1);
     defer alloc.free(params);
     const entry = try makeEntry(alloc, 1, &HASH_BOOM, &.{}, &.{ 0, 1 }, params);
     defer alloc.free(entry.payload);
 
-    try testing.expectError(error.DiskQuotaExceeded, ps.runEntry(entry));
+    try testing.expectError(error.DiskQuotaExceeded, ps.run_entry(entry));
 }
 
 test "PartitionSet: non-txn entry advances committed_seq on all executors" {
@@ -760,7 +760,7 @@ test "PartitionSet: non-txn entry advances committed_seq on all executors" {
     const entry = LogEntry.create(7, 1, .noop, empty);
     defer alloc.free(entry.payload);
 
-    const results = try setup.ps.runEntry(entry);
+    const results = try setup.ps.run_entry(entry);
     defer alloc.free(results);
 
     try testing.expectEqual(@as(usize, 2), results.len);
@@ -789,7 +789,7 @@ test "PartitionSet: write_set_hint empty defaults to partition 0" {
     const entry = try makeEntry(alloc, 1, &HASH_SETUP, &.{}, &.{}, params);
     defer alloc.free(entry.payload);
 
-    const results = try setup.ps.runEntry(entry);
+    const results = try setup.ps.run_entry(entry);
     defer alloc.free(results);
 
     try testing.expectEqual(@as(usize, 1), results.len);
@@ -896,15 +896,15 @@ test "PartitionSet: three-partition transfer" {
     }
     var ps = try PartitionSet.init(storages, alloc);
     defer teardownPartitionSet(&ps, storages, null, alloc);
-    try ps.registerAll(HASH_SETUP, handlerSetup);
-    try ps.registerCrossAll(HASH_TRANSFER3, TRANSFER3_HANDLER);
+    try ps.register_all(HASH_SETUP, handlerSetup);
+    try ps.register_cross_all(HASH_TRANSFER3, TRANSFER3_HANDLER);
 
     // Insert sender on p0 (balance=100)
     const pa = try encodeSetupParams(alloc, "alice", 100);
     defer alloc.free(pa);
     const e1 = try makeEntry(alloc, 1, &HASH_SETUP, &.{0}, &.{0}, pa);
     defer alloc.free(e1.payload);
-    const r1 = try ps.runEntry(e1);
+    const r1 = try ps.run_entry(e1);
     defer alloc.free(r1);
     try testing.expect(r1[0].result == .ok);
 
@@ -913,7 +913,7 @@ test "PartitionSet: three-partition transfer" {
     defer alloc.free(pb);
     const e2 = try makeEntry(alloc, 2, &HASH_SETUP, &.{2}, &.{2}, pb);
     defer alloc.free(e2.payload);
-    const r2 = try ps.runEntry(e2);
+    const r2 = try ps.run_entry(e2);
     defer alloc.free(r2);
     try testing.expect(r2[0].result == .ok);
 
@@ -922,7 +922,7 @@ test "PartitionSet: three-partition transfer" {
     defer alloc.free(tp);
     const e3 = try makeEntry(alloc, 3, &HASH_TRANSFER3, &.{0}, &.{ 0, 1, 2 }, tp);
     defer alloc.free(e3.payload);
-    const r3 = try ps.runEntry(e3);
+    const r3 = try ps.run_entry(e3);
     defer alloc.free(r3);
 
     try testing.expectEqual(@as(usize, 3), r3.len);

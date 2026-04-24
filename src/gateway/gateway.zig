@@ -395,7 +395,7 @@ pub const Gateway = struct {
             recon_seq, self.partition_count, self.recon_strategy, self.alloc,
         );
         defer hints.deinit();
-        try executor_mod.serializeTxnIntent(
+        try executor_mod.serialize_txn_intent(
             hash, self.client_id, op_seq, recon_seq,
             hints.read, hints.write, params_bytes, all_nondet,
             buf, self.alloc,
@@ -415,7 +415,7 @@ pub const Gateway = struct {
         // after awaitCommit() guarantees the entry is durable — commit precedes execution.
         // When a background apply thread is running (follower mode), waitFor() returns
         // without draining here.
-        while (self.sql_exec.currentSeq() < result.seq) {
+        while (self.sql_exec.current_seq() < result.seq) {
             try self.applyNewEntries();
         }
         const exec_result = self.sql_exec.waitFor(result.seq);
@@ -475,7 +475,7 @@ pub const Gateway = struct {
 
         // On retry, re-run reconnaissance at the seq the executor assigned to the
         // conflicting entry so hints reflect state as of that point.
-        var hint_seq: Seq = self.sql_exec.currentSeq();
+        var hint_seq: Seq = self.sql_exec.current_seq();
 
         const max_retries: usize = 3;
         std.debug.assert(max_retries > 0);
@@ -516,7 +516,7 @@ pub const Gateway = struct {
             rq.plan,
             decoded_params,
             nondet,
-            self.sql_exec.currentSeq() + 1,
+            self.sql_exec.current_seq() + 1,
             self.alloc,
         );
         const rows_slice = try rows.toOwnedSlice(self.alloc);
@@ -650,7 +650,7 @@ pub const Gateway = struct {
     /// registry before sql_exec.run() advances committed_seq.
     pub fn applyNewEntries(self: *Gateway) !void {
         const batch = 64;
-        var from_seq = self.sql_exec.currentSeq() + 1;
+        var from_seq = self.sql_exec.current_seq() + 1;
         while (true) {
             const entries = try self.readMergedEntries(from_seq, batch);
             defer {

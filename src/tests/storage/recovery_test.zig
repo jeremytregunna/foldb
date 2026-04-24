@@ -113,7 +113,7 @@ fn makeLogEntry(alloc: std.mem.Allocator, seq: u64, key: []const u8, val: i64) !
 
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(alloc);
-    try executor_mod.serializeTxnIntent(&HASH_INSERT, 0, seq, 0, &.{0}, &.{0}, params, &.{}, &payload, alloc);
+    try executor_mod.serialize_txn_intent(&HASH_INSERT, 0, seq, 0, &.{0}, &.{0}, params, &.{}, &payload, alloc);
     const payload_copy = try alloc.dupe(u8, payload.items);
     return LogEntry.create(seq, 1, .txn_intent, payload_copy);
 }

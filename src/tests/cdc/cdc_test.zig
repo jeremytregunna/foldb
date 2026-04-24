@@ -400,7 +400,7 @@ test "CDC: Executor.withCdc routes events through executor" {
 
     var executor = Executor.init(&storage, testing.allocator);
     defer executor.deinit();
-    executor.withCdc(&mgr);
+    executor.with_cdc(&mgr);
 
     const sub = try mgr.subscribe(null, 0);
 
@@ -472,11 +472,11 @@ test "CDC: cross-partition transaction emits events on both partitions" {
     var ps = try partition_set_mod.PartitionSet.init(&storages, testing.allocator);
     defer ps.deinit();
 
-    ps.withCdc(&mgr);
+    ps.with_cdc(&mgr);
 
     // Register a cross-partition handler that inserts one row per partition.
     const HASH_CROSS: [32]u8 = [_]u8{0xCC} ** 32;
-    try ps.registerCrossAll(HASH_CROSS, .{
+    try ps.register_cross_all(HASH_CROSS, .{
         .declareReads = crossNoDeclare,
         .execute = crossInsertExecute,
     });
@@ -498,7 +498,7 @@ test "CDC: cross-partition transaction emits events on both partitions" {
 
     const header = log_mod.LogEntryHeader.init(1, 0, .txn_intent, payload);
     const entry = log_mod.LogEntry{ .header = header, .payload = payload };
-    const results = try ps.runEntry(entry);
+    const results = try ps.run_entry(entry);
     defer testing.allocator.free(results);
 
     for (results) |r| try testing.expect(r.result == .ok);
@@ -781,7 +781,7 @@ test "CDC: aborted transaction produces no events" {
 
     var executor = Executor.init(&storage, testing.allocator);
     defer executor.deinit();
-    executor.withCdc(&mgr);
+    executor.with_cdc(&mgr);
 
     const sub = try mgr.subscribe(null, 0);
 
@@ -814,7 +814,7 @@ test "CDC: non-txn log entry produces no events" {
 
     var executor = Executor.init(&storage, testing.allocator);
     defer executor.deinit();
-    executor.withCdc(&mgr);
+    executor.with_cdc(&mgr);
 
     const sub = try mgr.subscribe(null, 0);
 

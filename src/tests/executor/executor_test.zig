@@ -13,7 +13,7 @@ const Mutation = executor_mod.Mutation;
 const Storage = executor_mod.Storage;
 const LogEntry = executor_mod.LogEntry;
 const EntryKind = executor_mod.EntryKind;
-const serializeTxnIntent = executor_mod.serializeTxnIntent;
+const serialize_txn_intent = executor_mod.serialize_txn_intent;
 
 const TableSchema = storage_mod.TableSchema;
 const ColumnSchema = storage_mod.ColumnSchema;
@@ -248,7 +248,7 @@ fn makeEntry(
 ) !LogEntry {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(alloc);
-    try serializeTxnIntent(hash, 0, seq, 0, &.{}, &.{}, params, nondet, &payload, alloc);
+    try serialize_txn_intent(hash, 0, seq, 0, &.{}, &.{}, params, nondet, &payload, alloc);
     const payload_copy = try alloc.dupe(u8, payload.items);
     return LogEntry.create(seq, 1, .txn_intent, payload_copy);
 }
@@ -297,7 +297,7 @@ test "basic insert and get" {
 
     const result = try exec.run(entry);
     try testing.expectEqual(@as(u64, 1), result.ok.rows_affected);
-    try testing.expectEqual(@as(u64, 1), exec.currentSeq());
+    try testing.expectEqual(@as(u64, 1), exec.current_seq());
 
     const row = try exec.storage.get(1, "alice", 1);
     try testing.expect(row != null);
@@ -419,11 +419,11 @@ test "noop entry advances seq" {
     var exec = try setupExecutor(alloc, dir);
     defer teardownExecutor(&exec, alloc);
 
-    try testing.expectEqual(@as(u64, 0), exec.currentSeq());
+    try testing.expectEqual(@as(u64, 0), exec.current_seq());
     const noop = makeNoop(7);
     const result = try exec.run(noop);
     try testing.expectEqual(@as(u64, 0), result.ok.rows_affected);
-    try testing.expectEqual(@as(u64, 7), exec.currentSeq());
+    try testing.expectEqual(@as(u64, 7), exec.current_seq());
 
     // No storage side effect
     const row = try exec.storage.get(1, "anything", 7);
@@ -525,14 +525,14 @@ test "committed_seq advances on abort" {
     var e1 = try makeEntry(alloc, 3, &HASH_INSERT_IF_NEW, params, &.{});
     defer e1.deinit(alloc);
     _ = try exec.run(e1);
-    try testing.expectEqual(@as(u64, 3), exec.currentSeq());
+    try testing.expectEqual(@as(u64, 3), exec.current_seq());
 
     var e2 = try makeEntry(alloc, 7, &HASH_INSERT_IF_NEW, params, &.{});
     defer e2.deinit(alloc);
     const result = try exec.run(e2);
     try testing.expectEqual(AbortCode.constraint_violation, result.abort.code);
     // seq must advance even on abort
-    try testing.expectEqual(@as(u64, 7), exec.currentSeq());
+    try testing.expectEqual(@as(u64, 7), exec.current_seq());
 }
 
 test "non-txn entry kinds advance seq without mutations" {
@@ -549,7 +549,7 @@ test "non-txn entry kinds advance seq without mutations" {
         const e = LogEntry.create(@intCast(i + 1), 1, kind, &.{});
         const result = try exec.run(e);
         try testing.expectEqual(@as(u64, 0), result.ok.rows_affected);
-        try testing.expectEqual(@as(u64, i + 1), exec.currentSeq());
+        try testing.expectEqual(@as(u64, i + 1), exec.current_seq());
     }
 }
 
@@ -570,7 +570,7 @@ test "truncated payload returns bad_params abort" {
     const result = try exec.run(e);
     try testing.expectEqual(AbortCode.bad_params, result.abort.code);
     // seq still advances
-    try testing.expectEqual(@as(u64, 1), exec.currentSeq());
+    try testing.expectEqual(@as(u64, 1), exec.current_seq());
 }
 
 test "multiple mutations from one handler" {
@@ -657,7 +657,7 @@ test "uuid_v7 resolved value passes through handler" {
 
 test "txn_intent round-trip preserves all fields" {
     const alloc = testing.allocator;
-    const deserializeTxnIntent = executor_mod.deserializeTxnIntent;
+    const deserialize_txn_intent = executor_mod.deserialize_txn_intent;
 
     const hash: [32]u8 = HASH_INSERT;
     const params = "hello world";
@@ -669,9 +669,9 @@ test "txn_intent round-trip preserves all fields" {
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(alloc);
-    try serializeTxnIntent(&hash, 42, 7, 5, &.{}, &.{}, params, &nondet, &buf, alloc);
+    try serialize_txn_intent(&hash, 42, 7, 5, &.{}, &.{}, params, &nondet, &buf, alloc);
 
-    var decoded = try deserializeTxnIntent(buf.items, alloc);
+    var decoded = try deserialize_txn_intent(buf.items, alloc);
     defer decoded.deinit();
 
     try testing.expectEqualSlices(u8, &hash, decoded.query_hash);
@@ -695,7 +695,7 @@ fn makeEntryWithRecon(
 ) !LogEntry {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(alloc);
-    try serializeTxnIntent(hash, 0, seq, recon_seq, &.{}, &.{}, params, nondet, &payload, alloc);
+    try serialize_txn_intent(hash, 0, seq, recon_seq, &.{}, &.{}, params, nondet, &payload, alloc);
     const payload_copy = try alloc.dupe(u8, payload.items);
     return LogEntry.create(seq, 1, .txn_intent, payload_copy);
 }
@@ -786,5 +786,5 @@ test "crc mismatch returns bad_params abort" {
 
     const result = try exec.run(e);
     try testing.expectEqual(AbortCode.bad_params, result.abort.code);
-    try testing.expectEqual(@as(u64, 1), exec.currentSeq());
+    try testing.expectEqual(@as(u64, 1), exec.current_seq());
 }

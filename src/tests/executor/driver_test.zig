@@ -12,7 +12,7 @@ const LogEntry = executor_mod.LogEntry;
 const EntryKind = executor_mod.EntryKind;
 const Mutation = executor_mod.Mutation;
 const QueryContext = executor_mod.QueryContext;
-const serializeTxnIntent = executor_mod.serializeTxnIntent;
+const serialize_txn_intent = executor_mod.serialize_txn_intent;
 const ResolvedValue = executor_mod.ResolvedValue;
 const Log = log_mod.Log;
 
@@ -106,7 +106,7 @@ fn makeEntry(alloc: std.mem.Allocator, seq: u64, key: []const u8, value: i64) !L
 
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(alloc);
-    try serializeTxnIntent(&HASH_INSERT, 0, seq, 0, &.{}, &.{}, params, &.{}, &payload, alloc);
+    try serialize_txn_intent(&HASH_INSERT, 0, seq, 0, &.{}, &.{}, params, &.{}, &payload, alloc);
     const payload_copy = try alloc.dupe(u8, payload.items);
     return LogEntry.create(seq, 1, .txn_intent, payload_copy);
 }
@@ -150,7 +150,7 @@ test "driver: drainAll processes all committed entries" {
         .executor = &exec,
         .alloc = alloc,
     };
-    try driver.drainAll();
+    try driver.drain_all();
 
     try testing.expectEqual(@as(u64, 10), exec.committed_seq);
 }
@@ -190,12 +190,12 @@ test "driver: drainOnce is idempotent at head" {
         .alloc = alloc,
     };
 
-    const n1 = try driver.drainOnce();
+    const n1 = try driver.drain_once();
     try testing.expectEqual(@as(usize, 1), n1);
     try testing.expectEqual(@as(u64, 1), exec.committed_seq);
 
     // Second drainOnce at head returns 0
-    const n2 = try driver.drainOnce();
+    const n2 = try driver.drain_once();
     try testing.expectEqual(@as(usize, 0), n2);
     try testing.expectEqual(@as(u64, 1), exec.committed_seq);
 }

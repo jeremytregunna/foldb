@@ -1,5 +1,6 @@
 /// Core types for the fold executor: TxnIntent wire format, ExecResult, AbortCode, ResolvedValue.
 const std = @import("std");
+const assert = std.debug.assert;
 
 pub const QueryHash = [32]u8;
 pub const Seq = u64;
@@ -62,7 +63,7 @@ pub const TxnIntentHeader = extern struct {
     }
 };
 
-pub const RESOLVED_RECORD_SIZE: usize = 17; // tag(1) + data(16)
+pub const resolved_record_size: u32 = 17; // tag(1) + data(16)
 
 /// A txn_intent LogEntry that has passed CRC verification and payload decoding at the domain
 /// boundary. The Executor core accepts only this type — never raw bytes for txn_intent entries.
@@ -92,7 +93,7 @@ pub const TxnIntentDecoded = struct {
     }
 };
 
-pub fn serializeTxnIntent(
+pub fn serialize_txn_intent(
     hash: *const [32]u8,
     client_id: u64,
     client_seq: u64,
@@ -104,7 +105,8 @@ pub fn serializeTxnIntent(
     out: *std.ArrayList(u8),
     alloc: std.mem.Allocator,
 ) !void {
-    const hdr = TxnIntentHeader{
+    assert(hash.len == 32);
+    const header = TxnIntentHeader{
         .query_hash = hash.*,
         .client_id = client_id,
         .client_seq = client_seq,
@@ -114,109 +116,136 @@ pub fn serializeTxnIntent(
         .nondet_count = @intCast(nondet.len),
         .recon_seq = recon_seq,
     };
-    try out.appendSlice(alloc, std.mem.asBytes(&hdr));
+    assert(header.read_count == read_set_hint.len);
+    assert(header.write_count == write_set_hint.len);
+    try out.appendSlice(alloc, std.mem.asBytes(&header));
 
-    // Write read_set_hint
-    for (read_set_hint) |pid| {
-        try out.appendSlice(alloc, std.mem.asBytes(&pid));
+    for (read_set_hint) |partition_id| {
+        try out.appendSlice(alloc, std.mem.asBytes(&partition_id));
     }
-
-    // Write write_set_hint
-    for (write_set_hint) |pid| {
-        try out.appendSlice(alloc, std.mem.asBytes(&pid));
+    for (write_set_hint) |partition_id| {
+        try out.appendSlice(alloc, std.mem.asBytes(&partition_id));
     }
 
     try out.appendSlice(alloc, params);
-    for (nondet) |rv| {
-        const tag: u8 = @intFromEnum(@as(ResolvedKind, rv));
+    for (nondet) |resolved_value| {
+        const tag: u8 = @intFromEnum(@as(ResolvedKind, resolved_value));
         try out.append(alloc, tag);
         var data: [16]u8 = std.mem.zeroes([16]u8);
-        switch (rv) {
-            .now => |v| std.mem.writeInt(i64, @ptrCast(@alignCast(&data)), v, .little),
-            .random => |v| @memcpy(&data, &v),
-            .uuid_v7 => |v| @memcpy(&data, &v),
+        switch (resolved_value) {
+            .now => |timestamp| std.mem.writeInt(i64, @ptrCast(@alignCast(&data)), timestamp, .little),
+            .random => |bytes| @memcpy(&data, &bytes),
+            .uuid_v7 => |bytes| @memcpy(&data, &bytes),
         }
         try out.appendSlice(alloc, &data);
     }
 }
 
-pub fn deserializeTxnIntent(payload: []const u8, alloc: std.mem.Allocator) !TxnIntentDecoded {
+pub fn deserialize_txn_intent(payload: []const u8, alloc: std.mem.Allocator) !TxnIntentDecoded {
     if (payload.len < @sizeOf(TxnIntentHeader)) return error.InvalidPayload;
-    const hdr: *const TxnIntentHeader = @ptrCast(@alignCast(payload.ptr));
+    const header: *const TxnIntentHeader = @ptrCast(@alignCast(payload.ptr));
+    const offsets = try deserialize_txn_intent_offsets(payload.len, header);
 
-    // Calculate offsets
-    const read_set_start = @sizeOf(TxnIntentHeader);
-    const read_set_end = read_set_start + @as(usize, hdr.read_count) * @sizeOf(PartitionId);
-    if (read_set_end > payload.len) return error.InvalidPayload;
-
-    const write_set_start = read_set_end;
-    const write_set_end = write_set_start + @as(usize, hdr.write_count) * @sizeOf(PartitionId);
-    if (write_set_end > payload.len) return error.InvalidPayload;
-
-    const params_start = write_set_end;
-    const params_end = params_start + @as(usize, hdr.params_len);
-    if (params_end > payload.len) return error.InvalidPayload;
-
-    const nondet_start = params_end;
-    const nondet_end = nondet_start + @as(usize, hdr.nondet_count) * RESOLVED_RECORD_SIZE;
-    if (nondet_end > payload.len) return error.InvalidPayload;
-
-    // Allocate and decode read_set_hint
-    const read_set_hint = try alloc.alloc(PartitionId, hdr.read_count);
+    const read_set_hint = try alloc.alloc(PartitionId, header.read_count);
     errdefer alloc.free(read_set_hint);
-    for (0..hdr.read_count) |i| {
-        const offset = read_set_start + i * 4;
+    for (0..header.read_count) |i| {
+        const offset = offsets.read_set_start + i * @sizeOf(PartitionId);
         read_set_hint[i] = std.mem.readInt(u32, @ptrCast(@alignCast(payload.ptr + offset)), .little);
     }
+    assert(read_set_hint.len == header.read_count);
 
-    // Allocate and decode write_set_hint
-    const write_set_hint = try alloc.alloc(PartitionId, hdr.write_count);
+    const write_set_hint = try alloc.alloc(PartitionId, header.write_count);
     errdefer alloc.free(write_set_hint);
-    for (0..hdr.write_count) |i| {
-        const offset = write_set_start + i * 4;
+    for (0..header.write_count) |i| {
+        const offset = offsets.write_set_start + i * @sizeOf(PartitionId);
         write_set_hint[i] = std.mem.readInt(u32, @ptrCast(@alignCast(payload.ptr + offset)), .little);
     }
+    assert(write_set_hint.len == header.write_count);
 
-    // Allocate and decode nondet
-    const nondet = try alloc.alloc(ResolvedValue, hdr.nondet_count);
+    const nondet = try deserialize_txn_intent_nondet(payload, offsets.nondet_start, header.nondet_count, alloc);
     errdefer alloc.free(nondet);
-
-    for (0..hdr.nondet_count) |i| {
-        const base = nondet_start + i * RESOLVED_RECORD_SIZE;
-        const tag_byte = payload[base];
-        const data = payload[base + 1 .. base + 17][0..16];
-        nondet[i] = switch (tag_byte) {
-            @intFromEnum(ResolvedKind.now) => blk: {
-                const v = std.mem.readInt(i64, data[0..8], .little);
-                break :blk .{ .now = v };
-            },
-            @intFromEnum(ResolvedKind.random) => blk: {
-                var d: [16]u8 = undefined;
-                @memcpy(&d, data);
-                break :blk .{ .random = d };
-            },
-            @intFromEnum(ResolvedKind.uuid_v7) => blk: {
-                var d: [16]u8 = undefined;
-                @memcpy(&d, data);
-                break :blk .{ .uuid_v7 = d };
-            },
-            else => {
-                alloc.free(read_set_hint);
-                alloc.free(write_set_hint);
-                return error.InvalidPayload;
-            },
-        };
-    }
+    assert(nondet.len == header.nondet_count);
 
     return .{
-        .query_hash = &hdr.query_hash,
-        .client_id = hdr.client_id,
-        .client_seq = hdr.client_seq,
-        .recon_seq = hdr.recon_seq,
+        .query_hash = &header.query_hash,
+        .client_id = header.client_id,
+        .client_seq = header.client_seq,
+        .recon_seq = header.recon_seq,
         .read_set_hint = read_set_hint,
         .write_set_hint = write_set_hint,
-        .params = payload[params_start..params_end],
+        .params = payload[offsets.params_start..offsets.params_end],
         .nondet = nondet,
         .alloc = alloc,
     };
+}
+
+const TxnIntentOffsets = struct {
+    read_set_start: usize,
+    write_set_start: usize,
+    params_start: usize,
+    params_end: usize,
+    nondet_start: usize,
+};
+
+fn deserialize_txn_intent_offsets(payload_len: usize, header: *const TxnIntentHeader) !TxnIntentOffsets {
+    const read_set_start = @sizeOf(TxnIntentHeader);
+    const write_set_start = read_set_start + @as(usize, header.read_count) * @sizeOf(PartitionId);
+    if (write_set_start > payload_len) return error.InvalidPayload;
+    assert(write_set_start <= payload_len);
+
+    const params_start = write_set_start + @as(usize, header.write_count) * @sizeOf(PartitionId);
+    if (params_start > payload_len) return error.InvalidPayload;
+    assert(params_start <= payload_len);
+
+    const params_end = params_start + @as(usize, header.params_len);
+    if (params_end > payload_len) return error.InvalidPayload;
+    assert(params_end <= payload_len);
+
+    const nondet_start = params_end;
+    const nondet_end = nondet_start + @as(usize, header.nondet_count) * resolved_record_size;
+    if (nondet_end > payload_len) return error.InvalidPayload;
+    assert(nondet_end <= payload_len);
+
+    return .{
+        .read_set_start = read_set_start,
+        .write_set_start = write_set_start,
+        .params_start = params_start,
+        .params_end = params_end,
+        .nondet_start = nondet_start,
+    };
+}
+
+fn deserialize_txn_intent_nondet(
+    payload: []const u8,
+    start: usize,
+    count: u32,
+    alloc: std.mem.Allocator,
+) ![]ResolvedValue {
+    assert(start + @as(usize, count) * resolved_record_size <= payload.len);
+    const nondet = try alloc.alloc(ResolvedValue, count);
+    errdefer alloc.free(nondet);
+    for (0..count) |i| {
+        const base = start + i * resolved_record_size;
+        const tag_byte = payload[base];
+        const data = payload[base + 1 .. base + 1 + 16][0..16];
+        nondet[i] = switch (tag_byte) {
+            @intFromEnum(ResolvedKind.now) => blk: {
+                const timestamp = std.mem.readInt(i64, data[0..@sizeOf(i64)], .little);
+                break :blk .{ .now = timestamp };
+            },
+            @intFromEnum(ResolvedKind.random) => blk: {
+                var bytes: [16]u8 = undefined;
+                @memcpy(&bytes, data);
+                break :blk .{ .random = bytes };
+            },
+            @intFromEnum(ResolvedKind.uuid_v7) => blk: {
+                var bytes: [16]u8 = undefined;
+                @memcpy(&bytes, data);
+                break :blk .{ .uuid_v7 = bytes };
+            },
+            else => return error.InvalidPayload,
+        };
+    }
+    assert(nondet.len == count);
+    return nondet;
 }

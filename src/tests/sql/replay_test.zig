@@ -14,7 +14,7 @@ const ResolvedValue = eb.ResolvedValue;
 
 // Re-exported from executor_mod through eb
 const executor_mod = @import("executor.zig");
-const serializeTxnIntent = executor_mod.serializeTxnIntent;
+const serialize_txn_intent = executor_mod.serialize_txn_intent;
 const storage_mod = @import("storage.zig");
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
@@ -163,7 +163,7 @@ fn makeEntry(
 ) !LogEntry {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(alloc);
-    try serializeTxnIntent(hash, 0, seq, 0, &.{}, &.{}, params, &.{}, &payload, alloc);
+    try serialize_txn_intent(hash, 0, seq, 0, &.{}, &.{}, params, &.{}, &payload, alloc);
     const copy = try alloc.dupe(u8, payload.items);
     return LogEntry.create(seq, 1, executor_mod.EntryKind.txn_intent, copy);
 }

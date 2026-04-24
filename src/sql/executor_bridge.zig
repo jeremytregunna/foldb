@@ -148,7 +148,7 @@ pub const SqlExecutor = struct {
         self.cdc = cdc;
     }
 
-    pub fn currentSeq(self: *const SqlExecutor) Seq {
+    pub fn current_seq(self: *const SqlExecutor) Seq {
         return self.committed_seq.load(.acquire);
     }
 
@@ -180,7 +180,7 @@ pub const SqlExecutor = struct {
             return .{ .ok = .{ .rows_affected = 0 } };
         }
         // This is the domain boundary — CRC-verify and deserialize before the core.
-        var validated = executor_mod.validateTxnEntry(entry, self.alloc) catch |e| {
+        var validated = executor_mod.validate_txn_entry(entry, self.alloc) catch |e| {
             const r: ExecResult = switch (e) {
                 error.CrcMismatch => .{ .abort = .{ .code = .bad_params, .detail = "crc mismatch" } },
                 else => .{ .abort = .{ .code = .bad_params, .detail = "invalid payload" } },
@@ -190,7 +190,7 @@ pub const SqlExecutor = struct {
             return r;
         };
         defer validated.decoded.deinit();
-        const result = try self.runValidated(validated);
+        const result = try self.run_validated(validated);
         // Write ring before advancing committed_seq — the release store is the
         // synchronisation point that makes the slot visible to waitFor's acquire load.
         self.results[validated.seq % result_ring_size] = .{ .seq = validated.seq, .result = result };
@@ -201,7 +201,7 @@ pub const SqlExecutor = struct {
     /// Domain core — receives a proven-valid TxnIntent entry. No input
     /// validation here; only business invariants (missing_query, constraint_violation).
     /// committed_seq is updated by the caller (run) after this returns.
-    pub fn runValidated(self: *SqlExecutor, validated: executor_mod.ValidatedTxnEntry) !ExecResult {
+    pub fn run_validated(self: *SqlExecutor, validated: executor_mod.ValidatedTxnEntry) !ExecResult {
         const decoded = validated.decoded;
 
         const rq = self.registry.lookup(decoded.query_hash.*) orelse {

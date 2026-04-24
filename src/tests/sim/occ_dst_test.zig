@@ -23,7 +23,7 @@ const Mutation = executor_mod.Mutation;
 const Storage = executor_mod.Storage;
 const LogEntry = executor_mod.LogEntry;
 const Seq = executor_mod.Seq;
-const serializeTxnIntent = executor_mod.serializeTxnIntent;
+const serialize_txn_intent = executor_mod.serialize_txn_intent;
 const ColumnValue = storage_mod.ColumnValue;
 
 // ---- Temp dir helpers ----
@@ -155,7 +155,7 @@ fn makeEntry(
     defer alloc.free(params);
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(alloc);
-    try serializeTxnIntent(hash, 0, seq, recon_seq, &.{}, &.{}, params, &.{}, &payload, alloc);
+    try serialize_txn_intent(hash, 0, seq, recon_seq, &.{}, &.{}, params, &.{}, &payload, alloc);
     const payload_copy = try alloc.dupe(u8, payload.items);
     return LogEntry.create(seq, 1, .txn_intent, payload_copy);
 }

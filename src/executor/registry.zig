@@ -1,5 +1,9 @@
 /// Query registry: maps QueryHash → RegisteredHandler (single or cross-partition).
 const std = @import("std");
+const assert = std.debug.assert;
+
+/// Maximum number of registered query handlers per registry.
+pub const handlers_max: u32 = 1024;
 const types = @import("types.zig");
 const storage_mod = @import("storage.zig");
 const exchange = @import("exchange.zig");
@@ -80,10 +84,14 @@ pub const QueryRegistry = struct {
     }
 
     pub fn register(self: *QueryRegistry, hash: [32]u8, handler: QueryHandler) !void {
+        assert(self.handlers.count() < handlers_max);
+        if (self.handlers.count() >= handlers_max) return error.TooManyHandlers;
         try self.handlers.put(hash, .{ .single = handler });
     }
 
-    pub fn registerCross(self: *QueryRegistry, hash: [32]u8, handler: CrossPartitionQueryHandler) !void {
+    pub fn register_cross(self: *QueryRegistry, hash: [32]u8, handler: CrossPartitionQueryHandler) !void {
+        assert(self.handlers.count() < handlers_max);
+        if (self.handlers.count() >= handlers_max) return error.TooManyHandlers;
         try self.handlers.put(hash, .{ .cross = handler });
     }
 
