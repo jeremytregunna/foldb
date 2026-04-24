@@ -88,6 +88,10 @@ pub const Sequencer = struct {
     queue: mpsc_mod.MpscQueue(types_mod.PendingSubmit) = undefined,
     shutdown: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
+    /// Highest Raft log index whose committed output has been fully applied to
+    /// the partition logs. Lets the committed handler apply entries incrementally
+    /// on every node (leader and followers) without double-writing.
+    last_applied: Seq = 0,
 
     /// Initialize a Sequencer at the given base path.
     /// Creates:
@@ -355,7 +359,33 @@ pub const Sequencer = struct {
                         p.voted_for,
                     ) catch {};
                 },
-                .committed => {},
+                .committed => |commit_seq| {
+                    // Apply all newly committed Raft entries to the local partition logs.
+                    // Runs on every node — leader and followers — so all nodes stay in sync.
+                    var idx = self.last_applied + 1;
+                    while (idx <= commit_seq) : (idx += 1) {
+                        const raft_entries = self.raft_log.read(idx, 1, alloc) catch break;
+                        defer {
+                            for (raft_entries) |*e| e.deinit(alloc);
+                            alloc.free(raft_entries);
+                        }
+                        if (raft_entries.len == 0) break;
+                        const re = raft_entries[0];
+                        if (re.header.kind == .epoch_decision) {
+                            const dec = types_mod.deserializeEpochDecision(re.payload, alloc) catch {
+                                self.last_applied = idx;
+                                continue;
+                            };
+                            defer alloc.free(dec.entries);
+                            for (dec.entries) |oe| {
+                                const pl = &self.partition_logs[oe.partition];
+                                const le = LogEntry.create(oe.seq, 0, dec.entry_kind, dec.payload);
+                                pl.appendEntryAt(le) catch {};
+                            }
+                        }
+                        self.last_applied = idx;
+                    }
+                },
                 // Raft peer list is already updated internally by RaftNode when this fires.
                 // Transport was pre-registered in addNode / cleaned up in removeNode.
                 .apply_config => {},
@@ -377,12 +407,14 @@ pub const Sequencer = struct {
         intent_payload: []const u8,
         client_id: u64,
         client_seq_num: u64,
+        entry_kind: log_mod.EntryKind,
     ) types_mod.SubmitHandle {
         pending.* = .{
             .submit = .{
                 .client_id = client_id,
                 .client_seq = client_seq_num,
                 .intent_payload = intent_payload,
+                .entry_kind = entry_kind,
             },
             .result = undefined,
             .err = null,
@@ -438,13 +470,17 @@ fn commitInner(self: *Sequencer, submit: ValidatedSubmit) !SubmitResult {
 
     try self.batcher.submit(client_id, client_seq_num);
 
-    const decision = try self.batcher.closeEpoch(
+    var decision = try self.batcher.closeEpoch(
         self.next_epoch,
         self.next_seq,
         @intCast(self.partition_logs.len),
         self.alloc,
     );
     defer self.alloc.free(decision.entries);
+    // Attach the payload so all nodes can write to their partition logs from the
+    // committed Raft entry — no separate data replication channel needed.
+    decision.entry_kind = submit.entry_kind;
+    decision.payload = submit.intent_payload;
 
     self.next_epoch += 1;
     self.next_seq += @intCast(decision.entries.len);
@@ -471,20 +507,16 @@ fn commitInner(self: *Sequencer, submit: ValidatedSubmit) !SubmitResult {
     try self.flushOutputs(outputs.items, self.alloc);
 
     // Wait for Raft commit. For single-node, commit_index already advanced (quorum=1)
-    // so this loop body never executes.
+    // so this loop body never executes. For multi-node, tickOnce drives the round-trips.
+    // The .committed output handler in flushOutputs writes to all nodes' partition logs,
+    // so by the time we exit this loop the entry is already in the partition log.
     const wait_ts: std.os.linux.timespec = .{ .sec = 0, .nsec = 1_000_000 };
     while (self.raft.commit_index < ordering_seq) {
         try self.tickOnce(self.alloc);
         _ = std.os.linux.nanosleep(&wait_ts, null);
     }
 
-    // Sequencer→data-log boundary: write the opaque intent payload at the assigned
-    // global seq. Raft replicated only the ordering decision; intent bytes go here.
     const entry = decision.entries[0];
-    const partition_log = &self.partition_logs[entry.partition];
-    const log_entry = LogEntry.create(entry.seq, 0, .txn_intent, submit.intent_payload);
-    try partition_log.appendEntryAt(log_entry);
-
     try self.idempotency.record(client_id, client_seq_num, entry.seq);
     self.metrics.current_seq.set(@intCast(entry.seq));
 

@@ -165,6 +165,13 @@ pub const Gateway = struct {
     partition_count: u32,
     alloc: std.mem.Allocator,
     metrics: obs.GatewayMetrics = .{},
+    /// Background executor thread — applies committed partition log entries to storage
+    /// on follower nodes. On the leader, runValidated() in execute() is the apply path.
+    /// TODO: the leader↔follower transition window is a known gap — a briefly demoted
+    /// leader may have an in-flight runValidated concurrent with the apply loop starting.
+    /// Needs a proper handoff mechanism when leadership changes are handled end-to-end.
+    apply_thread: ?std.Thread = null,
+    apply_shutdown: std.atomic.Value(bool) = .init(false),
     /// Heap-allocated S3 store; non-null when S3 is configured. Freed in deinit.
     s3_store: ?*storage_mod.S3ObjectStore = null,
     /// Per-partition context structs for snapshot log writers. Freed in deinit.
@@ -351,11 +358,15 @@ pub const Gateway = struct {
         };
         gw.client_seq = 0;
         gw.partition_count = opts.partition_count;
+        gw.apply_thread = null;
+        gw.apply_shutdown = .init(false);
 
         return gw;
     }
 
     pub fn deinit(self: *Gateway) void {
+        self.apply_shutdown.store(true, .release);
+        if (self.apply_thread) |t| t.join();
         self.cdc.deinit();
         self.sequencer.deinit();
         self.registry.deinit();
@@ -403,15 +414,23 @@ pub const Gateway = struct {
 
     /// Register a SQL query and return its hash with schema version.
     /// Idempotent: registering the same SQL twice returns the same hash.
+    /// Routes through Raft so all nodes replicate the schema change.
     pub fn register(self: *Gateway, sql: []const u8) !RegisterResult {
         self.error_detail_len = 0;
+        // Register locally to compute the hash (idempotent — safe to call before commit).
         const hash = try self.registry.register(sql);
         self.metrics.queries_registered.inc();
-        // Persist registration so it can be replayed on restart.
-        const seq = self.sequencer.next_seq;
-        self.sequencer.next_seq += 1;
-        const entry = log_mod.LogEntry.create(seq, 0, .schema_change, sql);
-        try self.sequencer.partition_logs[0].appendEntryAt(entry);
+        // Replicate via Raft — all nodes will apply this schema_change from the
+        // committed Raft entry and register the query in their local registries.
+        self.client_seq += 1;
+        var pending: sequencer_mod.PendingSubmit = undefined;
+        _ = try self.sequencer.submitBytes(
+            &pending,
+            sql,
+            self.client_id,
+            self.client_seq,
+            .schema_change,
+        ).awaitCommit();
         return .{
             .hash = hash,
             .schema_version = self.registry.schema_seq,
@@ -484,7 +503,7 @@ pub const Gateway = struct {
 
             // Submit to Sequencer — enqueues to owner thread; spins until committed.
             var pending: sequencer_mod.PendingSubmit = undefined;
-            const handle = self.sequencer.submitBytes(&pending, intent_buf.items, self.client_id, op_seq);
+            const handle = self.sequencer.submitBytes(&pending, intent_buf.items, self.client_id, op_seq, .txn_intent);
             const result = try handle.awaitCommit();
 
             // Read committed entry from partition log
@@ -509,6 +528,9 @@ pub const Gateway = struct {
                 if (exec_detail.len > 0) self.setDetail("{s}", .{exec_detail});
                 return e;
             };
+            // Track applied seq so the follower apply loop starts from the right place
+            // after a leadership change.
+            self.sql_exec.committed_seq = result.seq;
 
             switch (exec_result) {
                 .ok => |ok| return .{ .rows_affected = ok.rows_affected, .result_set = ok.result_set },
@@ -652,6 +674,41 @@ pub const Gateway = struct {
                     _ = self.sql_exec.run(e) catch {};
                 } else {
                     self.sql_exec.committed_seq = e.header.seq;
+                }
+                from_seq = e.header.seq + 1;
+            }
+            if (entries.len < batch) break;
+        }
+    }
+
+    /// Incrementally apply newly committed partition log entries to local storage.
+    /// Called by the follower apply loop and after leader execute() for read-your-writes.
+    /// Processes entries in seq order: schema_change entries update the registry;
+    /// txn_intent entries run through the executor.
+    pub fn applyNewEntries(self: *Gateway) !void {
+        const batch = 64;
+        // Multi-partition requires merge-sort across logs by seq.
+        const log = &self.sequencer.partition_logs[0];
+        var from_seq = self.sql_exec.committed_seq + 1;
+        while (true) {
+            const entries = try log.read(from_seq, batch, self.alloc);
+            defer {
+                for (entries) |*e| e.deinit(self.alloc);
+                self.alloc.free(entries);
+            }
+            if (entries.len == 0) break;
+            for (entries) |e| {
+                switch (e.header.kind) {
+                    .schema_change => {
+                        if (isSqlDdl(e.payload)) {
+                            self.replayDdl(e.payload) catch {};
+                        } else {
+                            _ = self.registry.register(e.payload) catch {};
+                        }
+                        self.sql_exec.committed_seq = e.header.seq;
+                    },
+                    .txn_intent => _ = self.sql_exec.run(e) catch {},
+                    else => self.sql_exec.committed_seq = e.header.seq,
                 }
                 from_seq = e.header.seq + 1;
             }

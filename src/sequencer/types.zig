@@ -16,18 +16,26 @@ pub const OrderingEntry = struct {
 };
 
 /// The ordering decision for one epoch — what the Sequencer replicates via Raft.
+/// entry_kind and payload are included so all nodes can write to their partition
+/// logs directly from the committed Raft entry without a separate data channel.
+/// payload is NOT owned by this struct — it is a slice into the serialized bytes
+/// when deserialized, or into the caller's buffer when constructed for serialization.
 pub const EpochDecision = struct {
     epoch_num: EpochNum,
     entries: []const OrderingEntry,
+    entry_kind: log_mod.EntryKind = .txn_intent,
+    payload: []const u8 = &.{},
 };
 
-/// A gateway-submitted TxnIntent that has crossed the sequencer's input boundary.
+/// A gateway-submitted entry that has crossed the sequencer's input boundary.
 /// The intent_payload is opaque to the sequencer — its content was validated by the
-/// gateway before submission. The sequencer treats it as an ordered, opaque blob.
+/// gateway before submission. entry_kind tells the sequencer what kind of partition
+/// log entry to write (txn_intent for DML, schema_change for DDL).
 pub const ValidatedSubmit = struct {
     client_id: u64,
     client_seq: u64,
     intent_payload: []const u8,
+    entry_kind: log_mod.EntryKind = .txn_intent,
 };
 
 /// Committed position of a submitted intent.
@@ -64,11 +72,17 @@ pub const SubmitHandle = struct {
 // --- EpochDecision wire format ---
 //
 // Layout:
-//   epoch_num: u64 (8 bytes)
-//   entry_count: u32 (4 bytes)
-//   entries: [entry_count]OrderingEntryRecord (each 24 bytes)
+//   epoch_num:    u64 le  (8 bytes)
+//   entry_count:  u32 le  (4 bytes)
+//   entries:      [entry_count]OrderingEntryRecord (each 28 bytes)
+//   entry_kind:   u8      (1 byte)
+//   payload_len:  u32 le  (4 bytes)
+//   payload:      [payload_len]u8
 //
 // OrderingEntryRecord: seq(8) + partition(4) + client_id(8) + client_seq(8) = 28 bytes
+//
+// entry_kind and payload allow all nodes to write the data entry to their local
+// partition log directly from the committed Raft entry.
 
 pub const ORDERING_ENTRY_SIZE: usize = 28;
 
@@ -102,19 +116,28 @@ pub fn serializeEpochDecision(
         std.mem.writeInt(u64, &cseq_buf, e.client_seq, .little);
         try out.appendSlice(alloc, &cseq_buf);
     }
+
+    // Payload section
+    try out.append(alloc, @intFromEnum(decision.entry_kind));
+    var plen_buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &plen_buf, @intCast(decision.payload.len), .little);
+    try out.appendSlice(alloc, &plen_buf);
+    try out.appendSlice(alloc, decision.payload);
 }
 
 /// Domain boundary — deserializes Raft-replicated ordering decision bytes into a
 /// proven-valid EpochDecision. Called when applying committed Raft entries; validates
 /// structure and length before the sequencer core acts on the decision.
-pub fn deserializeEpochDecision(payload: []const u8, alloc: std.mem.Allocator) !EpochDecision {
-    if (payload.len < 12) return error.InvalidPayload;
+/// entries is alloc-owned (caller must free); payload is a non-owned slice into bytes.
+pub fn deserializeEpochDecision(bytes: []const u8, alloc: std.mem.Allocator) !EpochDecision {
+    if (bytes.len < 12) return error.InvalidPayload;
 
-    const epoch_num = std.mem.readInt(u64, payload[0..8], .little);
-    const entry_count = std.mem.readInt(u32, payload[8..12], .little);
+    const epoch_num = std.mem.readInt(u64, bytes[0..8], .little);
+    const entry_count = std.mem.readInt(u32, bytes[8..12], .little);
 
-    const required_len = 12 + @as(usize, entry_count) * ORDERING_ENTRY_SIZE;
-    if (payload.len < required_len) return error.InvalidPayload;
+    const entries_end = 12 + @as(usize, entry_count) * ORDERING_ENTRY_SIZE;
+    // Minimum: entries + kind(1) + payload_len(4)
+    if (bytes.len < entries_end + 5) return error.InvalidPayload;
 
     const entries = try alloc.alloc(OrderingEntry, entry_count);
     errdefer alloc.free(entries);
@@ -122,12 +145,23 @@ pub fn deserializeEpochDecision(payload: []const u8, alloc: std.mem.Allocator) !
     for (0..entry_count) |i| {
         const base = 12 + i * ORDERING_ENTRY_SIZE;
         entries[i] = .{
-            .seq = std.mem.readInt(u64, payload[base..][0..8], .little),
-            .partition = std.mem.readInt(u32, payload[base + 8 ..][0..4], .little),
-            .client_id = std.mem.readInt(u64, payload[base + 12 ..][0..8], .little),
-            .client_seq = std.mem.readInt(u64, payload[base + 20 ..][0..8], .little),
+            .seq = std.mem.readInt(u64, bytes[base..][0..8], .little),
+            .partition = std.mem.readInt(u32, bytes[base + 8 ..][0..4], .little),
+            .client_id = std.mem.readInt(u64, bytes[base + 12 ..][0..8], .little),
+            .client_seq = std.mem.readInt(u64, bytes[base + 20 ..][0..8], .little),
         };
     }
 
-    return .{ .epoch_num = epoch_num, .entries = entries };
+    const kind_byte = bytes[entries_end];
+    const entry_kind = log_mod.EntryKind.fromByte(kind_byte) catch return error.InvalidPayload;
+    const payload_len = std.mem.readInt(u32, bytes[entries_end + 1 ..][0..4], .little);
+    const payload_start = entries_end + 5;
+    if (bytes.len < payload_start + payload_len) return error.InvalidPayload;
+
+    return .{
+        .epoch_num = epoch_num,
+        .entries = entries,
+        .entry_kind = entry_kind,
+        .payload = bytes[payload_start .. payload_start + payload_len],
+    };
 }

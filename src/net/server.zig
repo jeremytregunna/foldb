@@ -168,6 +168,20 @@ fn handleConn(
     try conn_mod.Conn.run(client_fd, gw, users, alloc);
 }
 
+/// Follower apply loop: continuously applies newly committed partition log entries to
+/// local storage when this node is not the leader. On the leader, execute() drives
+/// apply inline via runValidated(). On followers, connections return NotLeader so this
+/// is the only apply path.
+fn applyLoop(gw: *gateway_mod.Gateway) void {
+    const sleep_ts = std.os.linux.timespec{ .sec = 0, .nsec = 5_000_000 }; // 5ms
+    while (!gw.apply_shutdown.load(.acquire)) {
+        if (!gw.sequencer.isLeader()) {
+            gw.applyNewEntries() catch {};
+        }
+        _ = std.os.linux.nanosleep(&sleep_ts, null);
+    }
+}
+
 /// Main server loop. Accepts connections and spawns a concurrent task per connection.
 /// Returns cleanly when SIGINT is received so deferred cleanup (flush, deinit) runs.
 pub fn serve(
@@ -178,6 +192,8 @@ pub fn serve(
     alloc: std.mem.Allocator,
 ) !void {
     installSignalHandlers();
+
+    gw.apply_thread = try std.Thread.spawn(.{}, applyLoop, .{gw});
 
     const server_fd = try bindListen(port);
     defer _ = std.os.linux.close(@intCast(server_fd));

@@ -208,6 +208,7 @@ test "3-node actor cluster: submitBytes commits and is readable" {
         "actor_commit_test",
         1,
         1,
+        .txn_intent,
     ).awaitCommit();
 
     try testing.expect(result.seq >= 1);
@@ -238,6 +239,7 @@ test "3-node actor cluster: majority commits ordering decision" {
         "majority_test",
         1,
         1,
+        .txn_intent,
     ).awaitCommit();
 
     // awaitCommit returned — the leader committed. Give followers a moment to catch up.
@@ -268,6 +270,7 @@ test "3-node actor cluster: multiple sequential commits" {
             "sequential",
             1,
             @intCast(i),
+            .txn_intent,
         ).awaitCommit();
 
         try testing.expect(result.seq > last_seq);
