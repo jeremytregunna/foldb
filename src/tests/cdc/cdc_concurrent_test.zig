@@ -79,7 +79,7 @@ const ConsumerCtx = struct {
 fn consumerThread(ctx: *ConsumerCtx) void {
     var buf: [8]CdcEvent = undefined;
     while (ctx.received < ctx.expected) {
-        const n = ctx.sub.next(&buf) catch |e| { ctx.err = e; return; };
+        const n = ctx.sub.next(&buf);
         for (0..n) |i| {
             ctx.received += 1;
             var e = buf[i];
@@ -93,7 +93,7 @@ test "concurrent dispatch and next: all events delivered" {
     const alloc = testing.allocator;
     const N = 500;
 
-    var mgr = CdcManager.init(alloc);
+    var mgr = try CdcManager.init(alloc);
     defer mgr.deinit();
 
     const sub = try mgr.subscribe(null, 0);
@@ -136,7 +136,7 @@ test "concurrent subscribe/unsubscribe during dispatch: no crash" {
     const alloc = testing.allocator;
     const N = 200;
 
-    var mgr = CdcManager.init(alloc);
+    var mgr = try CdcManager.init(alloc);
     defer mgr.deinit();
 
     var pctx = SubscribeWhileDispatchCtx{ .mgr = &mgr, .n_events = N, .alloc = alloc };
@@ -163,7 +163,7 @@ const AckCtx = struct {
 
 fn ackThread(ctx: *AckCtx) void {
     for (1..ctx.n + 1) |seq| {
-        ctx.sub.ack(seq) catch |e| { ctx.err = e; return; };
+        ctx.sub.ack(seq);
         std.atomic.spinLoopHint();
     }
 }
@@ -172,7 +172,7 @@ test "concurrent push and ack: no corruption, no double-free" {
     const alloc = testing.allocator;
     const N = 300;
 
-    var mgr = CdcManager.init(alloc);
+    var mgr = try CdcManager.init(alloc);
     defer mgr.deinit();
 
     const sub = try mgr.subscribe(null, 0);
@@ -191,7 +191,7 @@ test "concurrent push and ack: no corruption, no double-free" {
     // Drain any remaining events to verify no corruption.
     var buf: [16]CdcEvent = undefined;
     while (true) {
-        const n = try sub.next(&buf);
+        const n = sub.next(&buf);
         if (n == 0) break;
         for (0..n) |i| buf[i].deinit();
     }

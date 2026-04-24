@@ -229,7 +229,7 @@ pub const Executor = struct {
         defer if (before_images) |*bi| bi.deinit();
         if (self.cdc) |mgr| {
             const pre_seq: Seq = if (entry.seq > 0) entry.seq - 1 else 0;
-            before_images = try mgr.captureBeforeImages(mutations.items, self.storage, pre_seq, self.alloc);
+            before_images = try mgr.capture_before_images(mutations.items, self.storage, pre_seq, self.alloc);
         }
 
         try self.storage.apply(mutations.items, entry.seq);

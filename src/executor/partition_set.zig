@@ -223,7 +223,7 @@ pub const PartitionSet = struct {
             defer if (bi) |*b| b.deinit();
             if (exec.cdc) |mgr| {
                 const pre_seq: Seq = if (seq > 0) seq - 1 else 0;
-                bi = try mgr.captureBeforeImages(mutations, exec.storage, pre_seq, alloc);
+                bi = try mgr.capture_before_images(mutations, exec.storage, pre_seq, alloc);
             }
 
             try exec.storage.apply(mutations, seq);

@@ -130,7 +130,7 @@ fn applyWithCdc(
     alloc: std.mem.Allocator,
 ) !void {
     const pre_seq: Seq = if (seq > 0) seq - 1 else 0;
-    var bi = try mgr.captureBeforeImages(mutations, storage, pre_seq, alloc);
+    var bi = try mgr.capture_before_images(mutations, storage, pre_seq, alloc);
     defer bi.deinit();
     try storage.apply(mutations, seq);
     try mgr.dispatch(seq, epoch, log_mod.EntryKind.txn_intent, mutations, bi, alloc);
@@ -139,25 +139,25 @@ fn applyWithCdc(
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 test "CdcManager: init and deinit" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
-    try testing.expectEqual(@as(usize, 0), mgr.subscriptions.items.len);
+    try testing.expectEqual(@as(u32, 0), mgr.subscription_count);
 }
 
 test "CdcManager: subscribe and unsubscribe" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const sub = try mgr.subscribe(null, 0);
-    try testing.expectEqual(@as(usize, 1), mgr.subscriptions.items.len);
+    try testing.expectEqual(@as(u32, 1), mgr.subscription_count);
     try testing.expectEqual(@as(u64, 1), sub.id);
 
     mgr.unsubscribe(sub.id);
-    try testing.expectEqual(@as(usize, 0), mgr.subscriptions.items.len);
+    try testing.expectEqual(@as(u32, 0), mgr.subscription_count);
 }
 
 test "CDC: insert produces event with no before and correct after" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -177,7 +177,7 @@ test "CDC: insert produces event with no before and correct after" {
     try applyWithCdc(&mgr, &storage, &.{m}, 1, 0, testing.allocator);
 
     var buf: [1]CdcEvent = undefined;
-    const n = try sub.next(&buf);
+    const n = sub.next(&buf);
     defer buf[0].deinit();
     try testing.expectEqual(@as(usize, 1), n);
 
@@ -193,7 +193,7 @@ test "CDC: insert produces event with no before and correct after" {
 }
 
 test "CDC: update produces event with before and after" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -212,7 +212,7 @@ test "CDC: update produces event with before and after" {
     defer freeMutation(ins, testing.allocator);
     try applyWithCdc(&mgr, &storage, &.{ins}, 1, 0, testing.allocator);
     var drain1: [1]CdcEvent = undefined;
-    const nd1 = try sub.next(&drain1);
+    const nd1 = sub.next(&drain1);
     if (nd1 > 0) drain1[0].deinit();
 
     // Now update
@@ -221,7 +221,7 @@ test "CDC: update produces event with before and after" {
     try applyWithCdc(&mgr, &storage, &.{upd}, 2, 0, testing.allocator);
 
     var buf: [1]CdcEvent = undefined;
-    const n = try sub.next(&buf);
+    const n = sub.next(&buf);
     defer buf[0].deinit();
     try testing.expectEqual(@as(usize, 1), n);
 
@@ -234,7 +234,7 @@ test "CDC: update produces event with before and after" {
 }
 
 test "CDC: delete produces event with before and no after" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -252,7 +252,7 @@ test "CDC: delete produces event with before and no after" {
     defer freeMutation(ins, testing.allocator);
     try applyWithCdc(&mgr, &storage, &.{ins}, 1, 0, testing.allocator);
     var drain2: [1]CdcEvent = undefined;
-    const nd2 = try sub.next(&drain2);
+    const nd2 = sub.next(&drain2);
     if (nd2 > 0) drain2[0].deinit();
 
     const del = try makeDeleteMutation(1, testing.allocator);
@@ -260,7 +260,7 @@ test "CDC: delete produces event with before and no after" {
     try applyWithCdc(&mgr, &storage, &.{del}, 2, 0, testing.allocator);
 
     var buf: [1]CdcEvent = undefined;
-    const n = try sub.next(&buf);
+    const n = sub.next(&buf);
     defer buf[0].deinit();
     try testing.expectEqual(@as(usize, 1), n);
 
@@ -272,7 +272,7 @@ test "CDC: delete produces event with before and no after" {
 }
 
 test "CDC: table_filter excludes non-matching tables" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -292,12 +292,12 @@ test "CDC: table_filter excludes non-matching tables" {
     try applyWithCdc(&mgr, &storage, &.{m}, 1, 0, testing.allocator);
 
     var buf: [1]CdcEvent = undefined;
-    const n = try sub.next(&buf);
+    const n = sub.next(&buf);
     try testing.expectEqual(@as(usize, 0), n);
 }
 
 test "CDC: multiple subscribers each receive the event" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -318,9 +318,9 @@ test "CDC: multiple subscribers each receive the event" {
 
     var buf1: [1]CdcEvent = undefined;
     var buf2: [1]CdcEvent = undefined;
-    const n1 = try sub1.next(&buf1);
+    const n1 = sub1.next(&buf1);
     defer buf1[0].deinit();
-    const n2 = try sub2.next(&buf2);
+    const n2 = sub2.next(&buf2);
     defer buf2[0].deinit();
 
     try testing.expectEqual(@as(usize, 1), n1);
@@ -330,7 +330,7 @@ test "CDC: multiple subscribers each receive the event" {
 }
 
 test "CDC: ack advances cursor" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -355,17 +355,17 @@ test "CDC: ack advances cursor" {
     try testing.expectEqual(@as(Seq, 0), sub.cursor.load(.monotonic));
 
     var buf: [2]CdcEvent = undefined;
-    const n = try sub.next(&buf);
+    const n = sub.next(&buf);
     try testing.expectEqual(@as(usize, 2), n);
     buf[0].deinit();
     buf[1].deinit();
 
-    try sub.ack(2);
+    sub.ack(2);
     try testing.expectEqual(@as(Seq, 2), sub.cursor.load(.monotonic));
 }
 
 test "CDC: no events for empty mutation list" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -381,12 +381,12 @@ test "CDC: no events for empty mutation list" {
     try applyWithCdc(&mgr, &storage, &.{}, 1, 0, testing.allocator);
 
     var buf: [1]CdcEvent = undefined;
-    const n = try sub.next(&buf);
+    const n = sub.next(&buf);
     try testing.expectEqual(@as(usize, 0), n);
 }
 
 test "CDC: Executor.withCdc routes events through executor" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -416,7 +416,7 @@ test "CDC: Executor.withCdc routes events through executor" {
     try testing.expect(result == .ok);
 
     var buf: [1]CdcEvent = undefined;
-    const n = try sub.next(&buf);
+    const n = sub.next(&buf);
     defer buf[0].deinit();
     try testing.expectEqual(@as(usize, 1), n);
     try testing.expectEqual(CdcOperation.insert, buf[0].effects[0].op);
@@ -446,7 +446,7 @@ fn testInsertHandler(
 }
 
 test "CDC: cross-partition transaction emits events on both partitions" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     // Two storage directories for two partitions.
@@ -505,7 +505,7 @@ test "CDC: cross-partition transaction emits events on both partitions" {
 
     // Both partitions should have emitted a CDC event.
     var buf: [2]CdcEvent = undefined;
-    const n = try sub.next(&buf);
+    const n = sub.next(&buf);
     defer for (buf[0..n]) |*e| e.deinit();
     try testing.expectEqual(@as(usize, 2), n);
 
@@ -546,7 +546,7 @@ fn crossInsertExecute(
 }
 
 test "CDC: event.kind is txn_intent" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -565,7 +565,7 @@ test "CDC: event.kind is txn_intent" {
     try applyWithCdc(&mgr, &storage, &.{m}, 1, 7, testing.allocator);
 
     var buf: [1]CdcEvent = undefined;
-    const n = try sub.next(&buf);
+    const n = sub.next(&buf);
     defer buf[0].deinit();
     try testing.expectEqual(@as(usize, 1), n);
     try testing.expectEqual(log_mod.EntryKind.txn_intent, buf[0].kind);
@@ -573,7 +573,7 @@ test "CDC: event.kind is txn_intent" {
 }
 
 test "CDC: multiple effects in one transaction" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -595,7 +595,7 @@ test "CDC: multiple effects in one transaction" {
     try applyWithCdc(&mgr, &storage, &.{ m1, m2 }, 1, 0, testing.allocator);
 
     var buf: [1]CdcEvent = undefined;
-    const n = try sub.next(&buf);
+    const n = sub.next(&buf);
     defer buf[0].deinit();
     try testing.expectEqual(@as(usize, 1), n);
     // One event, two effects.
@@ -605,7 +605,7 @@ test "CDC: multiple effects in one transaction" {
 }
 
 test "CDC: table_filter passes matching table" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -625,14 +625,14 @@ test "CDC: table_filter passes matching table" {
     try applyWithCdc(&mgr, &storage, &.{m}, 1, 0, testing.allocator);
 
     var buf: [1]CdcEvent = undefined;
-    const n = try sub.next(&buf);
+    const n = sub.next(&buf);
     defer buf[0].deinit();
     try testing.expectEqual(@as(usize, 1), n);
     try testing.expectEqual(@as(u32, TABLE_ID), buf[0].effects[0].table_id);
 }
 
 test "CDC: unsubscribe stops delivery" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -653,7 +653,7 @@ test "CDC: unsubscribe stops delivery" {
     try applyWithCdc(&mgr, &storage, &.{m1}, 1, 0, testing.allocator);
 
     var buf1: [1]CdcEvent = undefined;
-    const n1 = try sub.next(&buf1);
+    const n1 = sub.next(&buf1);
     // sub pointer is still valid here (manager still owns it until unsubscribe)
     try testing.expectEqual(@as(usize, 1), n1);
     buf1[0].deinit();
@@ -665,11 +665,11 @@ test "CDC: unsubscribe stops delivery" {
     defer freeMutation(m2, testing.allocator);
     try applyWithCdc(&mgr, &storage, &.{m2}, 2, 0, testing.allocator);
 
-    try testing.expectEqual(@as(usize, 0), mgr.subscriptions.items.len);
+    try testing.expectEqual(@as(u32, 0), mgr.subscription_count);
 }
 
 test "CDC: next with partial buffer drains incrementally" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -695,7 +695,7 @@ test "CDC: next with partial buffer drains incrementally" {
 
     // Read two at a time.
     var buf: [2]CdcEvent = undefined;
-    const n1 = try sub.next(&buf);
+    const n1 = sub.next(&buf);
     try testing.expectEqual(@as(usize, 2), n1);
     try testing.expectEqual(@as(Seq, 1), buf[0].seq);
     try testing.expectEqual(@as(Seq, 2), buf[1].seq);
@@ -703,14 +703,14 @@ test "CDC: next with partial buffer drains incrementally" {
     buf[1].deinit();
 
     // One remains.
-    const n2 = try sub.next(&buf);
+    const n2 = sub.next(&buf);
     defer buf[0].deinit();
     try testing.expectEqual(@as(usize, 1), n2);
     try testing.expectEqual(@as(Seq, 3), buf[0].seq);
 }
 
 test "CDC: update on nonexistent row has null before" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -730,7 +730,7 @@ test "CDC: update on nonexistent row has null before" {
     try applyWithCdc(&mgr, &storage, &.{m}, 1, 0, testing.allocator);
 
     var buf: [1]CdcEvent = undefined;
-    const n = try sub.next(&buf);
+    const n = sub.next(&buf);
     defer buf[0].deinit();
     try testing.expectEqual(@as(usize, 1), n);
     try testing.expectEqual(CdcOperation.update, buf[0].effects[0].op);
@@ -739,7 +739,7 @@ test "CDC: update on nonexistent row has null before" {
 }
 
 test "CDC: delete on nonexistent row has null before" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -758,7 +758,7 @@ test "CDC: delete on nonexistent row has null before" {
     try applyWithCdc(&mgr, &storage, &.{m}, 1, 0, testing.allocator);
 
     var buf: [1]CdcEvent = undefined;
-    const n = try sub.next(&buf);
+    const n = sub.next(&buf);
     defer buf[0].deinit();
     try testing.expectEqual(@as(usize, 1), n);
     try testing.expectEqual(CdcOperation.delete, buf[0].effects[0].op);
@@ -767,7 +767,7 @@ test "CDC: delete on nonexistent row has null before" {
 }
 
 test "CDC: aborted transaction produces no events" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -796,12 +796,12 @@ test "CDC: aborted transaction produces no events" {
     try testing.expect(result == .abort);
 
     var buf: [1]CdcEvent = undefined;
-    const n = try sub.next(&buf);
+    const n = sub.next(&buf);
     try testing.expectEqual(@as(usize, 0), n);
 }
 
 test "CDC: non-txn log entry produces no events" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -823,12 +823,12 @@ test "CDC: non-txn log entry produces no events" {
     _ = try executor.run(noop_entry);
 
     var buf: [1]CdcEvent = undefined;
-    const n = try sub.next(&buf);
+    const n = sub.next(&buf);
     try testing.expectEqual(@as(usize, 0), n);
 }
 
 test "CDC: push skips events at or below from_seq cursor" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -855,7 +855,7 @@ test "CDC: push skips events at or below from_seq cursor" {
     try applyWithCdc(&mgr, &storage, &.{m3}, 3, 0, testing.allocator);
 
     var buf: [3]CdcEvent = undefined;
-    const n = try sub.next(&buf);
+    const n = sub.next(&buf);
     defer for (buf[0..n]) |*e| e.deinit();
 
     // Only seq=3 should be delivered.
@@ -864,7 +864,7 @@ test "CDC: push skips events at or below from_seq cursor" {
 }
 
 test "CDC: ack before next prunes already-queued events" {
-    var mgr = CdcManager.init(testing.allocator);
+    var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
     const dir = try makeTempDir();
@@ -890,11 +890,11 @@ test "CDC: ack before next prunes already-queued events" {
     try applyWithCdc(&mgr, &storage, &.{m3}, 3, 0, testing.allocator);
 
     // Ack seq=2 before calling next() — events 1 and 2 should be pruned from pending.
-    try sub.ack(2);
+    sub.ack(2);
     try testing.expectEqual(@as(Seq, 2), sub.cursor.load(.monotonic));
 
     var buf: [3]CdcEvent = undefined;
-    const n = try sub.next(&buf);
+    const n = sub.next(&buf);
     defer for (buf[0..n]) |*e| e.deinit();
 
     // Only seq=3 should remain.

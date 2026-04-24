@@ -540,7 +540,7 @@ pub const Conn = struct {
         while (true) {
             // Flush pending events up to credit limit
             while (state.credits > 0 and !state.canceled) {
-                const n = sub.next(&buf) catch break;
+                const n = sub.next(&buf);
                 if (n == 0) break;
                 for (buf[0..n]) |*ev| {
                     defer ev.deinit();
@@ -601,7 +601,7 @@ pub const Conn = struct {
                         self.sendStreamError(stream_id, .protocol_error, "malformed AckCdc");
                         return;
                     };
-                    sub.ack(ack.acked_seq) catch {};
+                    sub.ack(ack.acked_seq);
                     const new_credits: u64 = @min(
                         std.math.maxInt(u64) - state.credits,
                         ack.add_credits,
@@ -716,7 +716,7 @@ pub const Conn = struct {
         const state = self.streams.getPtr(stream_id) orelse return;
         if (state.kind != .subscription) return;
         const sub = self.gw.getCdcSub(state.sub_id) orelse return;
-        try sub.ack(ack.acked_seq);
+        sub.ack(ack.acked_seq);
         const new_credits: u64 = @min(
             std.math.maxInt(u64) - state.credits,
             ack.add_credits,

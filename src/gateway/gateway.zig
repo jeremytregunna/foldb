@@ -233,7 +233,7 @@ pub const Gateway = struct {
         errdefer gw.sequencer.deinit();
         try gw.sequencer.start();
 
-        gw.cdc = cdc_mod.CdcManager.init(alloc);
+        gw.cdc = try cdc_mod.CdcManager.init(alloc);
         gw.sql_exec.initCdc(&gw.cdc);
 
         // Wire snapshot scheduling if an object store is available and interval is set.
@@ -325,7 +325,7 @@ pub const Gateway = struct {
     pub fn truncateLog(self: *Gateway) !void {
         var safe_seq = self.durable_snapshot_seq;
         if (safe_seq == 0) return;
-        const min_cdc = self.cdc.minCursor();
+        const min_cdc = self.cdc.min_cursor();
         if (min_cdc > 0 and min_cdc < safe_seq) safe_seq = min_cdc;
         for (self.sequencer.partition_logs) |*log| {
             log.notifySnapshot(safe_seq);
@@ -817,7 +817,7 @@ pub const Gateway = struct {
 
     /// Look up an active CDC subscription by ID (returns null if not found).
     pub fn getCdcSub(self: *Gateway, id: u64) ?*cdc_mod.CdcSubscription {
-        return self.cdc.findById(id);
+        return self.cdc.find_by_id(id);
     }
 
     /// Resolve a table name to its numeric ID via the schema registry.

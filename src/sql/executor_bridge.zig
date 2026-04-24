@@ -344,7 +344,7 @@ pub const SqlExecutor = struct {
         var before: ?cdc_mod.BeforeImages = null;
         if (self.cdc) |cdc| {
             if (mutations.items.len > 0) {
-                before = cdc.captureBeforeImages(mutations.items, self.storage, seq, self.alloc) catch null;
+                before = cdc.capture_before_images(mutations.items, self.storage, seq, self.alloc) catch null;
             }
         }
         defer if (before) |*b| b.deinit();
