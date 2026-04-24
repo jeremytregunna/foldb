@@ -74,7 +74,7 @@ fn dispatch(c: *client_mod.Client, sql_with_semi: []const u8, out: *Out) !void {
 
     const hash = c.register(sql) catch |e| {
         if (isConnError(e)) return e;
-        const msg = c.lastError();
+        const msg = c.last_error_msg();
         if (msg.len > 0) try out.print("error: {s}\n", .{msg}) else try out.print("error: {}\n", .{e});
         return;
     };
@@ -83,7 +83,7 @@ fn dispatch(c: *client_mod.Client, sql_with_semi: []const u8, out: *Out) !void {
         .ddl => {
             _ = c.execute(hash, &.{}) catch |e| {
                 if (isConnError(e)) return e;
-                const msg = c.lastError();
+                const msg = c.last_error_msg();
                 if (msg.len > 0) try out.print("error: {s}\n", .{msg}) else try out.print("error: {}\n", .{e});
                 return;
             };
@@ -92,7 +92,7 @@ fn dispatch(c: *client_mod.Client, sql_with_semi: []const u8, out: *Out) !void {
         .dml => {
             const result = c.execute(hash, &.{}) catch |e| {
                 if (isConnError(e)) return e;
-                const msg = c.lastError();
+                const msg = c.last_error_msg();
                 if (msg.len > 0) try out.print("error: {s}\n", .{msg}) else try out.print("error: {}\n", .{e});
                 return;
             };
@@ -101,7 +101,7 @@ fn dispatch(c: *client_mod.Client, sql_with_semi: []const u8, out: *Out) !void {
         .select => {
             var rs = c.query(hash, &.{}) catch |e| {
                 if (isConnError(e)) return e;
-                const msg = c.lastError();
+                const msg = c.last_error_msg();
                 if (msg.len > 0) try out.print("error: {s}\n", .{msg}) else try out.print("error: {}\n", .{e});
                 return;
             };
