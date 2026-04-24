@@ -370,8 +370,8 @@ pub const Gateway = struct {
         };
         gw.client_seq = 0;
         gw.partition_count = opts.partition_count;
-        gw.apply_thread = null;
         gw.apply_shutdown = .init(false);
+        gw.apply_thread = null;
 
         return gw;
     }
@@ -481,7 +481,7 @@ pub const Gateway = struct {
         // Reconnaissance: determine which storage partitions this transaction will touch.
         // On retry, re-run at the seq the executor assigned to the conflicting entry so
         // hints reflect state as of that point.
-        var recon_seq: Seq = self.sql_exec.committed_seq;
+        var recon_seq: Seq = self.sql_exec.currentSeq();
         var hints = try reconnaissanceScan(rq.plan, &self.partitioned, params, &self.schema, recon_seq, self.partition_count, self.alloc);
         defer hints.deinit();
 
@@ -518,31 +518,16 @@ pub const Gateway = struct {
             const handle = self.sequencer.submitBytes(&pending, intent_buf.items, self.client_id, op_seq, .txn_intent);
             const result = try handle.awaitCommit();
 
-            // Read committed entry from partition log
-            const partition_log = self.sequencer.partitionLog(result.partition);
-            const entries = try partition_log.read(result.seq, 1, self.alloc);
-            defer {
-                for (entries) |*e| e.deinit(self.alloc);
-                self.alloc.free(entries);
+            // Drain committed log entries up to result.seq. This runs on the
+            // gateway thread after awaitCommit() guarantees the entry is durable —
+            // commit precedes execution. When a background apply thread is running
+            // (follower mode), waitFor() will return without draining here.
+            while (self.sql_exec.currentSeq() < result.seq) {
+                self.applyNewEntries() catch {};
             }
-            if (entries.len == 0 or entries[0].header.seq != result.seq) {
-                return error.ExecutionError;
-            }
-
-            // This is the domain boundary — validate the committed log entry before execution.
-            var validated = executor_mod.validateTxnEntry(entries[0], self.alloc) catch {
-                return error.ExecutionError;
-            };
-            defer validated.decoded.deinit();
-            const exec_result = self.sql_exec.runValidated(validated) catch |e| {
-                // Forward executor-level detail (e.g. FK violation message) to gateway detail
-                const exec_detail = self.sql_exec.lastDetail();
-                if (exec_detail.len > 0) self.setDetail("{s}", .{exec_detail});
-                return e;
-            };
-            // Track applied seq so the follower apply loop starts from the right place
-            // after a leadership change.
-            self.sql_exec.committed_seq = result.seq;
+            const exec_result = self.sql_exec.waitFor(result.seq);
+            const exec_detail = self.sql_exec.lastDetail();
+            if (exec_detail.len > 0) self.setDetail("{s}", .{exec_detail});
 
             switch (exec_result) {
                 .ok => |ok| return .{ .rows_affected = ok.rows_affected, .result_set = ok.result_set },
@@ -558,7 +543,7 @@ pub const Gateway = struct {
                     .retry => {
                         // Executor detected a read-set mismatch; re-run reconnaissance at
                         // the seq this entry was assigned and resubmit with updated hints.
-                        recon_seq = validated.seq;
+                        recon_seq = result.seq;
                         continue;
                     },
                     else => {
@@ -589,7 +574,7 @@ pub const Gateway = struct {
             rq.plan,
             decoded_params,
             nondet,
-            self.sql_exec.committed_seq + 1,
+            self.sql_exec.currentSeq() + 1,
             self.alloc,
         );
         const rows_slice = try rows.toOwnedSlice(self.alloc);
@@ -685,7 +670,7 @@ pub const Gateway = struct {
                 if (e.header.kind == .txn_intent) {
                     _ = self.sql_exec.run(e) catch {};
                 } else {
-                    self.sql_exec.committed_seq = e.header.seq;
+                    self.sql_exec.advanceSeq(e.header.seq);
                 }
                 from_seq = e.header.seq + 1;
             }
@@ -693,15 +678,13 @@ pub const Gateway = struct {
         }
     }
 
-    /// Incrementally apply newly committed partition log entries to local storage.
-    /// Called by the follower apply loop and after leader execute() for read-your-writes.
-    /// Processes entries in seq order: schema_change entries update the registry;
-    /// txn_intent entries run through the executor.
+    /// Drain newly committed log entries into the executor.
+    /// The apply thread calls this in a loop; schema_change entries update the
+    /// registry before sql_exec.run() advances committed_seq.
     pub fn applyNewEntries(self: *Gateway) !void {
         const batch = 64;
-        // Multi-partition requires merge-sort across logs by seq.
         const log = &self.sequencer.partition_logs[0];
-        var from_seq = self.sql_exec.committed_seq + 1;
+        var from_seq = self.sql_exec.currentSeq() + 1;
         while (true) {
             const entries = try log.read(from_seq, batch, self.alloc);
             defer {
@@ -717,10 +700,10 @@ pub const Gateway = struct {
                         } else {
                             _ = self.registry.register(e.payload) catch {};
                         }
-                        self.sql_exec.committed_seq = e.header.seq;
+                        self.sql_exec.advanceSeq(e.header.seq);
                     },
                     .txn_intent => _ = self.sql_exec.run(e) catch {},
-                    else => self.sql_exec.committed_seq = e.header.seq,
+                    else => self.sql_exec.advanceSeq(e.header.seq),
                 }
                 from_seq = e.header.seq + 1;
             }
@@ -879,6 +862,16 @@ pub const Gateway = struct {
         return self.schema.getTableById(id) != null;
     }
 };
+
+// Drives applyNewEntries() in a loop until apply_shutdown is set.
+// Schema_change entries are applied to the registry before sql_exec advances
+// committed_seq, so txn_intent entries that follow always see current schema.
+fn applyThreadFn(gw: *Gateway) void {
+    while (!gw.apply_shutdown.load(.acquire)) {
+        gw.applyNewEntries() catch {};
+        std.Thread.yield() catch {};
+    }
+}
 
 /// Scan sql_text for NOW(), RANDOM(), UUID() calls (case-insensitive) and resolve each.
 fn resolveNondet(sql_text: []const u8, resolver: *const NondetResolver, alloc: std.mem.Allocator) ![]ResolvedValue {

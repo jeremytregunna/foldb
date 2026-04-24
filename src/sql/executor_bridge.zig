@@ -89,12 +89,28 @@ pub const ResultSet = struct {
     }
 };
 
+/// Result ring buffer size. Power of two so seq % ring_size compiles to a mask.
+/// Must exceed the maximum number of in-flight transactions at any instant.
+pub const result_ring_size: usize = 256;
+
+pub const ResultSlot = struct { seq: Seq, result: ExecResult };
+
 /// High-level SQL executor wrapping the storage and SQL registry.
+///
+/// The background apply thread calls run() for every committed log entry.
+/// run() writes the ExecResult into the ring buffer, then advances committed_seq
+/// with release ordering. The gateway thread calls waitFor() after awaitCommit()
+/// returns; it spin-yields until committed_seq reaches the target seq, then reads
+/// the result from the ring. The release/acquire pair guarantees the ring slot is
+/// visible before the gateway reads it.
 pub const SqlExecutor = struct {
     storage: *storage_mod.PartitionedStorage,
     registry: *registry_mod.SqlRegistry,
     schema: *schema_mod.SchemaRegistry,
-    committed_seq: Seq,
+    // Written by the apply thread (release), read by the gateway thread (acquire).
+    committed_seq: std.atomic.Value(Seq),
+    // Result ring: slot valid iff committed_seq >= slot.seq.
+    results: [result_ring_size]ResultSlot,
     alloc: std.mem.Allocator,
     /// Optional CDC manager. When set, mutations are captured and fanned out to subscribers.
     cdc: ?*cdc_mod.CdcManager = null,
@@ -116,11 +132,13 @@ pub const SqlExecutor = struct {
         schema: *schema_mod.SchemaRegistry,
         alloc: std.mem.Allocator,
     ) SqlExecutor {
+        const empty = ResultSlot{ .seq = 0, .result = .{ .ok = .{ .rows_affected = 0 } } };
         return .{
             .storage = storage,
             .registry = registry,
             .schema = schema,
-            .committed_seq = 0,
+            .committed_seq = .init(0),
+            .results = [1]ResultSlot{empty} ** result_ring_size,
             .alloc = alloc,
         };
     }
@@ -131,34 +149,59 @@ pub const SqlExecutor = struct {
     }
 
     pub fn currentSeq(self: *const SqlExecutor) Seq {
-        return self.committed_seq;
+        return self.committed_seq.load(.acquire);
+    }
+
+    /// Spin-yield until the apply thread has processed target_seq, then return
+    /// the stored ExecResult. Called by the gateway thread after awaitCommit().
+    pub fn waitFor(self: *SqlExecutor, target: Seq) ExecResult {
+        while (self.committed_seq.load(.acquire) < target) {
+            std.Thread.yield() catch {};
+        }
+        const slot = &self.results[target % result_ring_size];
+        std.debug.assert(slot.seq == target);
+        return slot.result;
+    }
+
+    /// Advance committed_seq for a non-txn_intent entry (schema_change, noop, etc.).
+    /// Writes an ok result to the ring so waitFor() on that seq returns immediately.
+    pub fn advanceSeq(self: *SqlExecutor, seq: Seq) void {
+        self.results[seq % result_ring_size] = .{ .seq = seq, .result = .{ .ok = .{ .rows_affected = 0 } } };
+        self.committed_seq.store(seq, .release);
     }
 
     /// Domain boundary — validates and dispatches a LogEntry.
+    /// Writes the result to the ring buffer then advances committed_seq atomically.
     /// Non-txn_intent entries advance committed_seq and return ok.
-    /// For txn_intent: CRC-verifies and deserializes at the boundary, then
-    /// hands a proven-valid entry to runValidated.
+    /// For txn_intent: CRC-verifies and deserializes, then hands to runValidated.
     pub fn run(self: *SqlExecutor, entry: LogEntry) !ExecResult {
         if (entry.header.kind != .txn_intent) {
-            self.committed_seq = entry.header.seq;
+            self.advanceSeq(entry.header.seq);
             return .{ .ok = .{ .rows_affected = 0 } };
         }
         // This is the domain boundary — CRC-verify and deserialize before the core.
         var validated = executor_mod.validateTxnEntry(entry, self.alloc) catch |e| {
-            self.committed_seq = entry.header.seq;
-            return switch (e) {
+            const r: ExecResult = switch (e) {
                 error.CrcMismatch => .{ .abort = .{ .code = .bad_params, .detail = "crc mismatch" } },
                 else => .{ .abort = .{ .code = .bad_params, .detail = "invalid payload" } },
             };
+            self.results[entry.header.seq % result_ring_size] = .{ .seq = entry.header.seq, .result = r };
+            self.committed_seq.store(entry.header.seq, .release);
+            return r;
         };
         defer validated.decoded.deinit();
-        return self.runValidated(validated);
+        const result = try self.runValidated(validated);
+        // Write ring before advancing committed_seq — the release store is the
+        // synchronisation point that makes the slot visible to waitFor's acquire load.
+        self.results[validated.seq % result_ring_size] = .{ .seq = validated.seq, .result = result };
+        self.committed_seq.store(validated.seq, .release);
+        return result;
     }
 
     /// Domain core — receives a proven-valid TxnIntent entry. No input
     /// validation here; only business invariants (missing_query, constraint_violation).
+    /// committed_seq is updated by the caller (run) after this returns.
     pub fn runValidated(self: *SqlExecutor, validated: executor_mod.ValidatedTxnEntry) !ExecResult {
-        defer self.committed_seq = validated.seq;
         const decoded = validated.decoded;
 
         const rq = self.registry.lookup(decoded.query_hash.*) orelse {
