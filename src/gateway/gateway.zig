@@ -9,6 +9,9 @@ const sequencer_mod = @import("sequencer.zig");
 const log_mod = @import("log.zig");
 const observability_mod = @import("observability.zig");
 const cdc_mod = @import("cdc.zig");
+const nondet_mod = @import("nondet.zig");
+const recon_mod = @import("recon.zig");
+const snapshot_hooks_mod = @import("snapshot_hooks.zig");
 
 pub const QueryHash = sql_mod.QueryHash;
 pub const Seq = @import("types.zig").Seq;
@@ -43,92 +46,10 @@ pub const GatewayError = error{
     ConstraintViolation,
 };
 
-/// Reconnaissance scan strategy used during transaction intent building.
-pub const ReconStrategy = enum {
-    /// Scan rows but stop as soon as all partition_count slots are seen. Default.
-    early_exit,
-    /// Skip the row scan entirely and claim all partitions. Cheaper but reduces concurrency.
-    all_partitions,
-};
-
-/// Injectable clock source. Production uses real clock_gettime; sim substitutes VirtualClock.
-/// now_micros_fn returns unix microseconds as i64.
-pub const ClockSource = struct {
-    clock_ctx: ?*anyopaque = null,
-    now_micros_fn: *const fn (?*anyopaque) i64 = realNowMicros,
-
-    pub fn now(self: ClockSource) i64 {
-        return self.now_micros_fn(self.clock_ctx);
-    }
-
-    fn realNowMicros(_: ?*anyopaque) i64 {
-        var ts: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
-        const sec_us: i64 = @as(i64, @intCast(ts.sec)) * 1_000_000;
-        const nsec_us: i64 = @as(i64, @intCast(@divTrunc(ts.nsec, 1_000)));
-        return sec_us + nsec_us;
-    }
-};
-
-/// Injectable random source. Production uses clock-seeded PRNG; sim substitutes SimScheduler.
-pub const RandSource = struct {
-    rand_ctx: ?*anyopaque = null,
-    fill_fn: *const fn (?*anyopaque, []u8) void = realFill,
-
-    pub fn fill(self: RandSource, buf: []u8) void {
-        self.fill_fn(self.rand_ctx, buf);
-    }
-
-    fn realFill(_: ?*anyopaque, buf: []u8) void {
-        var ts: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
-        const seed: u64 = @as(u64, @intCast(ts.sec)) * 1_000_000_000 +
-            @as(u64, @intCast(ts.nsec));
-        var rand = std.Random.Xoroshiro128.init(seed);
-        rand.fill(buf);
-    }
-};
-
-/// Nondeterminism resolver - computes values for NOW(), RANDOM(), UUID()
-pub const NondetResolver = struct {
-    clock: ClockSource,
-    rand: RandSource,
-
-    pub fn init(clock: ClockSource, rand: RandSource) NondetResolver {
-        return .{ .clock = clock, .rand = rand };
-    }
-
-    pub fn resolveNow(self: NondetResolver) ResolvedValue {
-        return .{ .now = self.clock.now() };
-    }
-
-    pub fn resolveRandom(self: NondetResolver) ResolvedValue {
-        var bytes: [16]u8 = undefined;
-        self.rand.fill(&bytes);
-        return .{ .random = bytes };
-    }
-
-    pub fn resolveUuidV7(self: NondetResolver) ResolvedValue {
-        const micros = self.clock.now();
-        var uuid: [16]u8 = undefined;
-        const ms: u64 = @intCast(@divTrunc(micros, 1_000));
-        std.mem.writeInt(u64, &uuid[0..8].*, ms, .big);
-        uuid[6] = (uuid[6] & 0x0F) | 0x70;
-        var rand_bytes: [8]u8 = undefined;
-        self.rand.fill(&rand_bytes);
-        @memcpy(uuid[8..16], &rand_bytes);
-        uuid[8] = (uuid[8] & 0x3F) | 0x80;
-        return .{ .uuid_v7 = uuid };
-    }
-};
-
-/// Context for a per-partition snapshot log writer. Stable once allocated in init.
-const SnapshotWriterCtx = struct {
-    sequencer: *sequencer_mod.Sequencer,
-    partition_id: u32,
-    client_id: u64,
-    client_seq: u64,
-};
+pub const ReconStrategy = recon_mod.ReconStrategy;
+pub const ClockSource = nondet_mod.ClockSource;
+pub const RandSource = nondet_mod.RandSource;
+pub const NondetResolver = nondet_mod.NondetResolver;
 
 /// Context for the post-snapshot truncation hook. Stable once set in init.
 const TruncateCtx = struct { gateway: *Gateway };
@@ -138,26 +59,6 @@ fn onSnapshotComplete(ptr: *anyopaque, snapshot_seq: sequencer_mod.Seq) void {
     const gw = ctx.gateway;
     if (snapshot_seq > gw.durable_snapshot_seq) gw.durable_snapshot_seq = snapshot_seq;
     gw.truncateLog() catch |err| std.log.warn("truncateLog failed after snapshot: {}", .{err});
-}
-
-fn writeSnapshotToLog(ptr: *anyopaque, manifest_key: []const u8, seq: u64, partition_id: u32, alloc: std.mem.Allocator) anyerror!void {
-    const ctx: *SnapshotWriterCtx = @ptrCast(@alignCast(ptr));
-    const payload = storage_mod.SnapshotMarkerPayload{
-        .manifest_key = manifest_key,
-        .seq = seq,
-        .partition_id = partition_id,
-    };
-    const bytes = try payload.serialize(alloc);
-    defer alloc.free(bytes);
-    ctx.client_seq += 1;
-    var pending: sequencer_mod.PendingSubmit = undefined;
-    _ = try ctx.sequencer.submitBytes(
-        &pending,
-        bytes,
-        ctx.client_id,
-        ctx.client_seq,
-        .snapshot_marker,
-    ).awaitCommit();
 }
 
 /// The main Gateway struct.
@@ -172,7 +73,7 @@ pub const Gateway = struct {
     partitioned: storage_mod.PartitionedStorage,
     /// Arena that owns storage-schema column slices allocated during DDL.
     storage_schema_arena: std.heap.ArenaAllocator,
-    nondet_resolver: NondetResolver,
+    nondet_resolver: nondet_mod.NondetResolver,
     sequencer: sequencer_mod.Sequencer,
     /// CDC event fan-out for wire-protocol subscriptions.
     cdc: cdc_mod.CdcManager,
@@ -194,7 +95,7 @@ pub const Gateway = struct {
     /// Heap-allocated S3 store; non-null when S3 is configured. Freed in deinit.
     s3_store: ?*storage_mod.S3ObjectStore = null,
     /// Per-partition context structs for snapshot log writers. Freed in deinit.
-    snapshot_writer_ctxs: []SnapshotWriterCtx = &.{},
+    snapshot_writer_ctxs: []snapshot_hooks_mod.SnapshotWriterCtx = &.{},
     /// Highest seq for which a snapshot has been durably uploaded. Updated by postSnapshotImpl.
     durable_snapshot_seq: sequencer_mod.Seq = 0,
     /// Stable context for the post-snapshot truncation hook. Initialized in init.
@@ -317,7 +218,7 @@ pub const Gateway = struct {
         gw.schema = sql_mod.SchemaRegistry.init(alloc);
         gw.registry = sql_mod.SqlRegistry.init(alloc, &gw.schema);
         gw.sql_exec = sql_mod.SqlExecutor.init(&gw.partitioned, &gw.registry, &gw.schema, alloc);
-        gw.nondet_resolver = NondetResolver.init(opts.clock, opts.rand);
+        gw.nondet_resolver = nondet_mod.NondetResolver.init(opts.clock, opts.rand);
 
         const seq_cfg = sequencer_mod.Config{
             .partition_count = opts.partition_count,
@@ -343,7 +244,7 @@ pub const Gateway = struct {
         };
         if (snap_obj) |obj| {
             if (opts.snapshot_interval_entries > 0) {
-                const ctxs = try alloc.alloc(SnapshotWriterCtx, pc);
+                const ctxs = try alloc.alloc(snapshot_hooks_mod.SnapshotWriterCtx, pc);
                 for (ctxs, 0..) |*ctx, i| {
                     ctx.* = .{
                         .sequencer = &gw.sequencer,
@@ -361,7 +262,7 @@ pub const Gateway = struct {
                         .store = obj,
                         .log_writer = .{
                             .ptr = &ctxs[i],
-                            .writeFn = &writeSnapshotToLog,
+                            .writeFn = &snapshot_hooks_mod.writeSnapshotToLog,
                         },
                         .partition_id = @intCast(i),
                         .post_snapshot = .{
@@ -489,7 +390,7 @@ pub const Gateway = struct {
         all_nondet: []const ResolvedValue,
         buf: *std.ArrayList(u8),
     ) !void {
-        var hints = try reconnaissanceScan(
+        var hints = try recon_mod.reconnaissanceScan(
             plan, &self.partitioned, params, &self.schema,
             recon_seq, self.partition_count, self.recon_strategy, self.alloc,
         );
@@ -565,7 +466,7 @@ pub const Gateway = struct {
         defer self.alloc.free(params_bytes);
 
         // Resolve nondeterministic functions in the SQL text (NOW(), RANDOM(), UUID()).
-        const resolved = try resolveNondet(rq.sql_text, &self.nondet_resolver, self.alloc);
+        const resolved = try nondet_mod.resolveNondet(rq.sql_text, &self.nondet_resolver, self.alloc);
         defer self.alloc.free(resolved);
         if (resolved.len > 0) self.metrics.nondet_resolved.add(@intCast(resolved.len));
 
@@ -942,40 +843,6 @@ fn applyThreadFn(gw: *Gateway) void {
     }
 }
 
-/// Scan sql_text for NOW(), RANDOM(), UUID() calls (case-insensitive) and resolve each.
-fn resolveNondet(sql_text: []const u8, resolver: *const NondetResolver, alloc: std.mem.Allocator) ![]ResolvedValue {
-    var results: std.ArrayList(ResolvedValue) = .empty;
-    errdefer results.deinit(alloc);
-
-    var i: usize = 0;
-    while (std.mem.indexOfAnyPos(u8, sql_text, i, "nNrRuU")) |pos| {
-        if (matchToken(sql_text, pos, "now(")) {
-            try results.append(alloc, resolver.resolveNow());
-            i = pos + 4;
-        } else if (matchToken(sql_text, pos, "random(")) {
-            try results.append(alloc, resolver.resolveRandom());
-            i = pos + 7;
-        } else if (matchToken(sql_text, pos, "uuid(")) {
-            try results.append(alloc, resolver.resolveUuidV7());
-            i = pos + 5;
-        } else {
-            i = pos + 1;
-        }
-    }
-
-    return results.toOwnedSlice(alloc);
-}
-
-fn matchToken(haystack: []const u8, pos: usize, needle: []const u8) bool {
-    if (pos + needle.len > haystack.len) return false;
-    for (needle, 0..) |c, j| {
-        const h = haystack[pos + j];
-        const hc = if (h >= 'A' and h <= 'Z') h + 32 else h;
-        if (hc != c) return false;
-    }
-    return true;
-}
-
 fn decodeParams(
     params: []const ColumnValue,
     param_types: []const sql_mod.ast.SqlType,
@@ -1076,288 +943,3 @@ fn extractColumnNames(
     }
 }
 
-// ── Reconnaissance ────────────────────────────────────────────────────────────
-
-/// Partition routing hints produced by reconnaissance.
-/// Callers must call deinit() when done.
-const ReconHints = struct {
-    read: []executor_mod.PartitionId,
-    write: []executor_mod.PartitionId,
-    alloc: std.mem.Allocator,
-
-    fn deinit(self: *ReconHints) void {
-        self.alloc.free(self.read);
-        self.alloc.free(self.write);
-    }
-};
-
-/// Determine which storage partitions a transaction plan will read and write.
-///
-/// For PK lookups: hashes the encoded key to a partition ID.
-/// For full-table scans and non-PK DML: enumerates actual rows in storage at
-/// at_seq and hashes each row's primary key. This is correct for any
-/// partition_count and produces exact partition sets rather than table-level
-/// over-approximations.
-fn reconnaissanceScan(
-    plan: sql_mod.plan.ExecutionPlan,
-    storage: *storage_mod.PartitionedStorage,
-    params: []const ColumnValue,
-    schema: *const sql_mod.SchemaRegistry,
-    at_seq: Seq,
-    partition_count: u32,
-    strategy: ReconStrategy,
-    alloc: std.mem.Allocator,
-) !ReconHints {
-    var read_set: PartitionSet = .{};
-    errdefer read_set.deinit(alloc);
-    var write_set: PartitionSet = .{};
-    errdefer write_set.deinit(alloc);
-
-    for (plan.stmts) |stmt| {
-        switch (stmt) {
-            .select => |node| try collectNodePartitions(node, storage, params, at_seq, partition_count, strategy, &read_set, alloc),
-            .insert => |ins| {
-                try collectInsertPartitions(ins, storage, params, schema, at_seq, partition_count, strategy, &write_set, alloc);
-                if (ins.source == .query) {
-                    try collectNodePartitions(ins.source.query, storage, params, at_seq, partition_count, strategy, &read_set, alloc);
-                }
-            },
-            .update => |upd| {
-                try scanTablePartitions(storage, upd.table_id, at_seq, partition_count, strategy, &write_set, alloc);
-                try scanTablePartitions(storage, upd.table_id, at_seq, partition_count, strategy, &read_set, alloc);
-                if (upd.from_table_id) |from_tid| {
-                    try scanTablePartitions(storage, from_tid, at_seq, partition_count, strategy, &read_set, alloc);
-                }
-            },
-            .delete => |del| {
-                try scanTablePartitions(storage, del.table_id, at_seq, partition_count, strategy, &write_set, alloc);
-                try scanTablePartitions(storage, del.table_id, at_seq, partition_count, strategy, &read_set, alloc);
-                for (del.using_table_ids) |tid| {
-                    try scanTablePartitions(storage, tid, at_seq, partition_count, strategy, &read_set, alloc);
-                }
-            },
-            .merge => |mrg| {
-                try scanTablePartitions(storage, mrg.target_id, at_seq, partition_count, strategy, &write_set, alloc);
-                try scanTablePartitions(storage, mrg.target_id, at_seq, partition_count, strategy, &read_set, alloc);
-                try collectNodePartitions(mrg.source, storage, params, at_seq, partition_count, strategy, &read_set, alloc);
-            },
-            .assert => {},
-        }
-    }
-
-    return .{
-        .read = try read_set.list.toOwnedSlice(alloc),
-        .write = try write_set.list.toOwnedSlice(alloc),
-        .alloc = alloc,
-    };
-}
-
-/// Map an encoded storage key to a partition ID by hashing.
-fn keyToPartitionId(key: []const u8, partition_count: u32) executor_mod.PartitionId {
-    if (partition_count <= 1) return 0;
-    std.debug.assert(partition_count > 0);
-    const h = std.hash.Wyhash.hash(0, key);
-    return @intCast(h % partition_count);
-}
-
-/// Accumulates unique partition IDs using an O(1) bitmask.
-/// Requires partition_count <= 64 (enforced by gateway init assertion).
-const PartitionSet = struct {
-    list: std.ArrayList(executor_mod.PartitionId) = .empty,
-    seen: u64 = 0,
-
-    fn append(ps: *PartitionSet, val: executor_mod.PartitionId, alloc: std.mem.Allocator) !void {
-        std.debug.assert(val < 64);
-        const bit: u64 = @as(u64, 1) << @intCast(val);
-        if (ps.seen & bit != 0) return;
-        ps.seen |= bit;
-        try ps.list.append(alloc, val);
-    }
-
-    fn deinit(ps: *PartitionSet, alloc: std.mem.Allocator) void {
-        ps.list.deinit(alloc);
-    }
-};
-
-/// Scan all rows in a table at at_seq and collect their partition IDs.
-/// Silently skips tables not yet registered in storage (no rows, no partitions).
-fn scanTablePartitions(
-    storage: *storage_mod.PartitionedStorage,
-    table_id: storage_mod.TableId,
-    at_seq: Seq,
-    partition_count: u32,
-    strategy: ReconStrategy,
-    out: *PartitionSet,
-    alloc: std.mem.Allocator,
-) !void {
-    if (strategy == .all_partitions) {
-        for (0..partition_count) |i| try out.append(@intCast(i), alloc);
-        return;
-    }
-    // early_exit: stop as soon as every partition slot is occupied.
-    const full_mask: u64 = if (partition_count == 64)
-        std.math.maxInt(u64)
-    else
-        (@as(u64, 1) << @intCast(partition_count)) - 1;
-    var it = storage.scan(table_id, storage_mod.KeyRange.all(), at_seq, alloc) catch |err| switch (err) {
-        error.TableNotFound => return,
-        else => return err,
-    };
-    defer it.deinit();
-    while (try it.next()) |row| {
-        try out.append(keyToPartitionId(row.key, partition_count), alloc);
-        if (out.seen & full_mask == full_mask) break;
-    }
-}
-
-/// Try to evaluate a plan expression to a concrete ColumnValue using the bound params.
-/// Returns null for expressions that require execution-time context (columns, subqueries, etc.).
-fn evalLiteralExpr(expr: *const sql_mod.plan.PlanExpr, params: []const ColumnValue) ?ColumnValue {
-    return switch (expr.*) {
-        .param => |n| if (n < params.len) params[n] else null,
-        .string_literal => |s| ColumnValue{ .string = s },
-        .int_literal => |n| ColumnValue{ .int64 = n },
-        .uint_literal => |n| ColumnValue{ .uint64 = n },
-        .bool_literal => |b| ColumnValue{ .bool_t = b },
-        .bytes_literal => |b| ColumnValue{ .bytes = b },
-        else => null,
-    };
-}
-
-/// Encode a single literal expression as a storage key component.
-/// Returns an owned slice, or null if the expression is not statically evaluable.
-fn encodeLiteralKey(expr: *const sql_mod.plan.PlanExpr, params: []const ColumnValue, alloc: std.mem.Allocator) ?[]const u8 {
-    const val = evalLiteralExpr(expr, params) orelse return null;
-    var buf: std.ArrayList(u8) = .empty;
-    sql_mod.key_encode.encodeKeyComponent(&buf, val, alloc) catch {
-        buf.deinit(alloc);
-        return null;
-    };
-    return buf.toOwnedSlice(alloc) catch {
-        buf.deinit(alloc);
-        return null;
-    };
-}
-
-/// Try to build the encoded primary key for a row in an INSERT VALUES clause.
-/// Returns null if any PK column's expression cannot be statically evaluated.
-/// Caller owns the returned slice.
-fn extractInsertRowKey(
-    tbl: *const sql_mod.schema.TableSchema,
-    column_ids: []const sql_mod.schema.ColumnId,
-    row_exprs: []const *sql_mod.plan.PlanExpr,
-    params: []const ColumnValue,
-    alloc: std.mem.Allocator,
-) ?[]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    for (tbl.primary_key) |pk_col_id| {
-        const idx: usize = blk: {
-            for (column_ids, 0..) |cid, i| {
-                if (cid == pk_col_id) break :blk i;
-            }
-            buf.deinit(alloc);
-            return null;
-        };
-        if (idx >= row_exprs.len) {
-            buf.deinit(alloc);
-            return null;
-        }
-        const val = evalLiteralExpr(row_exprs[idx], params) orelse {
-            buf.deinit(alloc);
-            return null;
-        };
-        sql_mod.key_encode.encodeKeyComponent(&buf, val, alloc) catch {
-            buf.deinit(alloc);
-            return null;
-        };
-    }
-    return buf.toOwnedSlice(alloc) catch {
-        buf.deinit(alloc);
-        return null;
-    };
-}
-
-/// Collect write partitions for an INSERT plan.
-/// For VALUES rows where the PK can be statically determined, hashes the key.
-/// Falls back to partition 0 for rows whose PK expressions are complex.
-fn collectInsertPartitions(
-    ins: sql_mod.plan.InsertPlan,
-    storage: *storage_mod.PartitionedStorage,
-    params: []const ColumnValue,
-    schema: *const sql_mod.SchemaRegistry,
-    at_seq: Seq,
-    partition_count: u32,
-    strategy: ReconStrategy,
-    out: *PartitionSet,
-    alloc: std.mem.Allocator,
-) !void {
-    if (ins.source == .query) {
-        // Can't determine write keys statically; scan for current rows as over-approximation.
-        try scanTablePartitions(storage, ins.table_id, at_seq, partition_count, strategy, out, alloc);
-        return;
-    }
-    const tbl = schema.getTableById(ins.table_id) orelse {
-        try out.append(0, alloc);
-        return;
-    };
-    for (ins.source.values) |row_exprs| {
-        if (extractInsertRowKey(tbl, ins.column_ids, row_exprs, params, alloc)) |key| {
-            defer alloc.free(key);
-            try out.append(keyToPartitionId(key, partition_count), alloc);
-        } else {
-            try out.append(0, alloc);
-        }
-    }
-}
-
-/// Walk a plan node tree and collect the storage partition IDs for every table read.
-/// For pk_lookup: hashes the key expression if it can be statically evaluated.
-/// For scan and DML nodes: enumerates rows from storage.
-fn collectNodePartitions(
-    node: *const sql_mod.plan.PlanNode,
-    storage: *storage_mod.PartitionedStorage,
-    params: []const ColumnValue,
-    at_seq: Seq,
-    partition_count: u32,
-    strategy: ReconStrategy,
-    out: *PartitionSet,
-    alloc: std.mem.Allocator,
-) !void {
-    switch (node.*) {
-        .scan => |s| try scanTablePartitions(storage, s.table_id, at_seq, partition_count, strategy, out, alloc),
-        .pk_lookup => |pk| {
-            // key_expr evaluates to the full encoded PK. Hash it if statically known.
-            const maybe_key = encodeLiteralKey(pk.key_expr, params, alloc);
-            if (maybe_key) |key| {
-                defer alloc.free(key);
-                try out.append(keyToPartitionId(key, partition_count), alloc);
-            } else {
-                try scanTablePartitions(storage, pk.table_id, at_seq, partition_count, strategy, out, alloc);
-            }
-        },
-        .filter => |f| try collectNodePartitions(f.input, storage, params, at_seq, partition_count, strategy, out, alloc),
-        .project => |p| try collectNodePartitions(p.input, storage, params, at_seq, partition_count, strategy, out, alloc),
-        .sort => |s| try collectNodePartitions(s.input, storage, params, at_seq, partition_count, strategy, out, alloc),
-        .limit => |l| try collectNodePartitions(l.input, storage, params, at_seq, partition_count, strategy, out, alloc),
-        .hash_agg => |h| try collectNodePartitions(h.input, storage, params, at_seq, partition_count, strategy, out, alloc),
-        .hash_join => |j| {
-            try collectNodePartitions(j.left, storage, params, at_seq, partition_count, strategy, out, alloc);
-            try collectNodePartitions(j.right, storage, params, at_seq, partition_count, strategy, out, alloc);
-        },
-        .window => |w| try collectNodePartitions(w.input, storage, params, at_seq, partition_count, strategy, out, alloc),
-        .insert => |ins| {
-            try scanTablePartitions(storage, ins.table_id, at_seq, partition_count, strategy, out, alloc);
-            if (ins.source == .query) {
-                try collectNodePartitions(ins.source.query, storage, params, at_seq, partition_count, strategy, out, alloc);
-            }
-        },
-        .update => |upd| try scanTablePartitions(storage, upd.table_id, at_seq, partition_count, strategy, out, alloc),
-        .delete => |del| try scanTablePartitions(storage, del.table_id, at_seq, partition_count, strategy, out, alloc),
-        .merge => |mrg| {
-            try scanTablePartitions(storage, mrg.target_id, at_seq, partition_count, strategy, out, alloc);
-            try collectNodePartitions(mrg.source, storage, params, at_seq, partition_count, strategy, out, alloc);
-        },
-        .ann_scan => |s| try scanTablePartitions(storage, s.table_id, at_seq, partition_count, strategy, out, alloc),
-        .assert, .empty, .single_row => {},
-    }
-}
