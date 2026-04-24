@@ -56,7 +56,9 @@ pub const ClockSource = struct {
     fn realNowMicros(_: ?*anyopaque) i64 {
         var ts: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
-        return @as(i64, @intCast(ts.sec)) * 1_000_000 + @as(i64, @intCast(@divTrunc(ts.nsec, 1_000)));
+        const sec_us: i64 = @as(i64, @intCast(ts.sec)) * 1_000_000;
+        const nsec_us: i64 = @as(i64, @intCast(@divTrunc(ts.nsec, 1_000)));
+        return sec_us + nsec_us;
     }
 };
 
@@ -72,7 +74,8 @@ pub const RandSource = struct {
     fn realFill(_: ?*anyopaque, buf: []u8) void {
         var ts: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
-        const seed: u64 = @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+        const seed: u64 = @as(u64, @intCast(ts.sec)) * 1_000_000_000 +
+            @as(u64, @intCast(ts.nsec));
         var rand = std.Random.Xoroshiro128.init(seed);
         rand.fill(buf);
     }
@@ -126,7 +129,7 @@ fn postSnapshotImpl(ptr: *anyopaque, snapshot_seq: sequencer_mod.Seq) void {
     const ctx: *TruncateCtx = @ptrCast(@alignCast(ptr));
     const gw = ctx.gateway;
     if (snapshot_seq > gw.durable_snapshot_seq) gw.durable_snapshot_seq = snapshot_seq;
-    gw.truncateLog() catch {};
+    gw.truncateLog() catch |err| std.log.warn("truncateLog failed after snapshot: {}", .{err});
 }
 
 fn snapshotLogWriteImpl(ptr: *anyopaque, manifest_key: []const u8, seq: u64, partition_id: u32, alloc: std.mem.Allocator) anyerror!void {
@@ -245,7 +248,7 @@ pub const Gateway = struct {
         var n_inited: usize = 0;
         errdefer for (storages[0..n_inited]) |s| {
             const dir = s.dir;
-            s.flushAll() catch {};
+            s.flushAll() catch |err| std.log.warn("flushAll failed during init cleanup: {}", .{err});
             s.deinit();
             alloc.destroy(s);
             alloc.free(dir);
@@ -274,25 +277,30 @@ pub const Gateway = struct {
         gw.truncate_ctx = .{ .gateway = gw };
 
         // Wire S3 tiered storage when credentials are provided.
-        if (opts.s3_access_key.len > 0 and opts.s3_bucket.len > 0) {
-            const s3_io = opts.s3_io orelse return error.IoRequiredForS3;
-            const s3 = try alloc.create(storage_mod.S3ObjectStore);
-            errdefer alloc.destroy(s3);
-            s3.* = storage_mod.S3ObjectStore.init(.{
-                .access_key = opts.s3_access_key,
-                .secret_key = opts.s3_secret_key,
-                .region = opts.s3_region,
-                .endpoint_host = opts.s3_endpoint_host,
-                .endpoint_port = opts.s3_endpoint_port,
-                .io = s3_io,
-                .bucket = opts.s3_bucket,
-                .bucket_style = opts.s3_bucket_style,
-                .alloc = alloc,
-            });
-            gw.s3_store = s3;
-            const cache_dir = if (opts.s3_cache_dir.len > 0) opts.s3_cache_dir else storage_dir;
-            const obj = s3.objectStore();
-            for (storages) |stor| try stor.setObjectStore(obj, cache_dir);
+        if (opts.s3_access_key.len > 0) {
+            if (opts.s3_bucket.len > 0) {
+                if (opts.s3_io) |s3_io| {
+                    const s3 = try alloc.create(storage_mod.S3ObjectStore);
+                    errdefer alloc.destroy(s3);
+                    s3.* = storage_mod.S3ObjectStore.init(.{
+                        .access_key = opts.s3_access_key,
+                        .secret_key = opts.s3_secret_key,
+                        .region = opts.s3_region,
+                        .endpoint_host = opts.s3_endpoint_host,
+                        .endpoint_port = opts.s3_endpoint_port,
+                        .io = s3_io,
+                        .bucket = opts.s3_bucket,
+                        .bucket_style = opts.s3_bucket_style,
+                        .alloc = alloc,
+                    });
+                    gw.s3_store = s3;
+                    const cache_dir = if (opts.s3_cache_dir.len > 0) opts.s3_cache_dir else storage_dir;
+                    const obj = s3.objectStore();
+                    for (storages) |stor| try stor.setObjectStore(obj, cache_dir);
+                } else {
+                    return error.IoRequiredForS3;
+                }
+            }
         }
 
         gw.schema = sql_mod.SchemaRegistry.init(alloc);
@@ -386,7 +394,7 @@ pub const Gateway = struct {
         // Flush memtables to SSTables before teardown so data survives restart.
         for (self.storages) |s| {
             const dir = s.dir;
-            s.flushAll() catch {};
+            s.flushAll() catch |err| std.log.warn("flushAll failed during deinit: {}", .{err});
             s.deinit();
             self.alloc.destroy(s);
             self.alloc.free(dir);
@@ -449,6 +457,81 @@ pub const Gateway = struct {
         };
     }
 
+    /// Outcome of a single submit-and-drain attempt.
+    const SubmitOutcome = union(enum) {
+        done: ExecResult,
+        /// Executor detected a read-set conflict; value is the seq to retry recon at.
+        retry: Seq,
+    };
+
+    /// Run reconnaissance and serialize the TxnIntent bytes into buf.
+    /// Hints are allocated and freed within this call.
+    fn buildTxnIntent(
+        self: *Gateway,
+        hash: *const QueryHash,
+        plan: sql_mod.plan.ExecutionPlan,
+        op_seq: u64,
+        recon_seq: Seq,
+        params: []const ColumnValue,
+        params_bytes: []const u8,
+        all_nondet: []const ResolvedValue,
+        buf: *std.ArrayList(u8),
+    ) !void {
+        var hints = try reconnaissanceScan(
+            plan, &self.partitioned, params, &self.schema,
+            recon_seq, self.partition_count, self.alloc,
+        );
+        defer hints.deinit();
+        try executor_mod.serializeTxnIntent(
+            hash, self.client_id, op_seq, recon_seq,
+            hints.read, hints.write, params_bytes, all_nondet,
+            buf, self.alloc,
+        );
+    }
+
+    /// Submit serialized intent bytes to the sequencer, drain the log, and dispatch
+    /// the executor result. Returns .done on success or .retry with the conflict seq.
+    fn submitAndDrain(self: *Gateway, intent_bytes: []const u8, op_seq: u64) !SubmitOutcome {
+        var pending: sequencer_mod.PendingSubmit = undefined;
+        const handle = self.sequencer.submitBytes(
+            &pending, intent_bytes, self.client_id, op_seq, .txn_intent,
+        );
+        const result = try handle.awaitCommit();
+
+        // Drain committed log entries up to result.seq. This runs on the gateway thread
+        // after awaitCommit() guarantees the entry is durable — commit precedes execution.
+        // When a background apply thread is running (follower mode), waitFor() returns
+        // without draining here.
+        while (self.sql_exec.currentSeq() < result.seq) {
+            try self.applyNewEntries();
+        }
+        const exec_result = self.sql_exec.waitFor(result.seq);
+        const exec_detail = self.sql_exec.lastDetail();
+        if (exec_detail.len > 0) self.setDetail("{s}", .{exec_detail});
+
+        switch (exec_result) {
+            .ok => |ok| return .{ .done = .{
+                .rows_affected = ok.rows_affected,
+                .result_set = ok.result_set,
+            } },
+            .abort => |ab| switch (ab.code) {
+                .constraint_violation => {
+                    self.metrics.queries_aborted.inc();
+                    return error.ConstraintViolation;
+                },
+                .missing_query => {
+                    self.metrics.queries_aborted.inc();
+                    return error.QueryNotFound;
+                },
+                .retry => return .{ .retry = result.seq },
+                else => {
+                    self.metrics.queries_aborted.inc();
+                    return error.ExecutionError;
+                },
+            },
+        }
+    }
+
     /// Execute a registered DML query (INSERT/UPDATE/DELETE) with the given parameters.
     /// Routes through the Sequencer → partition log → SqlExecutor.run().
     // This is the domain boundary — all data past this point is validated.
@@ -459,14 +542,13 @@ pub const Gateway = struct {
         nondet: []const ResolvedValue,
     ) !ExecResult {
         const rq = self.registry.lookup(hash) orelse return error.QueryNotFound;
-
         self.metrics.queries_executed.inc();
 
         // Assign a stable client_seq for this logical operation ONCE, before any retry.
         self.client_seq += 1;
         const op_seq = self.client_seq;
 
-        // Encode params to canonical bytes
+        // Encode params to canonical bytes.
         const params_bytes = try sql_mod.executor_bridge.encodeParams(params, self.alloc);
         defer self.alloc.free(params_bytes);
 
@@ -478,81 +560,27 @@ pub const Gateway = struct {
         // Merge caller-supplied nondet with gateway-resolved values.
         const all_nondet = if (nondet.len > 0) nondet else resolved;
 
-        // Reconnaissance: determine which storage partitions this transaction will touch.
-        // On retry, re-run at the seq the executor assigned to the conflicting entry so
-        // hints reflect state as of that point.
+        // On retry, re-run reconnaissance at the seq the executor assigned to the
+        // conflicting entry so hints reflect state as of that point.
         var recon_seq: Seq = self.sql_exec.currentSeq();
-        var hints = try reconnaissanceScan(rq.plan, &self.partitioned, params, &self.schema, recon_seq, self.partition_count, self.alloc);
-        defer hints.deinit();
 
         const max_retries: usize = 3;
+        std.debug.assert(max_retries > 0);
         var attempt: usize = 0;
         while (attempt < max_retries) : (attempt += 1) {
-            if (attempt > 0) {
-                self.metrics.recon_retries.inc();
-                // Build new hints before freeing old ones so a failed alloc leaves hints valid.
-                const new_hints = try reconnaissanceScan(rq.plan, &self.partitioned, params, &self.schema, recon_seq, self.partition_count, self.alloc);
-                hints.deinit();
-                hints = new_hints;
-            }
+            if (attempt > 0) self.metrics.recon_retries.inc();
 
-            // Serialize TxnIntent payload — client_seq stays constant across retries.
             var intent_buf: std.ArrayList(u8) = .empty;
             defer intent_buf.deinit(self.alloc);
-
-            try executor_mod.serializeTxnIntent(
-                &hash,
-                self.client_id,
-                op_seq,
-                recon_seq,
-                hints.read,
-                hints.write,
-                params_bytes,
-                all_nondet,
-                &intent_buf,
-                self.alloc,
+            try self.buildTxnIntent(
+                &hash, rq.plan, op_seq, recon_seq, params, params_bytes, all_nondet, &intent_buf,
             );
-
-            // Submit to Sequencer — enqueues to owner thread; spins until committed.
-            var pending: sequencer_mod.PendingSubmit = undefined;
-            const handle = self.sequencer.submitBytes(&pending, intent_buf.items, self.client_id, op_seq, .txn_intent);
-            const result = try handle.awaitCommit();
-
-            // Drain committed log entries up to result.seq. This runs on the
-            // gateway thread after awaitCommit() guarantees the entry is durable —
-            // commit precedes execution. When a background apply thread is running
-            // (follower mode), waitFor() will return without draining here.
-            while (self.sql_exec.currentSeq() < result.seq) {
-                self.applyNewEntries() catch {};
-            }
-            const exec_result = self.sql_exec.waitFor(result.seq);
-            const exec_detail = self.sql_exec.lastDetail();
-            if (exec_detail.len > 0) self.setDetail("{s}", .{exec_detail});
-
-            switch (exec_result) {
-                .ok => |ok| return .{ .rows_affected = ok.rows_affected, .result_set = ok.result_set },
-                .abort => |ab| switch (ab.code) {
-                    .constraint_violation => {
-                        self.metrics.queries_aborted.inc();
-                        return error.ConstraintViolation;
-                    },
-                    .missing_query => {
-                        self.metrics.queries_aborted.inc();
-                        return error.QueryNotFound;
-                    },
-                    .retry => {
-                        // Executor detected a read-set mismatch; re-run reconnaissance at
-                        // the seq this entry was assigned and resubmit with updated hints.
-                        recon_seq = result.seq;
-                        continue;
-                    },
-                    else => {
-                        self.metrics.queries_aborted.inc();
-                        return error.ExecutionError;
-                    },
-                },
+            switch (try self.submitAndDrain(intent_buf.items, op_seq)) {
+                .done => |r| return r,
+                .retry => |conflict_seq| recon_seq = conflict_seq,
             }
         }
+        std.debug.assert(attempt == max_retries);
         return error.ExecutionError;
     }
 
@@ -644,9 +672,9 @@ pub const Gateway = struct {
             for (entries) |e| {
                 if (e.header.kind == .schema_change) {
                     if (isSqlDdl(e.payload)) {
-                        self.replayDdl(e.payload) catch {};
+                        try self.replayDdl(e.payload);
                     } else {
-                        _ = self.registry.register(e.payload) catch {};
+                        _ = try self.registry.register(e.payload);
                     }
                 }
                 from_seq = e.header.seq + 1;
@@ -656,8 +684,8 @@ pub const Gateway = struct {
 
         // Pass 2: DML — apply txn_intent entries to rebuild storage state.
         // SqlExecutor.run handles CRC validation, deserialization, and committed_seq tracking.
-        // Aborted results (missing query, bad params) are silently skipped — they indicate
-        // entries that were rejected at runtime and should not affect recovered state.
+        // Aborted results (missing query, bad params) are encoded as ExecResult.abort, not Zig
+        // errors, so they advance committed_seq without surfacing here.
         from_seq = 1;
         while (true) {
             const entries = try self.sequencer.partition_logs[0].read(from_seq, batch, self.alloc);
@@ -668,7 +696,7 @@ pub const Gateway = struct {
             if (entries.len == 0) break;
             for (entries) |e| {
                 if (e.header.kind == .txn_intent) {
-                    _ = self.sql_exec.run(e) catch {};
+                    _ = try self.sql_exec.run(e);
                 } else {
                     self.sql_exec.advanceSeq(e.header.seq);
                 }
@@ -696,13 +724,13 @@ pub const Gateway = struct {
                 switch (e.header.kind) {
                     .schema_change => {
                         if (isSqlDdl(e.payload)) {
-                            self.replayDdl(e.payload) catch {};
+                            try self.replayDdl(e.payload);
                         } else {
-                            _ = self.registry.register(e.payload) catch {};
+                            _ = try self.registry.register(e.payload);
                         }
                         self.sql_exec.advanceSeq(e.header.seq);
                     },
-                    .txn_intent => _ = self.sql_exec.run(e) catch {},
+                    .txn_intent => _ = try self.sql_exec.run(e),
                     else => self.sql_exec.advanceSeq(e.header.seq),
                 }
                 from_seq = e.header.seq + 1;
@@ -755,6 +783,7 @@ pub const Gateway = struct {
     }
 
     fn applyDdlToSchema(self: *Gateway, sql: []const u8) !void {
+        std.debug.assert(sql.len > 0);
         var arena = std.heap.ArenaAllocator.init(self.alloc);
         defer arena.deinit();
 
@@ -816,11 +845,14 @@ pub const Gateway = struct {
     /// Note: only the ordering layer is affected — the new node does not automatically
     /// receive data partition log entries or storage state.
     pub fn addSequencerNode(self: *Gateway, node_id: sequencer_mod.NodeId, addr: []const u8) !void {
+        std.debug.assert(node_id != 0);
+        std.debug.assert(addr.len > 0);
         try self.sequencer.addNode(node_id, addr, self.alloc);
     }
 
     /// Remove a sequencer node from the Raft group. Only valid on the current leader.
     pub fn removeSequencerNode(self: *Gateway, node_id: sequencer_mod.NodeId) !void {
+        std.debug.assert(node_id != 0);
         try self.sequencer.removeNode(node_id, self.alloc);
     }
 
@@ -868,8 +900,8 @@ pub const Gateway = struct {
 // committed_seq, so txn_intent entries that follow always see current schema.
 fn applyThreadFn(gw: *Gateway) void {
     while (!gw.apply_shutdown.load(.acquire)) {
-        gw.applyNewEntries() catch {};
-        std.Thread.yield() catch {};
+        gw.applyNewEntries() catch |err| std.log.err("applyNewEntries failed in apply thread: {}", .{err});
+        std.Thread.yield() catch {}; // EINTR is benign; the loop continues regardless.
     }
 }
 
@@ -1086,6 +1118,7 @@ fn reconnaissanceScan(
 /// Map an encoded storage key to a partition ID by hashing.
 fn keyToPartitionId(key: []const u8, partition_count: u32) executor_mod.PartitionId {
     if (partition_count <= 1) return 0;
+    std.debug.assert(partition_count > 0);
     const h = std.hash.Wyhash.hash(0, key);
     return @intCast(h % partition_count);
 }
