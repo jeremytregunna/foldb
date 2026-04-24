@@ -73,6 +73,7 @@ pub const Sequencer = struct {
     raft: raft_mod.RaftNode,
     raft_log: Log,
     raft_path: []u8,
+    last_applied_path: []u8,
     batcher: EpochBatcher,
     idempotency: IdempotencyCache,
     /// Data partition logs, one per partition.
@@ -107,6 +108,11 @@ pub const Sequencer = struct {
         // Create ordering log
         const raft_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/seq_raft", .{base_path});
         errdefer std.heap.page_allocator.free(raft_path);
+
+        const last_applied_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/last_applied.bin", .{base_path});
+        errdefer std.heap.page_allocator.free(last_applied_path);
+        var persisted_last_applied: Seq = 0;
+        readLastApplied(last_applied_path, &persisted_last_applied);
 
         const seq_partition_id: PartitionId = std.math.maxInt(PartitionId);
         var raft_log = try Log.initPartitioned(raft_path, cfg.node_id, seq_partition_id);
@@ -177,6 +183,7 @@ pub const Sequencer = struct {
             .raft = raft_node,
             .raft_log = raft_log,
             .raft_path = raft_path,
+            .last_applied_path = last_applied_path,
             .batcher = batcher,
             .idempotency = IdempotencyCache.init(alloc),
             .partition_logs = partition_logs,
@@ -185,6 +192,7 @@ pub const Sequencer = struct {
             .alloc = alloc,
             .transport = transport,
             .tick_interval_ms = cfg.tick_interval_ms,
+            .last_applied = persisted_last_applied,
         };
     }
 
@@ -202,6 +210,7 @@ pub const Sequencer = struct {
         self.raft.deinit();
         self.raft_log.deinit();
         std.heap.page_allocator.free(self.raft_path);
+        std.heap.page_allocator.free(self.last_applied_path);
         for (self.partition_logs) |*pl| pl.deinit();
         self.alloc.free(self.partition_logs);
         self.batcher.deinit();
@@ -385,6 +394,7 @@ pub const Sequencer = struct {
                         }
                         self.last_applied = idx;
                     }
+                    writeLastApplied(self.last_applied_path, self.last_applied);
                 },
                 // Raft peer list is already updated internally by RaftNode when this fires.
                 // Transport was pre-registered in addNode / cleaned up in removeNode.
@@ -425,6 +435,37 @@ pub const Sequencer = struct {
         return .{ .pending = pending };
     }
 };
+
+fn readLastApplied(path: []const u8, out: *Seq) void {
+    const pathz = std.heap.page_allocator.allocSentinel(u8, path.len, 0) catch return;
+    defer std.heap.page_allocator.free(pathz);
+    @memcpy(pathz[0..path.len], path);
+    const raw_fd = std.os.linux.open(pathz.ptr, .{ .ACCMODE = .RDONLY }, 0);
+    const fd_i: isize = @bitCast(raw_fd);
+    if (fd_i < 0) return;
+    const fd: std.posix.fd_t = @intCast(fd_i);
+    defer _ = std.os.linux.close(@intCast(fd));
+    var buf: [8]u8 = undefined;
+    const n = std.os.linux.read(@intCast(fd), &buf, 8);
+    const ni: isize = @bitCast(n);
+    if (ni != 8) return;
+    out.* = std.mem.readInt(u64, &buf, .little);
+}
+
+fn writeLastApplied(path: []const u8, seq: Seq) void {
+    const pathz = std.heap.page_allocator.allocSentinel(u8, path.len, 0) catch return;
+    defer std.heap.page_allocator.free(pathz);
+    @memcpy(pathz[0..path.len], path);
+    const raw_fd = std.os.linux.open(pathz.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
+    const fd_i: isize = @bitCast(raw_fd);
+    if (fd_i < 0) return;
+    const fd: std.posix.fd_t = @intCast(fd_i);
+    defer _ = std.os.linux.close(@intCast(fd));
+    var buf: [8]u8 = undefined;
+    std.mem.writeInt(u64, &buf, seq, .little);
+    _ = std.os.linux.write(@intCast(fd), &buf, 8);
+    _ = std.os.linux.fsync(@intCast(fd));
+}
 
 /// Sequencer owner thread: drains the MPSC queue, drives Raft ticks, signals completions.
 fn runLoop(self: *Sequencer) void {

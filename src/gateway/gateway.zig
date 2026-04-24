@@ -113,8 +113,10 @@ pub const NondetResolver = struct {
 
 /// Context for a per-partition snapshot log writer. Stable once allocated in init.
 const SnapshotWriterCtx = struct {
-    log: *log_mod.Log,
-    next_seq: *sequencer_mod.Seq,
+    sequencer: *sequencer_mod.Sequencer,
+    partition_id: u32,
+    client_id: u64,
+    client_seq: u64,
 };
 
 /// Context for the post-snapshot truncation hook. Stable once set in init.
@@ -128,18 +130,24 @@ fn postSnapshotImpl(ptr: *anyopaque, snapshot_seq: sequencer_mod.Seq) void {
 }
 
 fn snapshotLogWriteImpl(ptr: *anyopaque, manifest_key: []const u8, seq: u64, partition_id: u32, alloc: std.mem.Allocator) anyerror!void {
+    _ = partition_id;
     const ctx: *SnapshotWriterCtx = @ptrCast(@alignCast(ptr));
     const payload = storage_mod.SnapshotMarkerPayload{
         .manifest_key = manifest_key,
         .seq = seq,
-        .partition_id = partition_id,
+        .partition_id = ctx.partition_id,
     };
     const bytes = try payload.serialize(alloc);
     defer alloc.free(bytes);
-    const entry_seq = ctx.next_seq.*;
-    ctx.next_seq.* += 1;
-    const entry = log_mod.LogEntry.create(entry_seq, partition_id, .snapshot_marker, bytes);
-    try ctx.log.appendEntryAt(entry);
+    ctx.client_seq += 1;
+    var pending: sequencer_mod.PendingSubmit = undefined;
+    _ = try ctx.sequencer.submitBytes(
+        &pending,
+        bytes,
+        ctx.client_id,
+        ctx.client_seq,
+        .snapshot_marker,
+    ).awaitCommit();
 }
 
 /// The main Gateway struct.
@@ -319,8 +327,12 @@ pub const Gateway = struct {
                 const ctxs = try alloc.alloc(SnapshotWriterCtx, pc);
                 for (ctxs, 0..) |*ctx, i| {
                     ctx.* = .{
-                        .log = &gw.sequencer.partition_logs[i],
-                        .next_seq = &gw.sequencer.next_seq,
+                        .sequencer = &gw.sequencer,
+                        .partition_id = @intCast(i),
+                        // XOR with a per-partition salt so snapshot client_ids don't
+                        // collide with each other or with gateway.client_id.
+                        .client_id = gw.client_id ^ (@as(u64, @intCast(i)) +% 0x9e3779b97f4a7c15),
+                        .client_seq = 0,
                     };
                 }
                 gw.snapshot_writer_ctxs = ctxs;
