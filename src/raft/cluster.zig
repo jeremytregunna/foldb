@@ -86,7 +86,7 @@ pub fn SimCluster(comptime N: usize) type {
 
             for (0..N) |i| {
                 dirs[i] = try std.fmt.allocPrint(allocator, "{s}/node{d}", .{ base_dir, i });
-                logs[i] = try Log.init(dirs[i], node_ids[i]);
+                logs[i] = try Log.init(dirs[i], node_ids[i], allocator);
                 inited_logs += 1;
 
                 // Build peer list (all nodes except self).
@@ -353,7 +353,7 @@ pub const DynSimCluster = struct {
             const dir = try std.fmt.allocPrint(allocator, "{s}/node{d}", .{ base_dir, nid });
             errdefer allocator.free(dir);
 
-            var log = try Log.init(dir, nid);
+            var log = try Log.init(dir, nid, allocator);
             errdefer log.deinit();
 
             // Peers = all other initial nodes.
@@ -403,7 +403,7 @@ pub const DynSimCluster = struct {
         const dir = try std.fmt.allocPrint(self.allocator, "{s}/node{d}", .{ base_dir, new_id });
         errdefer self.allocator.free(dir);
 
-        var log = try Log.init(dir, new_id);
+        var log = try Log.init(dir, new_id, self.allocator);
         errdefer log.deinit();
 
         // New node starts with no peers — it'll learn them via config change.

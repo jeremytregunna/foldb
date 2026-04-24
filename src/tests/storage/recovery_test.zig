@@ -136,7 +136,7 @@ test "recovery: no snapshot returns empty LSM with seq 0" {
     var obj_store = MemoryObjectStore.init(alloc);
     defer obj_store.deinit();
 
-    var log_inst = try Log.init(log_dir, 1);
+    var log_inst = try Log.init(log_dir, 1, alloc);
     defer log_inst.deinit();
 
     var stor = try Storage.init(stor_dir, alloc);
@@ -209,7 +209,7 @@ test "recovery: snapshot + log replay" {
     defer manifest.deinit();
 
     // Build a log with entries after the snapshot
-    var log_inst = try Log.init(log_dir, 1);
+    var log_inst = try Log.init(log_dir, 1, alloc);
     defer log_inst.deinit();
 
     const post_snap_keys = [_][]const u8{ "delta", "epsilon" };
@@ -217,7 +217,7 @@ test "recovery: snapshot + log replay" {
         const seq = snap_seq + off;
         const entry = try makeLogEntry(alloc, seq, key, @intCast(seq * 100));
         defer alloc.free(entry.payload);
-        try log_inst.appendEntryAt(entry);
+        try log_inst.append_entry_at(entry);
     }
 
     // Set up recovery target: fresh storage + executor

@@ -12,8 +12,8 @@ const TxnIntent = log.TxnIntent;
 const SegmentHeader = log.SegmentHeader;
 const SegmentFooter = log.SegmentFooter;
 const IndexEntry = log.IndexEntry;
-const HEADER_SIZE = log.HEADER_SIZE;
-const FOOTER_SIZE = log.FOOTER_SIZE;
+const header_size = log.header_size;
+const footer_size = log.footer_size;
 
 test "Segment: header fields are correct" {
     const base_seq: Seq = 42;
@@ -23,7 +23,7 @@ test "Segment: header fields are correct" {
     const header = SegmentHeader.init(base_seq, node_id, created_at);
 
     // Validate header fields
-    try testing.expectEqualSlices(u8, &log.MAGIC, &header.magic);
+    try testing.expectEqualSlices(u8, &log.magic, &header.magic);
     try testing.expectEqual(@as(u32, 1), header.version);
     try testing.expectEqual(base_seq, header.base_seq);
     try testing.expectEqual(node_id, header.node_id);
@@ -65,14 +65,14 @@ test "Segment: LogEntry creation" {
     try testing.expectEqual(epoch, entry.header.epoch);
     try testing.expectEqual(@as(u32, @intCast(payload.len)), entry.header.payload_len);
     try testing.expectEqualSlices(u8, payload, entry.payload);
-    try testing.expect(entry.verifyCrc());
+    try testing.expect(entry.verify_crc());
 }
 
 test "Segment: LogEntry sizes" {
     const payload = "hello";
     const entry = LogEntry.create(1, 0, .txn_intent, payload);
 
-    const total_size = entry.totalSize();
+    const total_size = entry.total_size();
     try testing.expectEqual(@as(usize, 25) + payload.len, total_size);
 }
 
@@ -80,7 +80,7 @@ test "Segment: CRC verification" {
     const payload = "test data for CRC verification";
     const entry = LogEntry.create(1, 0, .txn_intent, payload);
 
-    try testing.expect(entry.verifyCrc());
+    try testing.expect(entry.verify_crc());
 }
 
 test "Segment: different entry kinds" {
@@ -109,28 +109,28 @@ test "Segment: EntryKind fromByte" {
 
 test "Segment: TxnIntent" {
     const payload = "transaction payload";
-    const intent = TxnIntent.initTest(payload, 1, 1);
+    const intent = TxnIntent.init_test(payload, 1, 1);
 
     try testing.expectEqualSlices(u8, payload, intent.params);
 }
 
 test "Segment: IndexEntry size" {
-    try testing.expectEqual(@sizeOf(Seq) + @sizeOf(u64), IndexEntry.ENTRY_SIZE);
+    try testing.expectEqual(@sizeOf(Seq) + @sizeOf(u64), IndexEntry.entry_size);
 }
 
 test "Segment: header size constant" {
-    try testing.expectEqual(@as(usize, 64), HEADER_SIZE);
+    try testing.expectEqual(@as(usize, 64), header_size);
 }
 
 test "Segment: footer size constant" {
-    try testing.expectEqual(@as(usize, 64), FOOTER_SIZE);
+    try testing.expectEqual(@as(usize, 64), footer_size);
 }
 
 test "Segment: SegmentFooter serialization round-trip" {
     const original = SegmentFooter.init(42, 999, 8192);
-    var buf: [FOOTER_SIZE]u8 = undefined;
-    original.serializeTo(&buf);
-    const recovered = try SegmentFooter.deserializeFrom(&buf);
+    var buf: [footer_size]u8 = undefined;
+    original.serialize_to(&buf);
+    const recovered = try SegmentFooter.deserialize_from(&buf);
     try testing.expectEqual(original.entry_count, recovered.entry_count);
     try testing.expectEqual(original.last_seq, recovered.last_seq);
     try testing.expectEqual(original.index_offset, recovered.index_offset);
@@ -139,17 +139,17 @@ test "Segment: SegmentFooter serialization round-trip" {
 
 test "Segment: SegmentFooter rejects corrupt data" {
     const footer = SegmentFooter.init(1, 1, 80);
-    var buf: [FOOTER_SIZE]u8 = undefined;
-    footer.serializeTo(&buf);
+    var buf: [footer_size]u8 = undefined;
+    footer.serialize_to(&buf);
     buf[0] ^= 0xFF;
-    try testing.expectError(error.CorruptSegmentFooter, SegmentFooter.deserializeFrom(&buf));
+    try testing.expectError(error.CorruptSegmentFooter, SegmentFooter.deserialize_from(&buf));
 }
 
 test "Segment: IndexEntry serialization round-trip" {
     const ie = IndexEntry{ .seq = 12345, .file_offset = 9876543 };
-    var buf: [IndexEntry.ENTRY_SIZE]u8 = undefined;
-    ie.serializeTo(&buf);
-    const recovered = IndexEntry.deserializeFrom(&buf);
+    var buf: [IndexEntry.entry_size]u8 = undefined;
+    ie.serialize_to(&buf);
+    const recovered = IndexEntry.deserialize_from(&buf);
     try testing.expectEqual(ie.seq, recovered.seq);
     try testing.expectEqual(ie.file_offset, recovered.file_offset);
 }
@@ -157,9 +157,9 @@ test "Segment: IndexEntry serialization round-trip" {
 test "Segment: LogEntryHeader serialization round-trip" {
     const payload = "round-trip payload";
     const header = log.LogEntryHeader.init(7, 3, .txn_intent, payload);
-    var buf: [log.LogEntryHeader.HEADER_SIZE]u8 = undefined;
-    header.serializeTo(&buf);
-    const recovered = try log.LogEntryHeader.deserializeFrom(&buf);
+    var buf: [log.LogEntryHeader.header_size]u8 = undefined;
+    header.serialize_to(&buf);
+    const recovered = try log.LogEntryHeader.deserialize_from(&buf);
     try testing.expectEqual(header.seq, recovered.seq);
     try testing.expectEqual(header.epoch, recovered.epoch);
     try testing.expectEqual(header.kind, recovered.kind);
@@ -169,16 +169,16 @@ test "Segment: LogEntryHeader serialization round-trip" {
 
 test "Segment: SegmentHeader isValid rejects corruption" {
     var header = SegmentHeader.init(1, 42, 0);
-    try testing.expect(header.isValid());
+    try testing.expect(header.is_valid());
     header.base_seq ^= 0xDEAD;
-    try testing.expect(!header.isValid());
+    try testing.expect(!header.is_valid());
 }
 
 test "Segment: SegmentHeader created_at is stored verbatim" {
     const ts: i64 = 42_000;
     const header = SegmentHeader.init(1, 99, ts);
     try testing.expectEqual(ts, header.created_at);
-    try testing.expect(header.isValid());
+    try testing.expect(header.is_valid());
 }
 
 // Helpers for disk-level segment tests
@@ -192,7 +192,7 @@ fn makeSegPath() ![]u8 {
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-    return std.fmt.allocPrint(std.heap.page_allocator, "/tmp/seg_test_{d}.seg", .{ns});
+    return std.fmt.allocPrint(testing.allocator, "/tmp/seg_test_{d}.seg", .{ns});
 }
 
 fn removeFileSeg(path: []const u8) void {
@@ -212,7 +212,7 @@ test "Segment: disk round-trip (init, append, seal, open, read)" {
     const payloads = [_][]const u8{ "alpha", "beta", "gamma" };
 
     {
-        var seg = try log.Segment.init(path, 1, 99, 0);
+        var seg = try log.Segment.init(path, 1, 99, 0, testing.allocator);
         for (payloads, 0..) |payload, i| {
             const entry = LogEntry.create(@intCast(i + 1), 0, .txn_intent, payload);
             try seg.append(entry);
@@ -221,8 +221,8 @@ test "Segment: disk round-trip (init, append, seal, open, read)" {
         seg.deinit();
     }
 
-    const path2 = try std.heap.page_allocator.dupe(u8, path_for_cleanup);
-    var seg2 = try log.Segment.open(path2);
+    const path2 = try testing.allocator.dupe(u8, path_for_cleanup);
+    var seg2 = try log.Segment.open(path2, testing.allocator);
     defer seg2.deinit();
 
     try testing.expectEqual(@as(u32, 3), seg2.entry_count);
@@ -239,7 +239,7 @@ test "Segment: disk round-trip (init, append, seal, open, read)" {
     for (entries, 0..) |entry, i| {
         try testing.expectEqual(@as(Seq, @intCast(i + 1)), entry.header.seq);
         try testing.expectEqualSlices(u8, payloads[i], entry.payload);
-        try testing.expect(entry.verifyCrc());
+        try testing.expect(entry.verify_crc());
     }
 }
 
@@ -253,13 +253,13 @@ test "Segment: open unsealed segment recovers gracefully" {
 
     {
         // Write header only — simulate crash before any entries or seal
-        var seg = try log.Segment.init(path, 1, 1, 0);
+        var seg = try log.Segment.init(path, 1, 1, 0, testing.allocator);
         // Do not seal, just deinit (simulates abrupt close)
         seg.deinit();
     }
 
-    const path2 = try std.heap.page_allocator.dupe(u8, path_for_cleanup);
-    var seg2 = try log.Segment.open(path2);
+    const path2 = try testing.allocator.dupe(u8, path_for_cleanup);
+    var seg2 = try log.Segment.open(path2, testing.allocator);
     defer seg2.deinit();
 
     // Should open as unsealed with no entries
@@ -274,10 +274,11 @@ test "Segment: sealed segment rejects further appends" {
         removeFileSeg(path_for_cleanup);
         std.heap.page_allocator.free(path_for_cleanup);
     }
-
-    var seg = try log.Segment.init(path, 1, 1, 0);
+    var seg = try log.Segment.init(path, 1, 1, 0, testing.allocator);
     defer seg.deinit();
 
+    const first = LogEntry.create(1, 0, .txn_intent, "first entry");
+    try seg.append(first);
     try seg.seal();
     const entry = LogEntry.create(2, 0, .txn_intent, "too late");
     try testing.expectError(error.SegmentSealed, seg.append(entry));

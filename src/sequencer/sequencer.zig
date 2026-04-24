@@ -115,7 +115,7 @@ pub const Sequencer = struct {
         readLastApplied(last_applied_path, &persisted_last_applied);
 
         const seq_partition_id: PartitionId = std.math.maxInt(PartitionId);
-        var raft_log = try Log.initPartitioned(raft_path, cfg.node_id, seq_partition_id);
+        var raft_log = try Log.init_partitioned(raft_path, cfg.node_id, seq_partition_id, alloc);
         errdefer raft_log.deinit();
 
         // Derive Raft tick counts from millisecond config values.
@@ -158,7 +158,7 @@ pub const Sequencer = struct {
         for (0..cfg.partition_count) |i| {
             const part_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/log_p{d}", .{ base_path, i });
             defer std.heap.page_allocator.free(part_path);
-            partition_logs[i] = try Log.initPartitioned(part_path, cfg.node_id, @intCast(i));
+            partition_logs[i] = try Log.init_partitioned(part_path, cfg.node_id, @intCast(i), alloc);
             initialized += 1;
         }
 
@@ -389,7 +389,7 @@ pub const Sequencer = struct {
                             for (dec.entries) |oe| {
                                 const pl = &self.partition_logs[oe.partition];
                                 const le = LogEntry.create(oe.seq, 0, dec.entry_kind, dec.payload);
-                                pl.appendEntryAt(le) catch {};
+                                pl.append_entry_at(le) catch {};
                             }
                         }
                         self.last_applied = idx;

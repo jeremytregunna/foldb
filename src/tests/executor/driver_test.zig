@@ -121,7 +121,7 @@ test "driver: drainAll processes all committed entries" {
     defer alloc.free(log_dir);
     defer removeDir(log_dir);
 
-    var log = try Log.init(log_dir, 1);
+    var log = try Log.init(log_dir, 1, alloc);
     defer log.deinit();
 
     const storage = try alloc.create(Storage);
@@ -142,7 +142,7 @@ test "driver: drainAll processes all committed entries" {
         const key = std.fmt.bufPrint(&buf, "k{d}", .{i}) catch unreachable;
         var e = try makeEntry(alloc, @intCast(i), key, @intCast(i * 10));
         defer e.deinit(alloc);
-        try log.appendEntryAt(e);
+        try log.append_entry_at(e);
     }
 
     var driver = ExecutorDriver{
@@ -165,7 +165,7 @@ test "driver: drainOnce is idempotent at head" {
     defer alloc.free(log_dir);
     defer removeDir(log_dir);
 
-    var log = try Log.init(log_dir, 1);
+    var log = try Log.init(log_dir, 1, alloc);
     defer log.deinit();
 
     const storage = try alloc.create(Storage);
@@ -182,7 +182,7 @@ test "driver: drainOnce is idempotent at head" {
 
     var e = try makeEntry(alloc, 1, "only", 42);
     defer e.deinit(alloc);
-    try log.appendEntryAt(e);
+    try log.append_entry_at(e);
 
     var driver = ExecutorDriver{
         .log = &log,

@@ -61,12 +61,12 @@ fn removeDir(path: []const u8) void {
 // This is the domain boundary for tests — serializes a TxnIntent before handing
 // pre-built LogEntry bytes to the log core via appendEntryAt.
 fn appendTestIntent(log_inst: *Log, alloc: std.mem.Allocator, params: []const u8, client_id: u64) !Seq {
-    const intent = TxnIntent.initTest(params, client_id, 1);
-    const payload = try intent.serializeTo(alloc);
+    const intent = TxnIntent.init_test(params, client_id, 1);
+    const payload = try intent.serialize_to(alloc);
     defer alloc.free(payload);
     const seq = log_inst.current_seq + 1;
     const entry = LogEntry.create(seq, 0, .txn_intent, payload);
-    try log_inst.appendEntryAt(entry);
+    try log_inst.append_entry_at(entry);
     return seq;
 }
 
@@ -112,9 +112,9 @@ test "Log Replay: identical appends produce identical entry sequences" {
         alloc.free(dir_b);
     }
 
-    var log_a = try Log.init(dir_a, 1);
+    var log_a = try Log.init(dir_a, 1, alloc);
     defer log_a.deinit();
-    var log_b = try Log.init(dir_b, 1);
+    var log_b = try Log.init(dir_b, 1, alloc);
     defer log_b.deinit();
 
     const N: usize = 20;
@@ -150,9 +150,9 @@ test "Log Replay: multi-segment replay is deterministic" {
         alloc.free(dir_b);
     }
 
-    var log_a = try Log.init(dir_a, 1);
+    var log_a = try Log.init(dir_a, 1, alloc);
     defer log_a.deinit();
-    var log_b = try Log.init(dir_b, 1);
+    var log_b = try Log.init(dir_b, 1, alloc);
     defer log_b.deinit();
 
     // Small segment size forces multiple rotations
@@ -197,7 +197,7 @@ test "Log Replay: close and reopen preserves sealed segment entries" {
 
     // Write entries to log_a, forcing at least one segment rotation so some
     // entries land in sealed (footer-committed) segments.
-    var log_a = try Log.init(dir, 1);
+    var log_a = try Log.init(dir, 1, alloc);
     log_a.segment_max_entries = 3; // small cap forces rotations
 
     const N: usize = 9; // 3 sealed segments of 3 entries each
@@ -210,7 +210,7 @@ test "Log Replay: close and reopen preserves sealed segment entries" {
     log_a.deinit();
 
     // Re-open the log (simulates a process restart).
-    var log_b = try Log.init(dir, 1);
+    var log_b = try Log.init(dir, 1, alloc);
     defer log_b.deinit();
 
     // All N entries must still be readable.
@@ -251,9 +251,9 @@ test "Log Replay: read from mid-sequence returns consistent suffix" {
         alloc.free(dir_b);
     }
 
-    var log_a = try Log.init(dir_a, 1);
+    var log_a = try Log.init(dir_a, 1, alloc);
     defer log_a.deinit();
-    var log_b = try Log.init(dir_b, 1);
+    var log_b = try Log.init(dir_b, 1, alloc);
     defer log_b.deinit();
 
     log_a.segment_max_entries = 4;

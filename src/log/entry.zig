@@ -2,22 +2,16 @@
 const std = @import("std");
 const crc = @import("crc.zig");
 
-/// Sequence number type - monotonically increasing per node.
 pub const Seq = u64;
-
-/// Epoch type - identifies the current leader/epoch.
 pub const Epoch = u64;
-
-/// Node identifier type.
 pub const NodeId = u64;
-
-/// Partition identifier type - 0..N-1, fixed at cluster creation.
 pub const PartitionId = u32;
-
-/// Query hash type - BLAKE3 of canonicalized query AST.
 pub const QueryHash = [32]u8;
+pub const ReadSetHint = []const PartitionId;
+pub const WriteSetHint = []const PartitionId;
 
-/// Type of log entry.
+pub const payload_len_max: u32 = 1 << 20;
+
 pub const EntryKind = enum(u8) {
     txn_intent = 1,
     schema_change = 2,
@@ -39,38 +33,31 @@ pub const EntryKind = enum(u8) {
     }
 };
 
-/// Kind of resolved nondeterministic value.
 pub const ResolvedKind = enum(u8) {
     now = 0,
     random = 1,
     uuid_v7 = 2,
 };
 
-/// Resolved nondeterministic value - computed by gateway at submission time.
 pub const ResolvedValue = union(ResolvedKind) {
-    now: i64, // unix micros, resolved by gateway
-    random: [16]u8, // 128-bit, resolved by gateway
-    uuid_v7: [16]u8, // resolved by gateway
+    now: i64,
+    random: [16]u8,
+    uuid_v7: [16]u8,
 };
 
-/// Read set hint - partitions that may be read by this transaction.
-pub const ReadSetHint = []const PartitionId;
-
-/// Write set hint - partitions that will be written by this transaction.
-pub const WriteSetHint = []const PartitionId;
-
-/// Transaction intent - the core type submitted to the sequencer and logged.
 pub const TxnIntent = struct {
-    query_hash: QueryHash, // references a registered query
-    params: []const u8, // length-prefixed, typed, canonical encoding
-    read_set_hint: ReadSetHint, // partitions touched, for routing
-    write_set_hint: WriteSetHint, // partitions touched, for routing
-    resolved_nondet: []const ResolvedValue, // nondeterminism resolved by gateway
-    client_id: u64, // client identifier for idempotency
-    client_seq: u64, // client sequence for idempotency
-    recon_seq: Seq = 0, // seq at which reconnaissance was performed (0 = no recon)
+    query_hash: QueryHash,
+    params: []const u8,
+    read_set_hint: ReadSetHint,
+    write_set_hint: WriteSetHint,
+    resolved_nondet: []const ResolvedValue,
+    client_id: u64,
+    client_seq: u64,
+    recon_seq: Seq = 0,
 
-    /// Creates a new TxnIntent with the given fields.
+    pub const resolved_record_size: u32 = 17; // tag(1) + data(16)
+    pub const header_size: u32 = 72;
+
     pub fn init(
         query_hash: QueryHash,
         params: []const u8,
@@ -91,189 +78,211 @@ pub const TxnIntent = struct {
         };
     }
 
-    /// Serializes TxnIntent to an ArrayList.
-    /// Format:
-    ///   - header (72 bytes): query_hash(32) + client_id(8) + client_seq(8) +
-    ///                         read_count(4) + write_count(4) + params_len(4) + nondet_count(4) +
-    ///                         recon_seq(8)
-    ///   - read_set_hint: read_count * 4 bytes
-    ///   - write_set_hint: write_count * 4 bytes
-    ///   - params: params_len bytes
-    ///   - resolved_nondet: nondet_count * 17 bytes (tag(1) + data(16))
-    pub fn serializeTo(self: TxnIntent, allocator: std.mem.Allocator) ![]u8 {
+    /// Serializes TxnIntent to an owned slice.
+    /// Format: header(72) + read_set_hint + write_set_hint + params + resolved_nondet
+    pub fn serialize_to(self: TxnIntent, alloc: std.mem.Allocator) ![]u8 {
         var out = std.ArrayList(u8).empty;
-        errdefer out.deinit(allocator);
+        errdefer out.deinit(alloc);
 
-        // Write header
         const read_count: u32 = @intCast(self.read_set_hint.len);
         const write_count: u32 = @intCast(self.write_set_hint.len);
         const params_len: u32 = @intCast(self.params.len);
         const nondet_count: u32 = @intCast(self.resolved_nondet.len);
+        std.debug.assert(read_count == self.read_set_hint.len);
+        std.debug.assert(write_count == self.write_set_hint.len);
 
-        // query_hash: 32 bytes
-        try out.appendSlice(allocator, &self.query_hash);
-        // client_id: 8 bytes
-        try out.appendSlice(allocator, std.mem.asBytes(&self.client_id));
-        // client_seq: 8 bytes
-        try out.appendSlice(allocator, std.mem.asBytes(&self.client_seq));
-        // read_count: 4 bytes
-        try out.appendSlice(allocator, std.mem.asBytes(&read_count));
-        // write_count: 4 bytes
-        try out.appendSlice(allocator, std.mem.asBytes(&write_count));
-        // params_len: 4 bytes
-        try out.appendSlice(allocator, std.mem.asBytes(&params_len));
-        // nondet_count: 4 bytes
-        try out.appendSlice(allocator, std.mem.asBytes(&nondet_count));
-        // recon_seq: 8 bytes
-        try out.appendSlice(allocator, std.mem.asBytes(&self.recon_seq));
+        try out.appendSlice(alloc, &self.query_hash);
+        try out.appendSlice(alloc, std.mem.asBytes(&self.client_id));
+        try out.appendSlice(alloc, std.mem.asBytes(&self.client_seq));
+        try out.appendSlice(alloc, std.mem.asBytes(&read_count));
+        try out.appendSlice(alloc, std.mem.asBytes(&write_count));
+        try out.appendSlice(alloc, std.mem.asBytes(&params_len));
+        try out.appendSlice(alloc, std.mem.asBytes(&nondet_count));
+        try out.appendSlice(alloc, std.mem.asBytes(&self.recon_seq));
 
-        // Write read_set_hint
-        for (self.read_set_hint) |pid| {
-            try out.appendSlice(allocator, std.mem.asBytes(&pid));
+        for (self.read_set_hint) |partition_id| {
+            try out.appendSlice(alloc, std.mem.asBytes(&partition_id));
+        }
+        for (self.write_set_hint) |partition_id| {
+            try out.appendSlice(alloc, std.mem.asBytes(&partition_id));
         }
 
-        // Write write_set_hint
-        for (self.write_set_hint) |pid| {
-            try out.appendSlice(allocator, std.mem.asBytes(&pid));
-        }
+        try out.appendSlice(alloc, self.params);
 
-        // Write params
-        try out.appendSlice(allocator, self.params);
-
-        // Write resolved_nondet (17 bytes each: tag(1) + data(16))
-        for (self.resolved_nondet) |rv| {
-            const tag: u8 = @intFromEnum(@as(ResolvedKind, rv));
-            try out.append(allocator, tag);
+        for (self.resolved_nondet) |resolved_value| {
+            const tag: u8 = @intFromEnum(@as(ResolvedKind, resolved_value));
+            try out.append(alloc, tag);
             var data: [16]u8 = std.mem.zeroes([16]u8);
-            switch (rv) {
-                .now => |v| std.mem.writeInt(i64, @ptrCast(@alignCast(&data)), v, .little),
-                .random => |v| @memcpy(&data, &v),
-                .uuid_v7 => |v| @memcpy(&data, &v),
+            switch (resolved_value) {
+                .now => |timestamp| std.mem.writeInt(i64, @ptrCast(@alignCast(&data)), timestamp, .little),
+                .random => |bytes| @memcpy(&data, &bytes),
+                .uuid_v7 => |bytes| @memcpy(&data, &bytes),
             }
-            try out.appendSlice(allocator, &data);
+            try out.appendSlice(alloc, &data);
         }
 
-        return out.toOwnedSlice(allocator);
+        return out.toOwnedSlice(alloc);
     }
 
-    /// Constant for the size of a resolved value record on wire.
-    pub const RESOLVED_RECORD_SIZE: usize = 17; // tag(1) + data(16)
+    const Offsets = struct {
+        query_hash: QueryHash,
+        client_id: u64,
+        client_seq: u64,
+        recon_seq: Seq,
+        read_count: u32,
+        write_count: u32,
+        params_len: u32,
+        nondet_count: u32,
+        read_set_start: usize,
+        read_set_end: usize,
+        write_set_start: usize,
+        write_set_end: usize,
+        params_start: usize,
+        params_end: usize,
+        nondet_start: usize,
+        nondet_end: usize,
+    };
 
-    /// Constant for the size of the TxnIntent header on wire.
-    pub const HEADER_SIZE: usize = 72;
+    fn deserialize_from_offsets(payload: []const u8) !Offsets {
+        if (payload.len < header_size) return error.InvalidPayload;
+        const payload_ptr = payload.ptr;
 
-    /// Deserializes TxnIntent from a byte slice.
-    pub fn deserializeFrom(payload: []const u8, allocator: std.mem.Allocator) !TxnIntent {
-        if (payload.len < HEADER_SIZE) return error.InvalidPayload;
-
-        const ptr = payload.ptr;
-
-        // Read header fields
         var query_hash: QueryHash = undefined;
-        @memcpy(&query_hash, ptr[0..32]);
+        @memcpy(&query_hash, payload_ptr[0..32]);
 
-        const client_id = std.mem.readInt(u64, @ptrCast(@alignCast(ptr + 32)), .little);
-        const client_seq = std.mem.readInt(u64, @ptrCast(@alignCast(ptr + 40)), .little);
-        const read_count = std.mem.readInt(u32, @ptrCast(@alignCast(ptr + 48)), .little);
-        const write_count = std.mem.readInt(u32, @ptrCast(@alignCast(ptr + 52)), .little);
-        const params_len = std.mem.readInt(u32, @ptrCast(@alignCast(ptr + 56)), .little);
-        const nondet_count = std.mem.readInt(u32, @ptrCast(@alignCast(ptr + 60)), .little);
-        const recon_seq = std.mem.readInt(u64, @ptrCast(@alignCast(ptr + 64)), .little);
+        const client_id = std.mem.readInt(u64, @ptrCast(@alignCast(payload_ptr + 32)), .little);
+        const client_seq = std.mem.readInt(u64, @ptrCast(@alignCast(payload_ptr + 40)), .little);
+        const read_count = std.mem.readInt(u32, @ptrCast(@alignCast(payload_ptr + 48)), .little);
+        const write_count = std.mem.readInt(u32, @ptrCast(@alignCast(payload_ptr + 52)), .little);
+        const params_len = std.mem.readInt(u32, @ptrCast(@alignCast(payload_ptr + 56)), .little);
+        const nondet_count = std.mem.readInt(u32, @ptrCast(@alignCast(payload_ptr + 60)), .little);
+        const recon_seq = std.mem.readInt(u64, @ptrCast(@alignCast(payload_ptr + 64)), .little);
 
-        // Calculate offsets
-        const read_set_start = HEADER_SIZE;
-        const read_set_end = read_set_start + @as(usize, read_count) * @sizeOf(PartitionId);
+        const read_set_start: usize = header_size;
+        const read_set_end: usize = read_set_start + @as(usize, read_count) * @sizeOf(PartitionId);
         if (read_set_end > payload.len) return error.InvalidPayload;
+        std.debug.assert(read_set_end >= read_set_start);
 
-        const write_set_start = read_set_end;
-        const write_set_end = write_set_start + @as(usize, write_count) * @sizeOf(PartitionId);
+        const write_set_start: usize = read_set_end;
+        const write_set_end: usize = write_set_start + @as(usize, write_count) * @sizeOf(PartitionId);
         if (write_set_end > payload.len) return error.InvalidPayload;
+        std.debug.assert(write_set_end >= write_set_start);
 
-        const params_start = write_set_end;
-        const params_end = params_start + @as(usize, params_len);
+        const params_start: usize = write_set_end;
+        const params_end: usize = params_start + @as(usize, params_len);
         if (params_end > payload.len) return error.InvalidPayload;
+        std.debug.assert(params_end >= params_start);
 
-        const nondet_start = params_end;
-        const nondet_end = nondet_start + @as(usize, nondet_count) * RESOLVED_RECORD_SIZE;
+        const nondet_start: usize = params_end;
+        const nondet_end: usize = nondet_start + @as(usize, nondet_count) * resolved_record_size;
         if (nondet_end > payload.len) return error.InvalidPayload;
+        std.debug.assert(nondet_end >= nondet_start);
 
-        // Allocate and copy read_set_hint
-        const read_set_hint = try allocator.alloc(PartitionId, read_count);
-        errdefer allocator.free(read_set_hint);
-        for (0..read_count) |i| {
-            const offset = read_set_start + i * 4;
-            read_set_hint[i] = std.mem.readInt(u32, @ptrCast(@alignCast(payload.ptr + offset)), .little);
-        }
+        return .{
+            .query_hash = query_hash,
+            .client_id = client_id,
+            .client_seq = client_seq,
+            .recon_seq = recon_seq,
+            .read_count = read_count,
+            .write_count = write_count,
+            .params_len = params_len,
+            .nondet_count = nondet_count,
+            .read_set_start = read_set_start,
+            .read_set_end = read_set_end,
+            .write_set_start = write_set_start,
+            .write_set_end = write_set_end,
+            .params_start = params_start,
+            .params_end = params_end,
+            .nondet_start = nondet_start,
+            .nondet_end = nondet_end,
+        };
+    }
 
-        // Allocate and copy write_set_hint
-        const write_set_hint = try allocator.alloc(PartitionId, write_count);
-        errdefer allocator.free(write_set_hint);
-        for (0..write_count) |i| {
-            const offset = write_set_start + i * 4;
-            write_set_hint[i] = std.mem.readInt(u32, @ptrCast(@alignCast(payload.ptr + offset)), .little);
-        }
-
-        // Copy params
-        const params = try allocator.dupe(u8, payload[params_start..params_end]);
-        errdefer allocator.free(params);
-
-        // Allocate and decode resolved_nondet
-        const resolved_nondet = try allocator.alloc(ResolvedValue, nondet_count);
-        errdefer allocator.free(resolved_nondet);
-        for (0..nondet_count) |i| {
-            const base = nondet_start + i * RESOLVED_RECORD_SIZE;
-            const tag_byte = payload[base];
-            const data = payload[base + 1 .. base + 17][0..16];
+    fn deserialize_from_nondet(
+        payload: []const u8,
+        base: usize,
+        count: u32,
+        alloc: std.mem.Allocator,
+    ) ![]ResolvedValue {
+        const resolved_nondet = try alloc.alloc(ResolvedValue, count);
+        errdefer alloc.free(resolved_nondet);
+        for (0..count) |i| {
+            const record_base = base + i * resolved_record_size;
+            const tag_byte = payload[record_base];
+            const bytes = payload[record_base + 1 .. record_base + 17][0..16];
             resolved_nondet[i] = switch (tag_byte) {
                 @intFromEnum(ResolvedKind.now) => blk: {
-                    const v = std.mem.readInt(i64, data[0..8], .little);
-                    break :blk .{ .now = v };
+                    const timestamp = std.mem.readInt(i64, bytes[0..8], .little);
+                    break :blk .{ .now = timestamp };
                 },
                 @intFromEnum(ResolvedKind.random) => blk: {
                     var d: [16]u8 = undefined;
-                    @memcpy(&d, data);
+                    @memcpy(&d, bytes);
                     break :blk .{ .random = d };
                 },
                 @intFromEnum(ResolvedKind.uuid_v7) => blk: {
                     var d: [16]u8 = undefined;
-                    @memcpy(&d, data);
+                    @memcpy(&d, bytes);
                     break :blk .{ .uuid_v7 = d };
                 },
-                else => {
-                    allocator.free(read_set_hint);
-                    allocator.free(write_set_hint);
-                    allocator.free(params);
-                    return error.InvalidPayload;
-                },
+                else => return error.InvalidPayload,
             };
         }
+        std.debug.assert(resolved_nondet.len == count);
+        return resolved_nondet;
+    }
+
+    pub fn deserialize_from(payload: []const u8, alloc: std.mem.Allocator) !TxnIntent {
+        const offsets = try deserialize_from_offsets(payload);
+
+        const read_set_hint = try alloc.alloc(PartitionId, offsets.read_count);
+        errdefer alloc.free(read_set_hint);
+        for (0..offsets.read_count) |i| {
+            const offset = offsets.read_set_start + i * @sizeOf(PartitionId);
+            read_set_hint[i] = std.mem.readInt(u32, @ptrCast(@alignCast(payload.ptr + offset)), .little);
+        }
+        std.debug.assert(read_set_hint.len == offsets.read_count);
+
+        const write_set_hint = try alloc.alloc(PartitionId, offsets.write_count);
+        errdefer alloc.free(write_set_hint);
+        for (0..offsets.write_count) |i| {
+            const offset = offsets.write_set_start + i * @sizeOf(PartitionId);
+            write_set_hint[i] = std.mem.readInt(u32, @ptrCast(@alignCast(payload.ptr + offset)), .little);
+        }
+        std.debug.assert(write_set_hint.len == offsets.write_count);
+
+        const params = try alloc.dupe(u8, payload[offsets.params_start..offsets.params_end]);
+        errdefer alloc.free(params);
+
+        const resolved_nondet = try deserialize_from_nondet(
+            payload,
+            offsets.nondet_start,
+            offsets.nondet_count,
+            alloc,
+        );
 
         return .{
-            .query_hash = query_hash,
+            .query_hash = offsets.query_hash,
             .params = params,
             .read_set_hint = read_set_hint,
             .write_set_hint = write_set_hint,
             .resolved_nondet = resolved_nondet,
-            .client_id = client_id,
-            .client_seq = client_seq,
-            .recon_seq = recon_seq,
+            .client_id = offsets.client_id,
+            .client_seq = offsets.client_seq,
+            .recon_seq = offsets.recon_seq,
         };
     }
 
-    /// Frees allocated memory in the TxnIntent.
-    pub fn deinit(self: TxnIntent, allocator: std.mem.Allocator) void {
-        allocator.free(self.read_set_hint);
-        allocator.free(self.write_set_hint);
-        allocator.free(self.params);
-        allocator.free(self.resolved_nondet);
+    pub fn deinit(self: TxnIntent, alloc: std.mem.Allocator) void {
+        alloc.free(self.read_set_hint);
+        alloc.free(self.write_set_hint);
+        alloc.free(self.params);
+        alloc.free(self.resolved_nondet);
     }
 
-    /// Creates a minimal TxnIntent for testing purposes.
-    /// All optional fields are set to empty/zero values.
-    pub fn initTest(payload: []const u8, client_id: u64, client_seq: u64) TxnIntent {
-        const query_hash: QueryHash = std.mem.zeroes(QueryHash);
+    pub fn init_test(payload: []const u8, client_id: u64, client_seq: u64) TxnIntent {
         return .{
-            .query_hash = query_hash,
+            .query_hash = std.mem.zeroes(QueryHash),
             .params = payload,
             .read_set_hint = &.{},
             .write_set_hint = &.{},
@@ -284,7 +293,7 @@ pub const TxnIntent = struct {
     }
 };
 
-/// Log entry header - fixed 25 bytes on disk (little-endian):
+/// Log entry header — 25 bytes on disk (little-endian):
 /// seq(8) epoch(8) kind(1) payload_len(4) payload_crc(4)
 pub const LogEntryHeader = struct {
     seq: Seq,
@@ -293,7 +302,7 @@ pub const LogEntryHeader = struct {
     payload_len: u32,
     payload_crc: u32,
 
-    pub const HEADER_SIZE: usize = 8 + 8 + 1 + 4 + 4; // 25
+    pub const header_size: u32 = 8 + 8 + 1 + 4 + 4; // 25
 
     pub fn init(seq: Seq, epoch: Epoch, kind: EntryKind, payload: []const u8) LogEntryHeader {
         return .{
@@ -305,7 +314,8 @@ pub const LogEntryHeader = struct {
         };
     }
 
-    pub fn serializeTo(self: LogEntryHeader, buf: []u8) void {
+    pub fn serialize_to(self: LogEntryHeader, buf: []u8) void {
+        std.debug.assert(buf.len >= header_size);
         std.mem.writeInt(u64, buf[0..8], self.seq, .little);
         std.mem.writeInt(u64, buf[8..16], self.epoch, .little);
         buf[16] = @intFromEnum(self.kind);
@@ -313,8 +323,8 @@ pub const LogEntryHeader = struct {
         std.mem.writeInt(u32, buf[21..25], self.payload_crc, .little);
     }
 
-    pub fn deserializeFrom(buf: []const u8) !LogEntryHeader {
-        if (buf.len < HEADER_SIZE) return error.EndOfStream;
+    pub fn deserialize_from(buf: []const u8) !LogEntryHeader {
+        if (buf.len < header_size) return error.EndOfStream;
         const seq = std.mem.readInt(u64, buf[0..8], .little);
         const epoch = std.mem.readInt(u64, buf[8..16], .little);
         const kind = try EntryKind.fromByte(buf[16]);
@@ -324,7 +334,6 @@ pub const LogEntryHeader = struct {
     }
 };
 
-/// Complete log entry including header and payload.
 pub const LogEntry = struct {
     header: LogEntryHeader,
     payload: []const u8,
@@ -337,40 +346,41 @@ pub const LogEntry = struct {
         return .{ .header = LogEntryHeader.init(seq, epoch, kind, payload), .payload = payload };
     }
 
-    pub fn totalSize(self: LogEntry) usize {
-        return LogEntryHeader.HEADER_SIZE + self.payload.len;
+    pub fn total_size(self: LogEntry) usize {
+        return LogEntryHeader.header_size + self.payload.len;
     }
 
-    pub fn serializeTo(self: LogEntry, buf: []u8) void {
-        self.header.serializeTo(buf[0..LogEntryHeader.HEADER_SIZE]);
-        @memcpy(buf[LogEntryHeader.HEADER_SIZE..][0..self.payload.len], self.payload);
+    pub fn serialize_to(self: LogEntry, buf: []u8) void {
+        std.debug.assert(buf.len >= self.total_size());
+        self.header.serialize_to(buf[0..LogEntryHeader.header_size]);
+        @memcpy(buf[LogEntryHeader.header_size..][0..self.payload.len], self.payload);
     }
 
-    /// Deserializes a complete entry from a file descriptor.
-    pub fn deserializeFd(fd: std.posix.fd_t, allocator: std.mem.Allocator) !LogEntry {
-        var header_buf: [LogEntryHeader.HEADER_SIZE]u8 = undefined;
-        const n = std.os.linux.read(@intCast(fd), &header_buf, LogEntryHeader.HEADER_SIZE);
-        if (n != LogEntryHeader.HEADER_SIZE) return error.EndOfStream;
+    pub fn deserialize_fd(fd: std.posix.fd_t, alloc: std.mem.Allocator) !LogEntry {
+        var header_buf: [LogEntryHeader.header_size]u8 = undefined;
+        const n = std.os.linux.read(@intCast(fd), &header_buf, LogEntryHeader.header_size);
+        if (n != LogEntryHeader.header_size) return error.EndOfStream;
 
-        const header = try LogEntryHeader.deserializeFrom(&header_buf);
-        if (header.payload_len > 1024 * 1024) return error.InvalidPayloadLength;
+        const log_header = try LogEntryHeader.deserialize_from(&header_buf);
+        if (log_header.payload_len > payload_len_max) return error.InvalidPayloadLength;
 
-        const payload = try allocator.alloc(u8, header.payload_len);
-        errdefer allocator.free(payload);
+        const payload = try alloc.alloc(u8, log_header.payload_len);
+        errdefer alloc.free(payload);
 
-        if (header.payload_len > 0) {
-            const pn = std.os.linux.read(@intCast(fd), payload.ptr, header.payload_len);
-            if (pn != header.payload_len) return error.EndOfStream;
+        if (log_header.payload_len > 0) {
+            const pn = std.os.linux.read(@intCast(fd), payload.ptr, log_header.payload_len);
+            if (pn != log_header.payload_len) return error.EndOfStream;
         }
 
-        return .{ .header = header, .payload = payload };
+        std.debug.assert(payload.len == log_header.payload_len);
+        return .{ .header = log_header, .payload = payload };
     }
 
-    pub fn verifyCrc(self: LogEntry) bool {
+    pub fn verify_crc(self: LogEntry) bool {
         return crc.crc32c(self.payload) == self.header.payload_crc;
     }
 
-    pub fn deinit(self: *LogEntry, allocator: std.mem.Allocator) void {
-        allocator.free(self.payload);
+    pub fn deinit(self: *LogEntry, alloc: std.mem.Allocator) void {
+        alloc.free(self.payload);
     }
 };

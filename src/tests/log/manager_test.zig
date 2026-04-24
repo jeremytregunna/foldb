@@ -68,12 +68,12 @@ fn makeTempDir() ![]const u8 {
 // This is the domain boundary for tests — serializes a TxnIntent before handing
 // pre-built LogEntry bytes to the log core via appendEntryAt.
 fn appendTestIntent(log_inst: *Log, alloc: std.mem.Allocator, params: []const u8) !Seq {
-    const intent = TxnIntent.initTest(params, 1, 1);
-    const payload = try intent.serializeTo(alloc);
+    const intent = TxnIntent.init_test(params, 1, 1);
+    const payload = try intent.serialize_to(alloc);
     defer alloc.free(payload);
     const seq = log_inst.current_seq + 1;
     const entry = LogEntry.create(seq, 0, .txn_intent, payload);
-    try log_inst.appendEntryAt(entry);
+    try log_inst.append_entry_at(entry);
     return seq;
 }
 
@@ -85,7 +85,7 @@ test "Log: initialization creates directory and segment" {
     }
 
     const node_id: NodeId = 1;
-    var log_instance = try Log.init(temp_path, node_id);
+    var log_instance = try Log.init(temp_path, node_id, testing.allocator);
     defer log_instance.deinit();
 
     try testing.expectEqual(@as(Seq, 0), log_instance.current_seq);
@@ -101,7 +101,7 @@ test "Log: append assigns sequence numbers" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     const seq1 = try appendTestIntent(&log_instance, testing.allocator, "first");
@@ -121,7 +121,7 @@ test "Log: read returns entries in order" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     const payloads = [_][]const u8{ "entry1", "entry2", "entry3", "entry4", "entry5" };
@@ -138,7 +138,7 @@ test "Log: read returns entries in order" {
     try testing.expectEqual(@as(usize, 5), entries.len);
     for (entries, 0..) |entry, i| {
         try testing.expectEqual(@as(Seq, @intCast(i + 1)), entry.header.seq);
-        const intent = try TxnIntent.deserializeFrom(entry.payload, testing.allocator);
+        const intent = try TxnIntent.deserialize_from(entry.payload, testing.allocator);
         defer intent.deinit(testing.allocator);
         try testing.expectEqualSlices(u8, payloads[i], intent.params);
     }
@@ -151,7 +151,7 @@ test "Log: read with from_seq filters correctly" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     var i: usize = 0;
@@ -177,7 +177,7 @@ test "Log: head returns last sequence" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     const empty_head = try log_instance.head();
@@ -198,7 +198,7 @@ test "Log: segment rotation when max entries reached" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     log_instance.segment_max_entries = 3;
@@ -231,7 +231,7 @@ test "Log: cross-segment reads work correctly" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     log_instance.segment_max_entries = 2;
@@ -252,7 +252,7 @@ test "Log: cross-segment reads work correctly" {
     try testing.expectEqual(@as(usize, 6), entries.len);
     for (entries, 0..) |entry, i| {
         try testing.expectEqual(@as(Seq, @intCast(i + 1)), entry.header.seq);
-        const intent = try TxnIntent.deserializeFrom(entry.payload, testing.allocator);
+        const intent = try TxnIntent.deserialize_from(entry.payload, testing.allocator);
         defer intent.deinit(testing.allocator);
         try testing.expectEqualSlices(u8, expected[i], intent.params);
     }
@@ -265,12 +265,12 @@ test "Log: append to sealed log fails" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     try log_instance.seal();
 
-    const result = log_instance.appendEntryAt(LogEntry.create(1, 0, .txn_intent, "should fail"));
+    const result = log_instance.append_entry_at(LogEntry.create(1, 0, .txn_intent, "should fail"));
     try testing.expectError(error.LogSealed, result);
 }
 
@@ -281,7 +281,7 @@ test "Log: truncate_prefix removes old segments" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     log_instance.segment_max_entries = 2;
@@ -314,7 +314,7 @@ test "Log: re-initialization recovers sequence numbers" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
 
     _ = try appendTestIntent(&log_instance, testing.allocator, "first");
     _ = try appendTestIntent(&log_instance, testing.allocator, "second");
@@ -325,7 +325,7 @@ test "Log: re-initialization recovers sequence numbers" {
 
     log_instance.deinit();
 
-    log_instance = try Log.init(temp_path, 1);
+    log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     const after_head = try log_instance.head();
@@ -342,7 +342,7 @@ test "Log: seq is strictly monotonic across segment rotation" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     log_instance.segment_max_entries = 3;
@@ -364,7 +364,7 @@ test "Log: head is correct after rotation" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     log_instance.segment_max_entries = 2;
@@ -386,7 +386,7 @@ test "Log: read beyond head returns empty" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     _ = try appendTestIntent(&log_instance, testing.allocator, "a");
@@ -404,7 +404,7 @@ test "Log: read with max=0 returns empty" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     _ = try appendTestIntent(&log_instance, testing.allocator, "data");
@@ -421,7 +421,7 @@ test "Log: truncate_prefix is no-op when no sealed segments" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     _ = try appendTestIntent(&log_instance, testing.allocator, "a");
@@ -439,7 +439,7 @@ test "Log: truncate_prefix removes all sealed segments" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     log_instance.segment_max_entries = 2;

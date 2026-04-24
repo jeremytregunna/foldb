@@ -99,7 +99,7 @@ pub const PartitionSet = struct {
             return results;
         }
 
-        if (!entry.verifyCrc()) {
+        if (!entry.verify_crc()) {
             return self.single_abort(0, .bad_params, "crc mismatch");
         }
 

@@ -7,7 +7,7 @@
 ///
 /// AppendEntries entries are serialized as:
 ///   u32 entry_count
-///   for each entry: u8[ENTRY_HEADER_SIZE] header | u32 payload_len | u8[payload_len] payload
+///   for each entry: u8[entry_header_size] header | u32 payload_len | u8[payload_len] payload
 const std = @import("std");
 const log_mod = @import("log.zig");
 const types = @import("types.zig");
@@ -17,7 +17,7 @@ pub const NodeId = log_mod.NodeId;
 pub const Seq = log_mod.Seq;
 pub const LogEntry = log_mod.LogEntry;
 pub const LogEntryHeader = log_mod.LogEntryHeader;
-pub const ENTRY_HEADER_SIZE = log_mod.ENTRY_HEADER_SIZE;
+pub const entry_header_size = log_mod.entry_header_size;
 
 /// A message in flight between two Raft nodes.
 pub const Envelope = struct {
@@ -170,8 +170,8 @@ pub fn encodeMessage(from_id: NodeId, msg: Message, buf: *std.ArrayList(u8), all
             std.mem.writeInt(u32, &entry_count_buf, @intCast(a.entries.len), .little);
             try buf.appendSlice(alloc, &entry_count_buf);
             for (a.entries) |entry| {
-                var eh: [ENTRY_HEADER_SIZE]u8 = undefined;
-                entry.header.serializeTo(&eh);
+                var eh: [entry_header_size]u8 = undefined;
+                entry.header.serialize_to(&eh);
                 try buf.appendSlice(alloc, &eh);
                 var pl_len_buf: [4]u8 = undefined;
                 std.mem.writeInt(u32, &pl_len_buf, @intCast(entry.payload.len), .little);
@@ -218,9 +218,9 @@ pub fn decodeMessage(data: []const u8, alloc: std.mem.Allocator) !Envelope {
             var n_init: usize = 0;
             errdefer for (entries[0..n_init]) |*e| e.deinit(alloc);
             for (0..entry_count) |i| {
-                if (pos + ENTRY_HEADER_SIZE + 4 > payload.len) return error.MessageTooShort;
-                const eh = try LogEntryHeader.deserializeFrom(payload[pos..][0..ENTRY_HEADER_SIZE]);
-                pos += ENTRY_HEADER_SIZE;
+                if (pos + entry_header_size + 4 > payload.len) return error.MessageTooShort;
+                const eh = try LogEntryHeader.deserialize_from(payload[pos..][0..entry_header_size]);
+                pos += entry_header_size;
                 const pl_len = std.mem.readInt(u32, payload[pos..][0..4], .little);
                 pos += 4;
                 if (pos + pl_len > payload.len) return error.MessageTooShort;

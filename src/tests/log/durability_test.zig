@@ -67,12 +67,12 @@ fn makeTempDir() ![]const u8 {
 // This is the domain boundary for tests — serializes a TxnIntent before handing
 // pre-built LogEntry bytes to the log core via appendEntryAt.
 fn appendTestIntent(log_inst: *Log, alloc: std.mem.Allocator, params: []const u8) !Seq {
-    const intent = TxnIntent.initTest(params, 1, 1);
-    const payload = try intent.serializeTo(alloc);
+    const intent = TxnIntent.init_test(params, 1, 1);
+    const payload = try intent.serialize_to(alloc);
     defer alloc.free(payload);
     const seq = log_inst.current_seq + 1;
     const entry = LogEntry.create(seq, 0, .txn_intent, payload);
-    try log_inst.appendEntryAt(entry);
+    try log_inst.append_entry_at(entry);
     return seq;
 }
 
@@ -83,7 +83,7 @@ test "Durability: data survives deinit and re-init" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
 
     const payloads = [_][]const u8{
         "transaction_1",
@@ -104,7 +104,7 @@ test "Durability: data survives deinit and re-init" {
 
     log_instance.deinit();
 
-    log_instance = try Log.init(temp_path, 1);
+    log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     const head_after = try log_instance.head();
@@ -119,10 +119,10 @@ test "Durability: data survives deinit and re-init" {
     try testing.expectEqual(@as(usize, 5), entries.len);
     for (entries, 0..) |entry, i| {
         try testing.expectEqual(@as(Seq, @intCast(i + 1)), entry.header.seq);
-        const intent = try TxnIntent.deserializeFrom(entry.payload, testing.allocator);
+        const intent = try TxnIntent.deserialize_from(entry.payload, testing.allocator);
         defer intent.deinit(testing.allocator);
         try testing.expectEqualSlices(u8, payloads[i], intent.params);
-        try testing.expect(entry.verifyCrc());
+        try testing.expect(entry.verify_crc());
     }
 }
 
@@ -133,19 +133,19 @@ test "Durability: data survives multiple deinit/init cycles" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     _ = try appendTestIntent(&log_instance, testing.allocator, "cycle1_data");
     log_instance.deinit();
 
-    log_instance = try Log.init(temp_path, 1);
+    log_instance = try Log.init(temp_path, 1, testing.allocator);
     _ = try appendTestIntent(&log_instance, testing.allocator, "cycle2_data");
     log_instance.deinit();
 
-    log_instance = try Log.init(temp_path, 1);
+    log_instance = try Log.init(temp_path, 1, testing.allocator);
     _ = try appendTestIntent(&log_instance, testing.allocator, "cycle3_data");
     log_instance.deinit();
 
-    log_instance = try Log.init(temp_path, 1);
+    log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     const entries = try log_instance.read(1, 20, testing.allocator);
@@ -156,17 +156,17 @@ test "Durability: data survives multiple deinit/init cycles" {
 
     try testing.expectEqual(@as(usize, 3), entries.len);
     {
-        const intent0 = try TxnIntent.deserializeFrom(entries[0].payload, testing.allocator);
+        const intent0 = try TxnIntent.deserialize_from(entries[0].payload, testing.allocator);
         defer intent0.deinit(testing.allocator);
         try testing.expectEqualSlices(u8, "cycle1_data", intent0.params);
     }
     {
-        const intent1 = try TxnIntent.deserializeFrom(entries[1].payload, testing.allocator);
+        const intent1 = try TxnIntent.deserialize_from(entries[1].payload, testing.allocator);
         defer intent1.deinit(testing.allocator);
         try testing.expectEqualSlices(u8, "cycle2_data", intent1.params);
     }
     {
-        const intent2 = try TxnIntent.deserializeFrom(entries[2].payload, testing.allocator);
+        const intent2 = try TxnIntent.deserialize_from(entries[2].payload, testing.allocator);
         defer intent2.deinit(testing.allocator);
         try testing.expectEqualSlices(u8, "cycle3_data", intent2.params);
     }
@@ -179,7 +179,7 @@ test "Durability: sealed segments persist correctly" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     log_instance.segment_max_entries = 2;
 
     var i: usize = 0;
@@ -190,7 +190,7 @@ test "Durability: sealed segments persist correctly" {
     try testing.expectEqual(@as(usize, 3), log_instance.sealed_segments.items.len);
     log_instance.deinit();
 
-    log_instance = try Log.init(temp_path, 1);
+    log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     const entries = try log_instance.read(1, 20, testing.allocator);
@@ -209,7 +209,7 @@ test "Durability: CRC verification on re-read" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
 
     const payloads = [_][]const u8{
         "",
@@ -224,7 +224,7 @@ test "Durability: CRC verification on re-read" {
 
     log_instance.deinit();
 
-    log_instance = try Log.init(temp_path, 1);
+    log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     const entries = try log_instance.read(1, 20, testing.allocator);
@@ -235,7 +235,7 @@ test "Durability: CRC verification on re-read" {
 
     try testing.expectEqual(@as(usize, 4), entries.len);
     for (entries) |entry| {
-        try testing.expect(entry.verifyCrc());
+        try testing.expect(entry.verify_crc());
     }
 }
 
@@ -246,7 +246,7 @@ test "Durability: partial writes detected on reopen" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     _ = try appendTestIntent(&log_instance, testing.allocator, "valid_entry");
     try log_instance.seal();
     log_instance.deinit();
@@ -271,7 +271,7 @@ test "Durability: partial writes detected on reopen" {
     }
 
     // Re-init should handle gracefully (invalid footer = treat as unsealed)
-    var recovered = Log.init(temp_path, 1) catch return;
+    var recovered = Log.init(temp_path, 1, testing.allocator) catch return;
     recovered.deinit();
 }
 
@@ -282,7 +282,7 @@ test "Durability: header CRC protects against corruption" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     _ = try appendTestIntent(&log_instance, testing.allocator, "entry");
     try log_instance.seal();
     log_instance.deinit();
@@ -307,7 +307,7 @@ test "Durability: header CRC protects against corruption" {
     _ = std.os.linux.write(@intCast(file_fd), &corrupt, 8);
 
     // Re-init should skip the corrupt segment (CorruptSegmentHeader)
-    var recovered = try Log.init(temp_path, 1);
+    var recovered = try Log.init(temp_path, 1, testing.allocator);
     defer recovered.deinit();
     // Corrupt segment is skipped, log starts fresh
 }
@@ -328,11 +328,11 @@ test "Durability: large payloads survive round-trip" {
         large_payload[i] = @intCast((i * 7) % 256);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     const seq = try appendTestIntent(&log_instance, testing.allocator, large_payload);
     log_instance.deinit();
 
-    log_instance = try Log.init(temp_path, 1);
+    log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     const entries = try log_instance.read(seq, 10, testing.allocator);
@@ -342,10 +342,10 @@ test "Durability: large payloads survive round-trip" {
     }
 
     try testing.expectEqual(@as(usize, 1), entries.len);
-    const intent = try TxnIntent.deserializeFrom(entries[0].payload, testing.allocator);
+    const intent = try TxnIntent.deserialize_from(entries[0].payload, testing.allocator);
     defer intent.deinit(testing.allocator);
     try testing.expectEqualSlices(u8, large_payload, intent.params);
-    try testing.expect(entries[0].verifyCrc());
+    try testing.expect(entries[0].verify_crc());
 }
 
 test "Durability: empty log survives deinit/init" {
@@ -355,10 +355,10 @@ test "Durability: empty log survives deinit/init" {
         testing.allocator.free(temp_path);
     }
 
-    var log_instance = try Log.init(temp_path, 1);
+    var log_instance = try Log.init(temp_path, 1, testing.allocator);
     log_instance.deinit();
 
-    log_instance = try Log.init(temp_path, 1);
+    log_instance = try Log.init(temp_path, 1, testing.allocator);
     defer log_instance.deinit();
 
     const h = try log_instance.head();
@@ -377,11 +377,11 @@ test "Durability: node_id preserved across restarts" {
 
     const node_id: NodeId = 42;
 
-    var log_instance = try Log.init(temp_path, node_id);
+    var log_instance = try Log.init(temp_path, node_id, testing.allocator);
     _ = try appendTestIntent(&log_instance, testing.allocator, "entry");
     log_instance.deinit();
 
-    log_instance = try Log.init(temp_path, node_id);
+    log_instance = try Log.init(temp_path, node_id, testing.allocator);
     defer log_instance.deinit();
 
     try testing.expectEqual(node_id, log_instance.node_id);

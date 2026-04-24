@@ -71,7 +71,7 @@ pub fn recoverLatest(
     var lsm = try storage_mod.restoreFromSnapshot(&manifest, lsm_dir, store, schema, alloc);
     errdefer lsm.deinit();
 
-    log.notifySnapshot(best_seq);
+    log.notify_snapshot(best_seq);
 
     const batch_size: usize = 1000;
     var replay_from: Seq = best_seq + 1;

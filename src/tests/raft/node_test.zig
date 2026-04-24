@@ -94,7 +94,7 @@ test "Node: election timeout triggers candidacy" {
         testing.allocator.free(dir);
     }
 
-    var log = try Log.init(dir, 1);
+    var log = try Log.init(dir, 1, testing.allocator);
     defer log.deinit();
 
     var node = try RaftNode.init(testing.allocator, 1, &.{ 2, 3 }, TEST_CFG, 42);
@@ -131,7 +131,7 @@ test "Node: wins election on majority vote" {
         testing.allocator.free(dir);
     }
 
-    var log = try Log.init(dir, 1);
+    var log = try Log.init(dir, 1, testing.allocator);
     defer log.deinit();
 
     var node = try RaftNode.init(testing.allocator, 1, &.{ 2, 3 }, TEST_CFG, 1);
@@ -156,7 +156,7 @@ test "Node: split vote — second election resolves" {
         testing.allocator.free(dir);
     }
 
-    var log = try Log.init(dir, 1);
+    var log = try Log.init(dir, 1, testing.allocator);
     defer log.deinit();
 
     var node = try RaftNode.init(testing.allocator, 1, &.{ 2, 3 }, TEST_CFG, 99);
@@ -189,7 +189,7 @@ test "Node: steps down when receiving higher term" {
         testing.allocator.free(dir);
     }
 
-    var log = try Log.init(dir, 1);
+    var log = try Log.init(dir, 1, testing.allocator);
     defer log.deinit();
 
     var node = try RaftNode.init(testing.allocator, 1, &.{ 2, 3 }, TEST_CFG, 7);
@@ -226,7 +226,7 @@ test "Node: follower appends entries from leader" {
         testing.allocator.free(dir);
     }
 
-    var log = try Log.init(dir, 1);
+    var log = try Log.init(dir, 1, testing.allocator);
     defer log.deinit();
 
     var node = try RaftNode.init(testing.allocator, 1, &.{ 2, 3 }, TEST_CFG, 5);
@@ -275,12 +275,12 @@ test "Node: log conflict resolved by truncation" {
         testing.allocator.free(dir);
     }
 
-    var log = try Log.init(dir, 1);
+    var log = try Log.init(dir, 1, testing.allocator);
     defer log.deinit();
 
     // Pre-populate log with stale entries (term 1).
-    try log.appendEntryAt(LogEntry.create(1, 1, .txn_intent, "stale1"));
-    try log.appendEntryAt(LogEntry.create(2, 1, .txn_intent, "stale2"));
+    try log.append_entry_at(LogEntry.create(1, 1, .txn_intent, "stale1"));
+    try log.append_entry_at(LogEntry.create(2, 1, .txn_intent, "stale2"));
     try testing.expectEqual(@as(u64, 2), try log.head());
 
     var node = try RaftNode.init(testing.allocator, 1, &.{ 2, 3 }, TEST_CFG, 3);
@@ -324,7 +324,7 @@ test "Node: leader commits on majority matchIndex" {
         testing.allocator.free(dir);
     }
 
-    var log = try Log.init(dir, 1);
+    var log = try Log.init(dir, 1, testing.allocator);
     defer log.deinit();
 
     var node = try RaftNode.init(testing.allocator, 1, &.{ 2, 3 }, TEST_CFG, 11);
@@ -367,7 +367,7 @@ test "Node: stale AppendEntries rejected" {
         testing.allocator.free(dir);
     }
 
-    var log = try Log.init(dir, 1);
+    var log = try Log.init(dir, 1, testing.allocator);
     defer log.deinit();
 
     var node = try RaftNode.init(testing.allocator, 1, &.{ 2, 3 }, TEST_CFG, 0);

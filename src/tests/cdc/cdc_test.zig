@@ -493,7 +493,7 @@ test "CDC: cross-partition transaction emits events on both partitions" {
         .client_id = 1,
         .client_seq = 1,
     };
-    const payload = try intent.serializeTo(testing.allocator);
+    const payload = try intent.serialize_to(testing.allocator);
     defer testing.allocator.free(payload);
 
     const header = log_mod.LogEntryHeader.init(1, 0, .txn_intent, payload);

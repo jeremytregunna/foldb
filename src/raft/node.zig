@@ -192,7 +192,7 @@ pub const RaftNode = struct {
 
         const seq = (try log.head()) + 1;
         const entry = LogEntry.create(seq, self.current_term, kind, payload);
-        try log.appendEntry(entry);
+        try log.append_entry(entry);
 
         // Update our own match_index conceptually (handled via head() in checkCommit).
         try self.broadcastAppendEntries(log, out);
@@ -247,7 +247,7 @@ pub const RaftNode = struct {
         const cc_payload = cc.serialize();
         const seq = head + 1;
         const entry = LogEntry.create(seq, self.current_term, .config_change, &cc_payload);
-        try log.appendEntry(entry);
+        try log.append_entry(entry);
 
         self.pending_config = .{ .seq = seq, .op = op, .peer_id = peer_id };
 
@@ -299,10 +299,10 @@ pub const RaftNode = struct {
                 } } } });
                 return;
             }
-            const our_term = try log.termAt(args.prev_log_index, self.allocator);
+            const our_term = try log.term_at(args.prev_log_index, self.allocator);
             if (our_term != args.prev_log_term) {
                 // Conflict: truncate back to prev_log_index so leader can retry.
-                try log.truncateSuffix(args.prev_log_index);
+                try log.truncate_suffix(args.prev_log_index);
                 try out.append(self.allocator, .{ .send = .{ .to = args.leader_id, .msg = .{ .append_entries_result = .{
                     .term = self.current_term,
                     .success = false,
@@ -317,15 +317,15 @@ pub const RaftNode = struct {
         for (args.entries) |entry| {
             const our_head = try log.head();
             if (entry.header.seq <= our_head) {
-                const our_term = try log.termAt(entry.header.seq, self.allocator);
+                const our_term = try log.term_at(entry.header.seq, self.allocator);
                 if (our_term == entry.header.epoch) continue; // already have it
                 // Conflict: truncate and clear any pending config change at or after this seq.
-                try log.truncateSuffix(entry.header.seq);
+                try log.truncate_suffix(entry.header.seq);
                 if (self.pending_config) |pc| {
                     if (pc.seq >= entry.header.seq) self.pending_config = null;
                 }
             }
-            try log.appendEntry(entry);
+            try log.append_entry(entry);
             replicated += 1;
             // Domain boundary — decode config_change payload from the replication stream;
             // only a fully-parsed PendingConfigChange crosses into domain state.
@@ -476,7 +476,7 @@ pub const RaftNode = struct {
         try out.append(self.allocator, .{ .persist = .{ .term = self.current_term, .voted_for = self.id } });
 
         const last_index = try log.head();
-        const last_term = try log.termAt(last_index, self.allocator);
+        const last_term = try log.term_at(last_index, self.allocator);
 
         for (self.peers) |*peer| {
             peer.vote_responded = false;
@@ -544,7 +544,7 @@ pub const RaftNode = struct {
 
     fn emitSendEntries(self: *RaftNode, log: *Log, peer: *PeerState, out: *std.ArrayList(Output)) !void {
         const prev_index = peer.next_index - 1;
-        const prev_term = try log.termAt(prev_index, self.allocator);
+        const prev_term = try log.term_at(prev_index, self.allocator);
         try out.append(self.allocator, .{ .send_entries = .{
             .to = peer.id,
             .term = self.current_term,
@@ -564,7 +564,7 @@ pub const RaftNode = struct {
         const our_head = try log.head();
         var n = our_head;
         while (n > self.commit_index) : (n -= 1) {
-            const entry_term = try log.termAt(n, self.allocator);
+            const entry_term = try log.term_at(n, self.allocator);
             if (entry_term != self.current_term) continue;
 
             // Old config quorum.
@@ -663,7 +663,7 @@ pub const RaftNode = struct {
 
     fn candidateLogIsUpToDate(self: *RaftNode, log: *Log, cand_last_index: Seq, cand_last_term: Term) !bool {
         const our_last = try log.head();
-        const our_term = try log.termAt(our_last, self.allocator);
+        const our_term = try log.term_at(our_last, self.allocator);
         if (cand_last_term != our_term) return cand_last_term > our_term;
         return cand_last_index >= our_last;
     }

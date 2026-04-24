@@ -57,7 +57,7 @@ const drain_iterations_max: u32 = 1 << 20;
 /// Call this before handing the entry to the Executor core.
 pub fn validate_txn_entry(entry: LogEntry, alloc: std.mem.Allocator) !ValidatedTxnEntry {
     assert(entry.header.kind == .txn_intent);
-    if (!entry.verifyCrc()) return error.CrcMismatch;
+    if (!entry.verify_crc()) return error.CrcMismatch;
     const decoded = try deserialize_txn_intent(entry.payload, alloc);
     assert(decoded.query_hash.len == 32);
     return .{ .seq = entry.header.seq, .epoch = entry.header.epoch, .decoded = decoded };
@@ -149,7 +149,7 @@ pub const Executor = struct {
             if (entry.header.kind == .snapshot_marker) {
                 // Domain boundary — decode snapshot marker; skip notification if payload is malformed.
                 if (validate_snapshot_entry(entry, self.alloc)) |marker_seq| {
-                    if (self.log) |l| l.notifySnapshot(marker_seq);
+                    if (self.log) |l| l.notify_snapshot(marker_seq);
                 } else |_| {}
             }
             self.metrics.noops_processed.inc();

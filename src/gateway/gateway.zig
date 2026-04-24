@@ -328,7 +328,7 @@ pub const Gateway = struct {
         const min_cdc = self.cdc.min_cursor();
         if (min_cdc > 0 and min_cdc < safe_seq) safe_seq = min_cdc;
         for (self.sequencer.partition_logs) |*log| {
-            log.notifySnapshot(safe_seq);
+            log.notify_snapshot(safe_seq);
             try log.truncate_prefix(safe_seq);
         }
     }
@@ -708,7 +708,7 @@ pub const Gateway = struct {
         const seq = self.sequencer.next_seq;
         self.sequencer.next_seq += 1;
         const entry = log_mod.LogEntry.create(seq, 0, .schema_change, sql);
-        try self.sequencer.partition_logs[0].appendEntryAt(entry);
+        try self.sequencer.partition_logs[0].append_entry_at(entry);
     }
 
     /// Apply DDL during log replay (does not write to log).
