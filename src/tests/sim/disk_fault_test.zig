@@ -105,7 +105,7 @@ fn runDiskFaultTest(seed: u64, fault_rate: f64, alloc: std.mem.Allocator) !void 
         var i: i64 = 1;
         while (i <= 20) : (i += 1) {
             const params = [_]ColumnValue{ .{ .int64 = i }, .{ .int64 = i * 10 } };
-            _ = try gw.execute(std.testing.io, ins, &params, &.{});
+            _ = try gw.execute(ins, &params, &.{});
 
             if (@mod(i, 5) == 0) {
                 gw.flushAll() catch {
@@ -186,7 +186,7 @@ test "sim: disk fault recovery — no faults, all rows survive" {
         var i: i64 = 1;
         while (i <= 20) : (i += 1) {
             const params = [_]ColumnValue{ .{ .int64 = i }, .{ .int64 = i * 10 } };
-            _ = try gw.execute(std.testing.io, ins, &params, &.{});
+            _ = try gw.execute(ins, &params, &.{});
         }
         try gw.flushAll();
         gw.deinit();

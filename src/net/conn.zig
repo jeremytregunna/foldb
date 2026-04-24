@@ -422,10 +422,7 @@ pub const Conn = struct {
             return;
         }
 
-        var io_threaded: std.Io.Threaded = .init_single_threaded;
-        const io = io_threaded.io();
-
-        const exec_result = self.gw.execute(io, hash, params, &.{}) catch |e| {
+        const exec_result = self.gw.execute(hash, params, &.{}) catch |e| {
             const code = gatewayErrToCode(e);
             var emsg_buf: [256]u8 = undefined;
             const detail = self.gw.lastDetail();

@@ -68,7 +68,7 @@ fn teardown(gw: *Gateway, dir: []const u8) void {
 
 fn insertRow(gw: *Gateway, id: i64, mask: i64) !void {
     const h = (try gw.register("INSERT INTO flags (id, mask) VALUES ($1, $2)")).hash;
-    _ = try gw.execute(std.testing.io, h, &.{ .{ .int64 = id }, .{ .int64 = mask } }, &.{});
+    _ = try gw.execute(h, &.{ .{ .int64 = id }, .{ .int64 = mask } }, &.{});
 }
 
 test "bitwise AND selects matching bits" {

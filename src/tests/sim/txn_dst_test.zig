@@ -171,8 +171,8 @@ fn runTxnDeterminismTest(seed: u64, n_transfers: usize, alloc: std.mem.Allocator
     // Seed 5 accounts each with 1000.
     var acct: i64 = 1;
     while (acct <= 5) : (acct += 1) {
-        _ = try gw_a.execute(std.testing.io, seed_a, &.{ .{ .int64 = acct }, .{ .int64 = 1000 } }, &.{});
-        _ = try gw_b.execute(std.testing.io, seed_b, &.{ .{ .int64 = acct }, .{ .int64 = 1000 } }, &.{});
+        _ = try gw_a.execute(seed_a, &.{ .{ .int64 = acct }, .{ .int64 = 1000 } }, &.{});
+        _ = try gw_b.execute(seed_b, &.{ .{ .int64 = acct }, .{ .int64 = 1000 } }, &.{});
         clock.advance(1);
     }
 
@@ -186,8 +186,8 @@ fn runTxnDeterminismTest(seed: u64, n_transfers: usize, alloc: std.mem.Allocator
         const amount: i64 = @as(i64, @intCast(rng.random().intRangeAtMost(u32, 1, 200)));
 
         // Transfers may abort (ASSERT) — that's expected and both gateways see the same abort.
-        _ = gw_a.execute(std.testing.io, xfer_a, &.{ .{ .int64 = from }, .{ .int64 = to }, .{ .int64 = amount } }, &.{}) catch {};
-        _ = gw_b.execute(std.testing.io, xfer_b, &.{ .{ .int64 = from }, .{ .int64 = to }, .{ .int64 = amount } }, &.{}) catch {};
+        _ = gw_a.execute(xfer_a, &.{ .{ .int64 = from }, .{ .int64 = to }, .{ .int64 = amount } }, &.{}) catch {};
+        _ = gw_b.execute(xfer_b, &.{ .{ .int64 = from }, .{ .int64 = to }, .{ .int64 = amount } }, &.{}) catch {};
         clock.advance(1);
     }
 
@@ -227,15 +227,15 @@ test "dst: txn crash recovery — committed transaction blocks survive log repla
         // Seed accounts.
         var acct: i64 = 1;
         while (acct <= 4) : (acct += 1) {
-            _ = try gw.execute(std.testing.io, seed, &.{ .{ .int64 = acct }, .{ .int64 = 500 } }, &.{});
+            _ = try gw.execute(seed, &.{ .{ .int64 = acct }, .{ .int64 = 500 } }, &.{});
         }
 
         // Flush seed rows so their presence after recovery is unambiguous.
         try gw.flushAll();
 
         // Transfer blocks committed to log but NOT flushed to SSTables.
-        _ = gw.execute(std.testing.io, xfer, &.{ .{ .int64 = 1 }, .{ .int64 = 2 }, .{ .int64 = 100 } }, &.{}) catch {};
-        _ = gw.execute(std.testing.io, xfer, &.{ .{ .int64 = 3 }, .{ .int64 = 4 }, .{ .int64 = 200 } }, &.{}) catch {};
+        _ = gw.execute(xfer, &.{ .{ .int64 = 1 }, .{ .int64 = 2 }, .{ .int64 = 100 } }, &.{}) catch {};
+        _ = gw.execute(xfer, &.{ .{ .int64 = 3 }, .{ .int64 = 4 }, .{ .int64 = 200 } }, &.{}) catch {};
 
         // Crash — no deinit.
     }

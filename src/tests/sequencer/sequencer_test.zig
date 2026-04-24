@@ -5,6 +5,7 @@ const sequencer_mod = @import("sequencer.zig");
 
 const Sequencer = sequencer_mod.Sequencer;
 const Config = sequencer_mod.Config;
+const PendingSubmit = sequencer_mod.PendingSubmit;
 
 fn makeTempDir(suffix: []const u8) ![]const u8 {
     var ts: std.os.linux.timespec = undefined;
@@ -83,23 +84,19 @@ test "Sequencer: submit assigns dense increasing seqs" {
 
     var seq = try Sequencer.init(path, .{}, testing.allocator);
     defer seq.deinit();
+    try seq.start();
 
     const payload = try minimalIntentPayload(testing.allocator);
     defer testing.allocator.free(payload);
 
-    const io = std.testing.io;
+    var p1: PendingSubmit = undefined;
+    const r1 = try seq.submitBytes(&p1, payload, 1, 1).awaitCommit();
 
-    var h1 = seq.submitBytes(io, payload, 1, 1);
-    defer if (h1.future.cancel(io)) |_| {} else |_| {};
-    const r1 = try h1.awaitCommit(io);
+    var p2: PendingSubmit = undefined;
+    const r2 = try seq.submitBytes(&p2, payload, 1, 2).awaitCommit();
 
-    var h2 = seq.submitBytes(io, payload, 1, 2);
-    defer if (h2.future.cancel(io)) |_| {} else |_| {};
-    const r2 = try h2.awaitCommit(io);
-
-    var h3 = seq.submitBytes(io, payload, 1, 3);
-    defer if (h3.future.cancel(io)) |_| {} else |_| {};
-    const r3 = try h3.awaitCommit(io);
+    var p3: PendingSubmit = undefined;
+    const r3 = try seq.submitBytes(&p3, payload, 1, 3).awaitCommit();
 
     try testing.expectEqual(@as(u64, 1), r1.seq);
     try testing.expectEqual(@as(u64, 2), r2.seq);
@@ -116,19 +113,16 @@ test "Sequencer: idempotent submit returns same seq" {
 
     var seq = try Sequencer.init(path, .{}, testing.allocator);
     defer seq.deinit();
+    try seq.start();
 
     const payload = try minimalIntentPayload(testing.allocator);
     defer testing.allocator.free(payload);
 
-    const io = std.testing.io;
+    var p1: PendingSubmit = undefined;
+    const r1 = try seq.submitBytes(&p1, payload, 42, 7).awaitCommit();
 
-    var h1 = seq.submitBytes(io, payload, 42, 7);
-    defer if (h1.future.cancel(io)) |_| {} else |_| {};
-    const r1 = try h1.awaitCommit(io);
-
-    var h2 = seq.submitBytes(io, payload, 42, 7);
-    defer if (h2.future.cancel(io)) |_| {} else |_| {};
-    const r2 = try h2.awaitCommit(io);
+    var p2: PendingSubmit = undefined;
+    const r2 = try seq.submitBytes(&p2, payload, 42, 7).awaitCommit();
 
     try testing.expectEqual(r1.seq, r2.seq);
     try testing.expectEqual(r1.partition, r2.partition);
@@ -144,27 +138,22 @@ test "Sequencer: multi-partition routing distributes round-robin" {
 
     var seq = try Sequencer.init(path, .{ .partition_count = 2 }, testing.allocator);
     defer seq.deinit();
+    try seq.start();
 
     const payload = try minimalIntentPayload(testing.allocator);
     defer testing.allocator.free(payload);
 
-    const io = std.testing.io;
+    var p1: PendingSubmit = undefined;
+    const r1 = try seq.submitBytes(&p1, payload, 1, 1).awaitCommit();
 
-    var h1 = seq.submitBytes(io, payload, 1, 1);
-    defer if (h1.future.cancel(io)) |_| {} else |_| {};
-    const r1 = try h1.awaitCommit(io);
+    var p2: PendingSubmit = undefined;
+    const r2 = try seq.submitBytes(&p2, payload, 1, 2).awaitCommit();
 
-    var h2 = seq.submitBytes(io, payload, 1, 2);
-    defer if (h2.future.cancel(io)) |_| {} else |_| {};
-    const r2 = try h2.awaitCommit(io);
+    var p3: PendingSubmit = undefined;
+    const r3 = try seq.submitBytes(&p3, payload, 1, 3).awaitCommit();
 
-    var h3 = seq.submitBytes(io, payload, 1, 3);
-    defer if (h3.future.cancel(io)) |_| {} else |_| {};
-    const r3 = try h3.awaitCommit(io);
-
-    var h4 = seq.submitBytes(io, payload, 1, 4);
-    defer if (h4.future.cancel(io)) |_| {} else |_| {};
-    const r4 = try h4.awaitCommit(io);
+    var p4: PendingSubmit = undefined;
+    const r4 = try seq.submitBytes(&p4, payload, 1, 4).awaitCommit();
 
     // seq 1 → 1%2=1, seq 2 → 2%2=0, seq 3 → 3%2=1, seq 4 → 4%2=0
     try testing.expectEqual(@as(u32, 1), r1.partition);
@@ -182,15 +171,13 @@ test "Sequencer: committed entry readable from partition log" {
 
     var seq = try Sequencer.init(path, .{}, testing.allocator);
     defer seq.deinit();
+    try seq.start();
 
     const payload = try minimalIntentPayload(testing.allocator);
     defer testing.allocator.free(payload);
 
-    const io = std.testing.io;
-
-    var handle = seq.submitBytes(io, payload, 1, 1);
-    defer if (handle.future.cancel(io)) |_| {} else |_| {};
-    const result = try handle.awaitCommit(io);
+    var pending: PendingSubmit = undefined;
+    const result = try seq.submitBytes(&pending, payload, 1, 1).awaitCommit();
 
     const partition_log = seq.partitionLog(result.partition);
     const entries = try partition_log.read(result.seq, 1, testing.allocator);

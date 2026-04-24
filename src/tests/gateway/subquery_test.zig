@@ -67,14 +67,14 @@ fn setupGateway() !struct { gw: *Gateway, dir: []const u8 } {
     try gw.applyDdl(ORDERS_DDL);
 
     const ins_user = (try gw.register("INSERT INTO users (id, name) VALUES ($1, $2)")).hash;
-    _ = try gw.execute(std.testing.io, ins_user, &.{ .{ .int64 = 1 }, .{ .int64 = 100 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins_user, &.{ .{ .int64 = 2 }, .{ .int64 = 200 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins_user, &.{ .{ .int64 = 3 }, .{ .int64 = 300 } }, &.{});
+    _ = try gw.execute(ins_user, &.{ .{ .int64 = 1 }, .{ .int64 = 100 } }, &.{});
+    _ = try gw.execute(ins_user, &.{ .{ .int64 = 2 }, .{ .int64 = 200 } }, &.{});
+    _ = try gw.execute(ins_user, &.{ .{ .int64 = 3 }, .{ .int64 = 300 } }, &.{});
 
     const ins_order = (try gw.register("INSERT INTO orders (id, user_id, amount) VALUES ($1, $2, $3)")).hash;
-    _ = try gw.execute(std.testing.io, ins_order, &.{ .{ .int64 = 1 }, .{ .int64 = 1 }, .{ .int64 = 50 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins_order, &.{ .{ .int64 = 2 }, .{ .int64 = 1 }, .{ .int64 = 80 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins_order, &.{ .{ .int64 = 3 }, .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
+    _ = try gw.execute(ins_order, &.{ .{ .int64 = 1 }, .{ .int64 = 1 }, .{ .int64 = 50 } }, &.{});
+    _ = try gw.execute(ins_order, &.{ .{ .int64 = 2 }, .{ .int64 = 1 }, .{ .int64 = 80 } }, &.{});
+    _ = try gw.execute(ins_order, &.{ .{ .int64 = 3 }, .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
 
     return .{ .gw = gw, .dir = dir };
 }
@@ -356,7 +356,7 @@ test "subquery: ASSERT with scalar COUNT subquery passes when condition met" {
         \\  INSERT INTO orders (id, user_id, amount) VALUES ($oid, $uid, $amt);
         \\}
     )).hash;
-    _ = try s.gw.execute(std.testing.io, txn, &.{ .{ .int64 = 10 }, .{ .int64 = 3 }, .{ .int64 = 99 } }, &.{});
+    _ = try s.gw.execute(txn, &.{ .{ .int64 = 10 }, .{ .int64 = 3 }, .{ .int64 = 99 } }, &.{});
 
     const check = (try s.gw.register(
         \\SELECT id FROM orders WHERE user_id = 3
@@ -382,7 +382,7 @@ test "subquery: ASSERT with scalar COUNT subquery aborts when condition fails" {
         \\  INSERT INTO orders (id, user_id, amount) VALUES ($oid, $uid, $amt);
         \\}
     )).hash;
-    const result = s.gw.execute(std.testing.io, txn, &.{ .{ .int64 = 20 }, .{ .int64 = 1 }, .{ .int64 = 5 } }, &.{});
+    const result = s.gw.execute(txn, &.{ .{ .int64 = 20 }, .{ .int64 = 1 }, .{ .int64 = 5 } }, &.{});
     try testing.expectError(error.ConstraintViolation, result);
 
     // Verify no new order was inserted.

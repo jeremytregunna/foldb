@@ -64,7 +64,7 @@ test "ALTER TABLE ADD COLUMN: new column readable on subsequent inserts" {
     try gw.applyDdl("ALTER TABLE items ADD COLUMN discount INT64 NULL");
 
     const ins = (try gw.register("INSERT INTO items (id, price, discount) VALUES ($1, $2, $3)")).hash;
-    _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 100 }, .{ .int64 = 10 } }, &.{});
+    _ = try gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 100 }, .{ .int64 = 10 } }, &.{});
 
     const q = (try gw.register("SELECT discount FROM items WHERE id = 1")).hash;
     var rs = try gw.querySelect(q, &.{}, &.{});
@@ -86,7 +86,7 @@ test "ALTER TABLE ADD COLUMN: existing rows return null for new column" {
     try gw.applyDdl("CREATE TABLE items (id INT64 NOT NULL, price INT64 NOT NULL, PRIMARY KEY (id))");
 
     const ins_old = (try gw.register("INSERT INTO items (id, price) VALUES ($1, $2)")).hash;
-    _ = try gw.execute(std.testing.io, ins_old, &.{ .{ .int64 = 1 }, .{ .int64 = 50 } }, &.{});
+    _ = try gw.execute(ins_old, &.{ .{ .int64 = 1 }, .{ .int64 = 50 } }, &.{});
 
     try gw.applyDdl("ALTER TABLE items ADD COLUMN discount INT64 NULL");
 

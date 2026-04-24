@@ -79,7 +79,7 @@ test "on conflict do nothing: non-conflicting insert succeeds normally" {
     }
 
     const ins = (try s.gw.register("INSERT INTO counters (id, val) VALUES ($1, $2) ON CONFLICT DO NOTHING")).hash;
-    _ = try s.gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try s.gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
 
     try testing.expectEqual(@as(?i64, 10), try queryVal(s.gw, 1));
 }
@@ -93,8 +93,8 @@ test "on conflict do nothing: conflicting insert leaves original row unchanged" 
     }
 
     const ins = (try s.gw.register("INSERT INTO counters (id, val) VALUES ($1, $2) ON CONFLICT DO NOTHING")).hash;
-    _ = try s.gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
-    _ = try s.gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 99 } }, &.{});
+    _ = try s.gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try s.gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 99 } }, &.{});
 
     // Original val=10 must be preserved.
     try testing.expectEqual(@as(?i64, 10), try queryVal(s.gw, 1));
@@ -109,8 +109,8 @@ test "on conflict do nothing: conflicting insert still returns rows_affected 0" 
     }
 
     const ins = (try s.gw.register("INSERT INTO counters (id, val) VALUES ($1, $2) ON CONFLICT DO NOTHING")).hash;
-    _ = try s.gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
-    const result = try s.gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 99 } }, &.{});
+    _ = try s.gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    const result = try s.gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 99 } }, &.{});
 
     // Conflict was skipped — no mutation appended.
     try testing.expectEqual(@as(u64, 0), result.rows_affected);
@@ -125,7 +125,7 @@ test "on conflict do nothing: only the conflicting row is skipped, others are in
     }
 
     const plain = (try s.gw.register("INSERT INTO counters (id, val) VALUES ($1, $2)")).hash;
-    _ = try s.gw.execute(std.testing.io, plain, &.{ .{ .int64 = 1 }, .{ .int64 = 5 } }, &.{});
+    _ = try s.gw.execute(plain, &.{ .{ .int64 = 1 }, .{ .int64 = 5 } }, &.{});
 
     // Multi-row insert: id=1 conflicts, id=2 is new.
     const ins2 = (try s.gw.register(
@@ -134,7 +134,7 @@ test "on conflict do nothing: only the conflicting row is skipped, others are in
         \\  INSERT INTO counters (id, val) VALUES ($b_id, $b_val) ON CONFLICT DO NOTHING;
         \\}
     )).hash;
-    _ = try s.gw.execute(std.testing.io, ins2, &.{
+    _ = try s.gw.execute(ins2, &.{
         .{ .int64 = 1 }, .{ .int64 = 99 },
         .{ .int64 = 2 }, .{ .int64 = 20 },
     }, &.{});
@@ -154,7 +154,7 @@ test "on conflict do update: non-conflicting insert succeeds normally" {
     }
 
     const ins = (try s.gw.register("INSERT INTO counters (id, val) VALUES ($1, $2) ON CONFLICT DO UPDATE SET val = $2")).hash;
-    _ = try s.gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try s.gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
 
     try testing.expectEqual(@as(?i64, 10), try queryVal(s.gw, 1));
 }
@@ -168,8 +168,8 @@ test "on conflict do update: conflicting insert updates the existing row" {
     }
 
     const ins = (try s.gw.register("INSERT INTO counters (id, val) VALUES ($1, $2) ON CONFLICT DO UPDATE SET val = $2")).hash;
-    _ = try s.gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
-    _ = try s.gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 42 } }, &.{});
+    _ = try s.gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try s.gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 42 } }, &.{});
 
     try testing.expectEqual(@as(?i64, 42), try queryVal(s.gw, 1));
 }
@@ -184,9 +184,9 @@ test "on conflict do update: SET can reference old column values (increment patt
 
     // Upsert counter: on conflict, increment by the incoming value.
     const ins = (try s.gw.register("INSERT INTO counters (id, val) VALUES ($1, $2) ON CONFLICT DO UPDATE SET val = val + $2")).hash;
-    _ = try s.gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 5 } }, &.{});
-    _ = try s.gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 3 } }, &.{});
-    _ = try s.gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 2 } }, &.{});
+    _ = try s.gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 5 } }, &.{});
+    _ = try s.gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 3 } }, &.{});
+    _ = try s.gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 2 } }, &.{});
 
     // 5 + 3 + 2 = 10
     try testing.expectEqual(@as(?i64, 10), try queryVal(s.gw, 1));
@@ -201,9 +201,9 @@ test "on conflict do update: row count stays the same after upsert" {
     }
 
     const ins = (try s.gw.register("INSERT INTO counters (id, val) VALUES ($1, $2) ON CONFLICT DO UPDATE SET val = $2")).hash;
-    _ = try s.gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 1 } }, &.{});
-    _ = try s.gw.execute(std.testing.io, ins, &.{ .{ .int64 = 2 }, .{ .int64 = 2 } }, &.{});
-    _ = try s.gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 9 } }, &.{}); // conflict on id=1
+    _ = try s.gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 1 } }, &.{});
+    _ = try s.gw.execute(ins, &.{ .{ .int64 = 2 }, .{ .int64 = 2 } }, &.{});
+    _ = try s.gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 9 } }, &.{}); // conflict on id=1
 
     const q = (try s.gw.register("SELECT id FROM counters")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
@@ -221,10 +221,10 @@ test "on conflict do update: RETURNING returns the updated row on conflict" {
 
     // Seed without RETURNING so the initial insert doesn't produce a result_set to manage.
     const seed = (try s.gw.register("INSERT INTO counters (id, val) VALUES ($1, $2)")).hash;
-    _ = try s.gw.execute(std.testing.io, seed, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try s.gw.execute(seed, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
 
     const ins = (try s.gw.register("INSERT INTO counters (id, val) VALUES ($1, $2) ON CONFLICT DO UPDATE SET val = val + $2 RETURNING id, val")).hash;
-    const result = try s.gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 5 } }, &.{});
+    const result = try s.gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 5 } }, &.{});
     try testing.expect(result.result_set != null);
     var rs = result.result_set.?;
     defer rs.deinit();
@@ -242,10 +242,10 @@ test "on conflict do nothing: RETURNING produces no rows on conflict" {
     }
 
     const seed = (try s.gw.register("INSERT INTO counters (id, val) VALUES ($1, $2)")).hash;
-    _ = try s.gw.execute(std.testing.io, seed, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try s.gw.execute(seed, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
 
     const ins = (try s.gw.register("INSERT INTO counters (id, val) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING id, val")).hash;
-    const result = try s.gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 99 } }, &.{});
+    const result = try s.gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 99 } }, &.{});
     // DO NOTHING skipped the row — RETURNING should be empty (null or zero rows).
     if (result.result_set) |rs| {
         var mut_rs = rs;
@@ -267,10 +267,10 @@ test "on conflict do update: multiple column updates on conflict" {
     try gw.applyDdl("CREATE TABLE kv (id INT64 NOT NULL, v1 INT64 NOT NULL, v2 INT64 NOT NULL, PRIMARY KEY (id))");
 
     const seed = (try gw.register("INSERT INTO kv (id, v1, v2) VALUES ($1, $2, $3)")).hash;
-    _ = try gw.execute(std.testing.io, seed, &.{ .{ .int64 = 1 }, .{ .int64 = 10 }, .{ .int64 = 20 } }, &.{});
+    _ = try gw.execute(seed, &.{ .{ .int64 = 1 }, .{ .int64 = 10 }, .{ .int64 = 20 } }, &.{});
 
     const ins = (try gw.register("INSERT INTO kv (id, v1, v2) VALUES ($1, $2, $3) ON CONFLICT DO UPDATE SET v1 = $2, v2 = v2 + $3")).hash;
-    _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 5 }, .{ .int64 = 7 } }, &.{});
+    _ = try gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 5 }, .{ .int64 = 7 } }, &.{});
 
     const q = (try gw.register("SELECT v1, v2 FROM kv WHERE id = 1")).hash;
     var rs = try gw.querySelect(q, &.{}, &.{});

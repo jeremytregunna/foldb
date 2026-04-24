@@ -67,12 +67,12 @@ fn teardown(gw: *Gateway, dir: []const u8) void {
 
 fn insertItem(gw: *Gateway, id: i64, category_id: i64) !void {
     const h = (try gw.register("INSERT INTO items (id, category_id) VALUES ($1, $2)")).hash;
-    _ = try gw.execute(std.testing.io, h, &.{ .{ .int64 = id }, .{ .int64 = category_id } }, &.{});
+    _ = try gw.execute(h, &.{ .{ .int64 = id }, .{ .int64 = category_id } }, &.{});
 }
 
 fn insertCategory(gw: *Gateway, id: i64, active: i64) !void {
     const h = (try gw.register("INSERT INTO categories (id, active) VALUES ($1, $2)")).hash;
-    _ = try gw.execute(std.testing.io, h, &.{ .{ .int64 = id }, .{ .int64 = active } }, &.{});
+    _ = try gw.execute(h, &.{ .{ .int64 = id }, .{ .int64 = active } }, &.{});
 }
 
 test "DELETE USING: deletes rows matched by join condition" {
@@ -87,7 +87,7 @@ test "DELETE USING: deletes rows matched by join condition" {
     const del = (try s.gw.register(
         "DELETE FROM items USING categories WHERE items.category_id = categories.id AND categories.active = 0",
     )).hash;
-    const r = try s.gw.execute(std.testing.io, del, &.{}, &.{});
+    const r = try s.gw.execute(del, &.{}, &.{});
     try testing.expectEqual(@as(u64, 1), r.rows_affected);
 
     const q = (try s.gw.register("SELECT id FROM items")).hash;
@@ -107,7 +107,7 @@ test "DELETE USING: no matching join leaves rows intact" {
     const del = (try s.gw.register(
         "DELETE FROM items USING categories WHERE items.category_id = categories.id",
     )).hash;
-    _ = try s.gw.execute(std.testing.io, del, &.{}, &.{});
+    _ = try s.gw.execute(del, &.{}, &.{});
 
     const q = (try s.gw.register("SELECT id FROM items")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
@@ -128,7 +128,7 @@ test "DELETE USING: deletes all matched rows when multiple items share a categor
     const del = (try s.gw.register(
         "DELETE FROM items USING categories WHERE items.category_id = categories.id AND categories.active = 0",
     )).hash;
-    const r = try s.gw.execute(std.testing.io, del, &.{}, &.{});
+    const r = try s.gw.execute(del, &.{}, &.{});
     try testing.expectEqual(@as(u64, 2), r.rows_affected);
 
     const q = (try s.gw.register("SELECT id FROM items")).hash;
@@ -155,21 +155,21 @@ test "DELETE USING: two USING tables cross-product — only row matching both is
     // product 2: cat=10, region=200 — cat banned but region not → KEEP
     // product 3: cat=20, region=100 — region banned but cat not → KEEP
     const ins_prod = (try gw.register("INSERT INTO products (id, cat_id, region_id) VALUES ($1, $2, $3)")).hash;
-    _ = try gw.execute(std.testing.io, ins_prod, &.{ .{ .int64 = 1 }, .{ .int64 = 10 }, .{ .int64 = 100 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins_prod, &.{ .{ .int64 = 2 }, .{ .int64 = 10 }, .{ .int64 = 200 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins_prod, &.{ .{ .int64 = 3 }, .{ .int64 = 20 }, .{ .int64 = 100 } }, &.{});
+    _ = try gw.execute(ins_prod, &.{ .{ .int64 = 1 }, .{ .int64 = 10 }, .{ .int64 = 100 } }, &.{});
+    _ = try gw.execute(ins_prod, &.{ .{ .int64 = 2 }, .{ .int64 = 10 }, .{ .int64 = 200 } }, &.{});
+    _ = try gw.execute(ins_prod, &.{ .{ .int64 = 3 }, .{ .int64 = 20 }, .{ .int64 = 100 } }, &.{});
 
     const ins_cat = (try gw.register("INSERT INTO banned_cats (id) VALUES ($1)")).hash;
-    _ = try gw.execute(std.testing.io, ins_cat, &.{.{ .int64 = 10 }}, &.{});
+    _ = try gw.execute(ins_cat, &.{.{ .int64 = 10 }}, &.{});
 
     const ins_reg = (try gw.register("INSERT INTO banned_regions (id) VALUES ($1)")).hash;
-    _ = try gw.execute(std.testing.io, ins_reg, &.{.{ .int64 = 100 }}, &.{});
+    _ = try gw.execute(ins_reg, &.{.{ .int64 = 100 }}, &.{});
 
     const del = (try gw.register(
         "DELETE FROM products USING banned_cats, banned_regions " ++
             "WHERE products.cat_id = banned_cats.id AND products.region_id = banned_regions.id",
     )).hash;
-    const r = try gw.execute(std.testing.io, del, &.{}, &.{});
+    const r = try gw.execute(del, &.{}, &.{});
     try testing.expectEqual(@as(u64, 1), r.rows_affected);
 
     const q = (try gw.register("SELECT id FROM products")).hash;

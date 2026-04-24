@@ -85,7 +85,7 @@ test "snapshot_marker is written to partition log after interval" {
             .{ .string = id_str },
             .{ .int64 = @intCast(i) },
         };
-        _ = try gw.execute(std.testing.io, insert_hash, &params, &.{});
+        _ = try gw.execute(insert_hash, &params, &.{});
     }
 
     // Scan partition log 0 for a snapshot_marker entry.
@@ -143,7 +143,7 @@ test "durable_snapshot_seq advances after snapshot fires" {
             .{ .string = id_str },
             .{ .int64 = @intCast(i) },
         };
-        _ = try gw.execute(std.testing.io, insert_hash, &params, &.{});
+        _ = try gw.execute(insert_hash, &params, &.{});
     }
 
     // Hook must have advanced durable_snapshot_seq.
@@ -171,7 +171,7 @@ test "no snapshot_marker when snapshot_store is not configured" {
         const id_str = try std.fmt.allocPrint(alloc, "row{d}", .{i});
         defer alloc.free(id_str);
         const params = [_]ColumnValue{ .{ .string = id_str }, .{ .int64 = @intCast(i) } };
-        _ = try gw.execute(std.testing.io, hash, &params, &.{});
+        _ = try gw.execute(hash, &params, &.{});
     }
 
     const entries = try gw.sequencer.partition_logs[0].read(1, 200, alloc);

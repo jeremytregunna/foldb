@@ -36,14 +36,28 @@ pub const SubmitResult = struct {
     partition: PartitionId,
 };
 
-/// Handle returned by Sequencer.submitBytes(). submit() is infallible; errors surface on
-/// awaitCommit(). For M7 single-node, io.async executes synchronously so await returns
-/// immediately. Multi-node Raft will block here until the ordering decision is durable.
-pub const SubmitHandle = struct {
-    future: std.Io.Future(anyerror!SubmitResult),
+/// In-flight submit: allocated by the caller (gateway, stack), written by the Sequencer thread.
+/// The done flag is the handoff point — the Sequencer sets it only after result/err are written.
+pub const PendingSubmit = struct {
+    submit: ValidatedSubmit,
+    result: SubmitResult = undefined,
+    err: ?anyerror = null,
+    done: std.atomic.Value(bool) = .init(false),
+    /// Intrusive MPSC queue link. Written by the queue; callers must not touch this field.
+    next: std.atomic.Value(?*PendingSubmit) = .init(null),
+};
 
-    pub fn awaitCommit(self: *SubmitHandle, io: std.Io) !SubmitResult {
-        return self.future.await(io);
+/// Handle returned by Sequencer.submitBytes(). Spins on the done flag until the Sequencer
+/// thread commits the entry and writes the result.
+pub const SubmitHandle = struct {
+    pending: *PendingSubmit,
+
+    pub fn awaitCommit(self: *const SubmitHandle) !SubmitResult {
+        while (!self.pending.done.load(.acquire)) {
+            _ = std.os.linux.sched_yield();
+        }
+        if (self.pending.err) |e| return e;
+        return self.pending.result;
     }
 };
 

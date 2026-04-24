@@ -130,7 +130,7 @@ test "Gateway: execute INSERT" {
         .{ .int64 = 1000 },
     };
 
-    const exec_result = try gateway.execute(std.testing.io, reg_result.hash, &params, &.{});
+    const exec_result = try gateway.execute(reg_result.hash, &params, &.{});
     try testing.expectEqual(@as(u64, 1), exec_result.rows_affected);
 }
 
@@ -153,7 +153,7 @@ test "Gateway: execute UPDATE" {
         .{ .int64 = 1 },
         .{ .int64 = 1000 },
     };
-    _ = try gateway.execute(std.testing.io, insert_reg.hash, &insert_params, &.{});
+    _ = try gateway.execute(insert_reg.hash, &insert_params, &.{});
 
     const update_sql = "UPDATE accounts SET balance = $1 WHERE id = $2";
     const update_reg = try gateway.register(update_sql);
@@ -161,7 +161,7 @@ test "Gateway: execute UPDATE" {
         .{ .int64 = 2000 },
         .{ .int64 = 1 },
     };
-    const update_result = try gateway.execute(std.testing.io, update_reg.hash, &update_params, &.{});
+    const update_result = try gateway.execute(update_reg.hash, &update_params, &.{});
     try testing.expectEqual(@as(u64, 1), update_result.rows_affected);
 }
 
@@ -184,14 +184,14 @@ test "Gateway: execute DELETE" {
         .{ .int64 = 1 },
         .{ .int64 = 1000 },
     };
-    _ = try gateway.execute(std.testing.io, insert_reg.hash, &insert_params, &.{});
+    _ = try gateway.execute(insert_reg.hash, &insert_params, &.{});
 
     const delete_sql = "DELETE FROM accounts WHERE id = $1";
     const delete_reg = try gateway.register(delete_sql);
     const delete_params = [_]ColumnValue{
         .{ .int64 = 1 },
     };
-    const delete_result = try gateway.execute(std.testing.io, delete_reg.hash, &delete_params, &.{});
+    const delete_result = try gateway.execute(delete_reg.hash, &delete_params, &.{});
     try testing.expectEqual(@as(u64, 1), delete_result.rows_affected);
 }
 
@@ -254,7 +254,7 @@ test "Gateway: flushAll" {
         .{ .int64 = 1 },
         .{ .int64 = 42 },
     };
-    _ = try gateway.execute(std.testing.io, reg.hash, &params, &.{});
+    _ = try gateway.execute(reg.hash, &params, &.{});
 
     try gateway.flushAll();
 }
@@ -272,7 +272,7 @@ test "Gateway: query not found returns error" {
     var fake_hash: QueryHash = undefined;
     @memset(&fake_hash, 0xFF);
 
-    const result = gateway.execute(std.testing.io, fake_hash, &.{}, &.{});
+    const result = gateway.execute(fake_hash, &.{}, &.{});
     try testing.expectError(error.QueryNotFound, result);
 }
 
@@ -295,7 +295,7 @@ test "Gateway: multiple tables" {
         .{ .string = try testing.allocator.dupe(u8, "alice") },
     };
     defer testing.allocator.free(user_params[1].string);
-    _ = try gateway.execute(std.testing.io, insert_user.hash, &user_params, &.{});
+    _ = try gateway.execute(insert_user.hash, &user_params, &.{});
 
     const insert_post = try gateway.register("INSERT INTO posts (id, user_id, content) VALUES ($1, $2, $3)");
     const post_params = [_]ColumnValue{
@@ -304,7 +304,7 @@ test "Gateway: multiple tables" {
         .{ .string = try testing.allocator.dupe(u8, "hello world") },
     };
     defer testing.allocator.free(post_params[2].string);
-    _ = try gateway.execute(std.testing.io, insert_post.hash, &post_params, &.{});
+    _ = try gateway.execute(insert_post.hash, &post_params, &.{});
 }
 
 test "Gateway: querySelect returns inserted rows" {
@@ -320,8 +320,8 @@ test "Gateway: querySelect returns inserted rows" {
     try gateway.applyDdl("CREATE TABLE accounts (id INT64 NOT NULL, balance INT64 NOT NULL, PRIMARY KEY (id))");
 
     const insert_reg = try gateway.register("INSERT INTO accounts (id, balance) VALUES ($1, $2)");
-    _ = try gateway.execute(std.testing.io, insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 100 } }, &.{});
-    _ = try gateway.execute(std.testing.io, insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 2 }, .{ .int64 = 200 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 100 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 2 }, .{ .int64 = 200 } }, &.{});
 
     const select_reg = try gateway.register("SELECT id, balance FROM accounts");
     var rs = try gateway.querySelect(select_reg.hash, &.{}, &.{});
@@ -362,7 +362,7 @@ test "Gateway: readAt returns data at correct seq" {
     const seq_before = gateway.currentSeq();
 
     const insert_reg = try gateway.register("INSERT INTO log (id, val) VALUES ($1, $2)");
-    _ = try gateway.execute(std.testing.io, insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 42 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 42 } }, &.{});
 
     const seq_after = gateway.currentSeq();
 
@@ -392,9 +392,9 @@ test "Gateway: querySelect with WHERE param returns matching row only" {
     try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
 
     const insert_reg = try gateway.register("INSERT INTO items (id, val) VALUES ($1, $2)");
-    _ = try gateway.execute(std.testing.io, insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
-    _ = try gateway.execute(std.testing.io, insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
-    _ = try gateway.execute(std.testing.io, insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 3 }, .{ .int64 = 30 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 3 }, .{ .int64 = 30 } }, &.{});
 
     const select_reg = try gateway.register("SELECT id, val FROM items WHERE id = $1");
 
@@ -438,11 +438,11 @@ test "Gateway: DELETE makes row invisible in subsequent SELECT" {
     try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
 
     const insert_reg = try gateway.register("INSERT INTO items (id, val) VALUES ($1, $2)");
-    _ = try gateway.execute(std.testing.io, insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
-    _ = try gateway.execute(std.testing.io, insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
 
     const delete_reg = try gateway.register("DELETE FROM items WHERE id = $1");
-    _ = try gateway.execute(std.testing.io, delete_reg.hash, &[_]ColumnValue{.{ .int64 = 1 }}, &.{});
+    _ = try gateway.execute(delete_reg.hash, &[_]ColumnValue{.{ .int64 = 1 }}, &.{});
 
     const select_reg = try gateway.register("SELECT id, val FROM items");
     var rs = try gateway.querySelect(select_reg.hash, &.{}, &.{});
@@ -465,10 +465,10 @@ test "Gateway: UPDATE value is visible in subsequent SELECT" {
     try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
 
     const insert_reg = try gateway.register("INSERT INTO items (id, val) VALUES ($1, $2)");
-    _ = try gateway.execute(std.testing.io, insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
 
     const update_reg = try gateway.register("UPDATE items SET val = $2 WHERE id = $1");
-    _ = try gateway.execute(std.testing.io, update_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 99 } }, &.{});
+    _ = try gateway.execute(update_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 99 } }, &.{});
 
     const select_reg = try gateway.register("SELECT id, val FROM items WHERE id = $1");
     var rs = try gateway.querySelect(select_reg.hash, &[_]ColumnValue{.{ .int64 = 1 }}, &.{});
@@ -491,7 +491,7 @@ test "Gateway: UPDATE with no matching rows returns rows_affected zero" {
     try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
 
     const update_reg = try gateway.register("UPDATE items SET val = $2 WHERE id = $1");
-    const result = try gateway.execute(std.testing.io, update_reg.hash, &[_]ColumnValue{ .{ .int64 = 999 }, .{ .int64 = 42 } }, &.{});
+    const result = try gateway.execute(update_reg.hash, &[_]ColumnValue{ .{ .int64 = 999 }, .{ .int64 = 42 } }, &.{});
     try testing.expectEqual(@as(u64, 0), result.rows_affected);
 }
 
@@ -508,7 +508,7 @@ test "Gateway: DELETE with no matching rows returns rows_affected zero" {
     try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
 
     const delete_reg = try gateway.register("DELETE FROM items WHERE id = $1");
-    const result = try gateway.execute(std.testing.io, delete_reg.hash, &[_]ColumnValue{.{ .int64 = 999 }}, &.{});
+    const result = try gateway.execute(delete_reg.hash, &[_]ColumnValue{.{ .int64 = 999 }}, &.{});
     try testing.expectEqual(@as(u64, 0), result.rows_affected);
 }
 
@@ -528,13 +528,13 @@ test "Gateway: currentSeq advances with each execute" {
     const insert_reg = try gateway.register("INSERT INTO items (id, val) VALUES ($1, $2)");
 
     // DDL takes seq 1, query registration takes seq 2; DML starts at seq 3
-    _ = try gateway.execute(std.testing.io, insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
     try testing.expectEqual(@as(Seq, 3), gateway.currentSeq());
 
-    _ = try gateway.execute(std.testing.io, insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
     try testing.expectEqual(@as(Seq, 4), gateway.currentSeq());
 
-    _ = try gateway.execute(std.testing.io, insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 3 }, .{ .int64 = 30 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 3 }, .{ .int64 = 30 } }, &.{});
     try testing.expectEqual(@as(Seq, 5), gateway.currentSeq());
 }
 
@@ -552,10 +552,10 @@ test "Gateway: readAt intermediate state shows partial history" {
     const insert_reg = try gateway.register("INSERT INTO items (id, val) VALUES ($1, $2)");
     const select_reg = try gateway.register("SELECT id, val FROM items");
 
-    _ = try gateway.execute(std.testing.io, insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
     const seq1 = gateway.currentSeq();
-    _ = try gateway.execute(std.testing.io, insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
-    _ = try gateway.execute(std.testing.io, insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 3 }, .{ .int64 = 30 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
+    _ = try gateway.execute(insert_reg.hash, &[_]ColumnValue{ .{ .int64 = 3 }, .{ .int64 = 30 } }, &.{});
 
     // At seq1 only the first row was committed
     var rs1 = try gateway.readAt(select_reg.hash, &.{}, seq1);

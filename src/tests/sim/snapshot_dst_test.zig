@@ -157,7 +157,7 @@ fn runSnapshotRoundTrip(seed: u64, n_rows: usize, alloc: std.mem.Allocator) !voi
             const val: i64 = rng.random().intRangeAtMost(i64, 1, 1_000_000);
             const id_str = try std.fmt.allocPrint(alloc, "row_{d:04}", .{i});
             defer alloc.free(id_str);
-            _ = try gw.execute(std.testing.io, insert_hash, &.{
+            _ = try gw.execute(insert_hash, &.{
                 .{ .string = id_str },
                 .{ .int64 = val },
             }, &.{});

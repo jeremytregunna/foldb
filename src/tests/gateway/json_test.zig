@@ -68,7 +68,7 @@ fn teardown(gw: *Gateway, dir: []const u8) void {
 
 fn insertDoc(gw: *Gateway, id: i64, json: []const u8) !void {
     const h = (try gw.register("INSERT INTO docs (id, data) VALUES ($1, $2)")).hash;
-    _ = try gw.execute(std.testing.io, h, &.{ .{ .int64 = id }, .{ .bytes = json } }, &.{});
+    _ = try gw.execute(h, &.{ .{ .int64 = id }, .{ .bytes = json } }, &.{});
 }
 
 test "arrow extracts JSON sub-object" {

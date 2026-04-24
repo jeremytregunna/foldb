@@ -66,7 +66,7 @@ fn teardown(gw: *Gateway, dir: []const u8) void {
 
 fn insertSale(gw: *Gateway, id: i64, dept: i64, amount: i64) !void {
     const h = (try gw.register("INSERT INTO sales (id, dept, amount) VALUES ($1, $2, $3)")).hash;
-    _ = try gw.execute(std.testing.io, h, &.{
+    _ = try gw.execute(h, &.{
         .{ .int64 = id },
         .{ .int64 = dept },
         .{ .int64 = amount },

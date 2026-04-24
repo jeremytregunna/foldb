@@ -61,13 +61,13 @@ fn setupGateway() !struct { gw: *Gateway, dir: []const u8 } {
     try gw.applyDdl("CREATE TABLE departments (id INT64 NOT NULL, budget INT64 NOT NULL, PRIMARY KEY (id))");
 
     const ins_e = (try gw.register("INSERT INTO employees (id, dept_id) VALUES ($1, $2)")).hash;
-    _ = try gw.execute(std.testing.io, ins_e, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins_e, &.{ .{ .int64 = 2 }, .{ .int64 = 10 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins_e, &.{ .{ .int64 = 3 }, .{ .int64 = 99 } }, &.{}); // no matching dept
+    _ = try gw.execute(ins_e, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try gw.execute(ins_e, &.{ .{ .int64 = 2 }, .{ .int64 = 10 } }, &.{});
+    _ = try gw.execute(ins_e, &.{ .{ .int64 = 3 }, .{ .int64 = 99 } }, &.{}); // no matching dept
 
     const ins_d = (try gw.register("INSERT INTO departments (id, budget) VALUES ($1, $2)")).hash;
-    _ = try gw.execute(std.testing.io, ins_d, &.{ .{ .int64 = 10 }, .{ .int64 = 1000 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins_d, &.{ .{ .int64 = 20 }, .{ .int64 = 500 } }, &.{}); // no matching employees
+    _ = try gw.execute(ins_d, &.{ .{ .int64 = 10 }, .{ .int64 = 1000 } }, &.{});
+    _ = try gw.execute(ins_d, &.{ .{ .int64 = 20 }, .{ .int64 = 500 } }, &.{}); // no matching employees
 
     return .{ .gw = gw, .dir = dir };
 }
@@ -251,10 +251,10 @@ test "chained INNER JOINs across three tables" {
     const ins_b = (try gw.register("INSERT INTO b (id, c_id) VALUES ($1, $2)")).hash;
     const ins_c = (try gw.register("INSERT INTO c (id, val) VALUES ($1, $2)")).hash;
 
-    _ = try gw.execute(std.testing.io, ins_a, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins_a, &.{ .{ .int64 = 2 }, .{ .int64 = 99 } }, &.{}); // no match in b
-    _ = try gw.execute(std.testing.io, ins_b, &.{ .{ .int64 = 10 }, .{ .int64 = 100 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins_c, &.{ .{ .int64 = 100 }, .{ .int64 = 42 } }, &.{});
+    _ = try gw.execute(ins_a, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try gw.execute(ins_a, &.{ .{ .int64 = 2 }, .{ .int64 = 99 } }, &.{}); // no match in b
+    _ = try gw.execute(ins_b, &.{ .{ .int64 = 10 }, .{ .int64 = 100 } }, &.{});
+    _ = try gw.execute(ins_c, &.{ .{ .int64 = 100 }, .{ .int64 = 42 } }, &.{});
 
     const q = (try gw.register("SELECT a.id, c.val FROM a INNER JOIN b ON a.b_id = b.id INNER JOIN c ON b.c_id = c.id")).hash;
     var rs = try gw.querySelect(q, &.{}, &.{});
@@ -336,9 +336,9 @@ test "JOIN USING: matches rows by shared column name" {
     const ins_l = (try gw.register("INSERT INTO left_t (id, val) VALUES ($1, $2)")).hash;
     const ins_r = (try gw.register("INSERT INTO right_t (id, extra) VALUES ($1, $2)")).hash;
 
-    _ = try gw.execute(std.testing.io, ins_l, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins_l, &.{ .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins_r, &.{ .{ .int64 = 1 }, .{ .int64 = 100 } }, &.{});
+    _ = try gw.execute(ins_l, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try gw.execute(ins_l, &.{ .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
+    _ = try gw.execute(ins_r, &.{ .{ .int64 = 1 }, .{ .int64 = 100 } }, &.{});
     // right id=2 is absent → no match for left id=2
 
     const q = (try gw.register("SELECT left_t.id FROM left_t JOIN right_t USING (id)")).hash;
@@ -365,9 +365,9 @@ test "LEFT JOIN USING: unmatched left row preserved with null right side" {
     const ins_l = (try gw.register("INSERT INTO left_t (id, val) VALUES ($1, $2)")).hash;
     const ins_r = (try gw.register("INSERT INTO right_t (id, extra) VALUES ($1, $2)")).hash;
 
-    _ = try gw.execute(std.testing.io, ins_l, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins_l, &.{ .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins_r, &.{ .{ .int64 = 1 }, .{ .int64 = 100 } }, &.{});
+    _ = try gw.execute(ins_l, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try gw.execute(ins_l, &.{ .{ .int64 = 2 }, .{ .int64 = 20 } }, &.{});
+    _ = try gw.execute(ins_r, &.{ .{ .int64 = 1 }, .{ .int64 = 100 } }, &.{});
 
     const q = (try gw.register("SELECT left_t.id FROM left_t LEFT JOIN right_t USING (id)")).hash;
     var rs = try gw.querySelect(q, &.{}, &.{});

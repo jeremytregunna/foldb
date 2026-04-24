@@ -101,15 +101,15 @@ fn applyOp(
     switch (op.kind) {
         .insert => {
             const params = [_]ColumnValue{ .{ .int64 = op.id }, .{ .int64 = op.value } };
-            _ = gw.execute(std.testing.io, insert_hash, &params, &.{}) catch {};
+            _ = gw.execute(insert_hash, &params, &.{}) catch {};
         },
         .update => {
             const params = [_]ColumnValue{ .{ .int64 = op.id }, .{ .int64 = op.value } };
-            _ = gw.execute(std.testing.io, update_hash, &params, &.{}) catch {};
+            _ = gw.execute(update_hash, &params, &.{}) catch {};
         },
         .delete => {
             const params = [_]ColumnValue{.{ .int64 = op.id }};
-            _ = gw.execute(std.testing.io, delete_hash, &params, &.{}) catch {};
+            _ = gw.execute(delete_hash, &params, &.{}) catch {};
         },
         .select => {}, // selects don't mutate state; skip for determinism test
     }

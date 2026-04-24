@@ -144,7 +144,7 @@ fn runKill9Test(seed: u64, partial_kind: PartialKind, alloc: std.mem.Allocator) 
         for (1..11) |i| {
             const val: i64 = rng.random().intRangeAtMost(i64, 100, 999);
             const params = [_]ColumnValue{ .{ .int64 = @intCast(i) }, .{ .int64 = val } };
-            _ = try gw.execute(std.testing.io, ins, &params, &.{});
+            _ = try gw.execute(ins, &params, &.{});
         }
         try gw.flushAll();
 
@@ -152,7 +152,7 @@ fn runKill9Test(seed: u64, partial_kind: PartialKind, alloc: std.mem.Allocator) 
         for (11..16) |i| {
             const val: i64 = rng.random().intRangeAtMost(i64, 100, 999);
             const params = [_]ColumnValue{ .{ .int64 = @intCast(i) }, .{ .int64 = val } };
-            _ = try gw.execute(std.testing.io, ins, &params, &.{});
+            _ = try gw.execute(ins, &params, &.{});
         }
 
         // Simulate kill-9: inject a partial .sst file into the table directory

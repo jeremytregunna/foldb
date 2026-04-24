@@ -67,12 +67,12 @@ fn teardown(gw: *Gateway, dir: []const u8) void {
 
 fn insertOrder(gw: *Gateway, id: i64, status: i64, customer_id: i64) !void {
     const h = (try gw.register("INSERT INTO orders (id, status, customer_id) VALUES ($1, $2, $3)")).hash;
-    _ = try gw.execute(std.testing.io, h, &.{ .{ .int64 = id }, .{ .int64 = status }, .{ .int64 = customer_id } }, &.{});
+    _ = try gw.execute(h, &.{ .{ .int64 = id }, .{ .int64 = status }, .{ .int64 = customer_id } }, &.{});
 }
 
 fn insertCustomer(gw: *Gateway, id: i64, tier: i64) !void {
     const h = (try gw.register("INSERT INTO customers (id, tier) VALUES ($1, $2)")).hash;
-    _ = try gw.execute(std.testing.io, h, &.{ .{ .int64 = id }, .{ .int64 = tier } }, &.{});
+    _ = try gw.execute(h, &.{ .{ .int64 = id }, .{ .int64 = tier } }, &.{});
 }
 
 test "UPDATE FROM: updates rows matched by join condition" {
@@ -88,7 +88,7 @@ test "UPDATE FROM: updates rows matched by join condition" {
     const upd = (try s.gw.register(
         "UPDATE orders SET status = 1 FROM customers WHERE orders.customer_id = customers.id AND customers.tier = 1",
     )).hash;
-    const r = try s.gw.execute(std.testing.io, upd, &.{}, &.{});
+    const r = try s.gw.execute(upd, &.{}, &.{});
     try testing.expectEqual(@as(u64, 1), r.rows_affected);
 
     const q = (try s.gw.register("SELECT id, status FROM orders")).hash;
@@ -115,7 +115,7 @@ test "UPDATE FROM: no matching join leaves rows unchanged" {
     const upd = (try s.gw.register(
         "UPDATE orders SET status = 1 FROM customers WHERE orders.customer_id = customers.id",
     )).hash;
-    _ = try s.gw.execute(std.testing.io, upd, &.{}, &.{});
+    _ = try s.gw.execute(upd, &.{}, &.{});
 
     const q = (try s.gw.register("SELECT status FROM orders WHERE id = 1")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
@@ -135,7 +135,7 @@ test "UPDATE FROM: SET value taken from FROM table column" {
     const upd = (try s.gw.register(
         "UPDATE orders SET status = customers.tier FROM customers WHERE orders.customer_id = customers.id",
     )).hash;
-    _ = try s.gw.execute(std.testing.io, upd, &.{}, &.{});
+    _ = try s.gw.execute(upd, &.{}, &.{});
 
     const q = (try s.gw.register("SELECT status FROM orders WHERE id = 1")).hash;
     var rs = try s.gw.querySelect(q, &.{}, &.{});
@@ -160,17 +160,17 @@ test "UPDATE FROM: multiple FROM rows match same target — first match wins" {
 
     // One order with priority=5
     const ins_ord = (try gw.register("INSERT INTO orders (id, status, priority) VALUES ($1, $2, $3)")).hash;
-    _ = try gw.execute(std.testing.io, ins_ord, &.{ .{ .int64 = 1 }, .{ .int64 = 0 }, .{ .int64 = 5 } }, &.{});
+    _ = try gw.execute(ins_ord, &.{ .{ .int64 = 1 }, .{ .int64 = 0 }, .{ .int64 = 5 } }, &.{});
 
     // Two modifiers both with priority=5 — first (id=1) has new_status=7, second (id=2) has new_status=99
     const ins_mod = (try gw.register("INSERT INTO modifiers (id, priority, new_status) VALUES ($1, $2, $3)")).hash;
-    _ = try gw.execute(std.testing.io, ins_mod, &.{ .{ .int64 = 1 }, .{ .int64 = 5 }, .{ .int64 = 7 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins_mod, &.{ .{ .int64 = 2 }, .{ .int64 = 5 }, .{ .int64 = 99 } }, &.{});
+    _ = try gw.execute(ins_mod, &.{ .{ .int64 = 1 }, .{ .int64 = 5 }, .{ .int64 = 7 } }, &.{});
+    _ = try gw.execute(ins_mod, &.{ .{ .int64 = 2 }, .{ .int64 = 5 }, .{ .int64 = 99 } }, &.{});
 
     const upd = (try gw.register(
         "UPDATE orders SET status = modifiers.new_status FROM modifiers WHERE orders.priority = modifiers.priority",
     )).hash;
-    const r = try gw.execute(std.testing.io, upd, &.{}, &.{});
+    const r = try gw.execute(upd, &.{}, &.{});
     try testing.expectEqual(@as(u64, 1), r.rows_affected);
 
     const q = (try gw.register("SELECT status FROM orders WHERE id = 1")).hash;

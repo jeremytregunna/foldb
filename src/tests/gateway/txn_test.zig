@@ -108,8 +108,8 @@ test "txn: multi-statement block applies all mutations atomically" {
     try gw.applyDdl(ACCOUNTS_DDL);
 
     const seed = (try gw.register("INSERT INTO accounts (id, balance) VALUES ($1, $2)")).hash;
-    _ = try gw.execute(std.testing.io, seed, &.{ .{ .int64 = 1 }, .{ .int64 = 500 } }, &.{});
-    _ = try gw.execute(std.testing.io, seed, &.{ .{ .int64 = 2 }, .{ .int64 = 500 } }, &.{});
+    _ = try gw.execute(seed, &.{ .{ .int64 = 1 }, .{ .int64 = 500 } }, &.{});
+    _ = try gw.execute(seed, &.{ .{ .int64 = 2 }, .{ .int64 = 500 } }, &.{});
 
     // Transfer 200 from account 1 to account 2 in a single transaction block.
     const transfer = (try gw.register(
@@ -118,7 +118,7 @@ test "txn: multi-statement block applies all mutations atomically" {
         \\  UPDATE accounts SET balance = balance + $amount WHERE id = 2;
         \\}
     )).hash;
-    _ = try gw.execute(std.testing.io, transfer, &.{.{ .int64 = 200 }}, &.{});
+    _ = try gw.execute(transfer, &.{.{ .int64 = 200 }}, &.{});
 
     const sel = (try gw.register("SELECT balance FROM accounts WHERE id = $1")).hash;
     var rs1 = try gw.querySelect(sel, &.{.{ .int64 = 1 }}, &.{});
@@ -144,7 +144,7 @@ test "txn: ASSERT pass — mutations are applied" {
 
     try gw.applyDdl(ACCOUNTS_DDL);
     const seed = (try gw.register("INSERT INTO accounts (id, balance) VALUES ($1, $2)")).hash;
-    _ = try gw.execute(std.testing.io, seed, &.{ .{ .int64 = 1 }, .{ .int64 = 1000 } }, &.{});
+    _ = try gw.execute(seed, &.{ .{ .int64 = 1 }, .{ .int64 = 1000 } }, &.{});
 
     // The caller computes the post-withdrawal balance and passes it as a param.
     // ASSERT verifies the invariant holds before the block is committed.
@@ -154,7 +154,7 @@ test "txn: ASSERT pass — mutations are applied" {
         \\  ASSERT $new_balance >= 0;
         \\}
     )).hash;
-    _ = try gw.execute(std.testing.io, withdraw, &.{ .{ .int64 = 400 }, .{ .int64 = 600 } }, &.{});
+    _ = try gw.execute(withdraw, &.{ .{ .int64 = 400 }, .{ .int64 = 600 } }, &.{});
 
     const sel = (try gw.register("SELECT balance FROM accounts WHERE id = $1")).hash;
     var rs = try gw.querySelect(sel, &.{.{ .int64 = 1 }}, &.{});
@@ -175,7 +175,7 @@ test "txn: ASSERT fail — no mutations applied" {
 
     try gw.applyDdl(ACCOUNTS_DDL);
     const seed = (try gw.register("INSERT INTO accounts (id, balance) VALUES ($1, $2)")).hash;
-    _ = try gw.execute(std.testing.io, seed, &.{ .{ .int64 = 1 }, .{ .int64 = 100 } }, &.{});
+    _ = try gw.execute(seed, &.{ .{ .int64 = 1 }, .{ .int64 = 100 } }, &.{});
 
     // Caller passes a new_balance that would go negative — ASSERT must reject it.
     const withdraw = (try gw.register(
@@ -184,7 +184,7 @@ test "txn: ASSERT fail — no mutations applied" {
         \\  ASSERT $new_balance >= 0;
         \\}
     )).hash;
-    const result = gw.execute(std.testing.io, withdraw, &.{ .{ .int64 = 500 }, .{ .int64 = -400 } }, &.{});
+    const result = gw.execute(withdraw, &.{ .{ .int64 = 500 }, .{ .int64 = -400 } }, &.{});
     try testing.expectError(error.ConstraintViolation, result);
 
     // Balance must be unchanged.
@@ -207,8 +207,8 @@ test "txn: ASSERT fail aborts all prior mutations in block" {
 
     try gw.applyDdl(ACCOUNTS_DDL);
     const seed = (try gw.register("INSERT INTO accounts (id, balance) VALUES ($1, $2)")).hash;
-    _ = try gw.execute(std.testing.io, seed, &.{ .{ .int64 = 1 }, .{ .int64 = 500 } }, &.{});
-    _ = try gw.execute(std.testing.io, seed, &.{ .{ .int64 = 2 }, .{ .int64 = 500 } }, &.{});
+    _ = try gw.execute(seed, &.{ .{ .int64 = 1 }, .{ .int64 = 500 } }, &.{});
+    _ = try gw.execute(seed, &.{ .{ .int64 = 2 }, .{ .int64 = 500 } }, &.{});
 
     const transfer = (try gw.register(
         \\TRANSACTION (new_bal1 INT64, new_bal2 INT64, valid INT64) {
@@ -219,7 +219,7 @@ test "txn: ASSERT fail aborts all prior mutations in block" {
     )).hash;
 
     // valid=0 makes ASSERT fail — both updates must be rolled back.
-    const result = gw.execute(std.testing.io, transfer, &.{
+    const result = gw.execute(transfer, &.{
         .{ .int64 = 300 }, .{ .int64 = 700 }, .{ .int64 = 0 },
     }, &.{});
     try testing.expectError(error.ConstraintViolation, result);
@@ -247,7 +247,7 @@ test "txn: multi-table transaction writes to both tables atomically" {
     try gw.applyDdl(EVENTS_DDL);
 
     const seed = (try gw.register("INSERT INTO accounts (id, balance) VALUES ($1, $2)")).hash;
-    _ = try gw.execute(std.testing.io, seed, &.{ .{ .int64 = 1 }, .{ .int64 = 1000 } }, &.{});
+    _ = try gw.execute(seed, &.{ .{ .int64 = 1 }, .{ .int64 = 1000 } }, &.{});
 
     // Withdraw and emit an audit event atomically.
     const audit_withdraw = (try gw.register(
@@ -256,7 +256,7 @@ test "txn: multi-table transaction writes to both tables atomically" {
         \\  INSERT INTO events (id, kind) VALUES ($event_id, 1);
         \\}
     )).hash;
-    _ = try gw.execute(std.testing.io, audit_withdraw, &.{
+    _ = try gw.execute(audit_withdraw, &.{
         .{ .int64 = 1 }, .{ .int64 = 42 }, .{ .int64 = 700 },
     }, &.{});
 
@@ -286,7 +286,7 @@ test "txn: optimistic concurrency — ASSERT on caller-supplied precondition" {
 
     try gw.applyDdl(ACCOUNTS_DDL);
     const seed = (try gw.register("INSERT INTO accounts (id, balance) VALUES ($1, $2)")).hash;
-    _ = try gw.execute(std.testing.io, seed, &.{ .{ .int64 = 1 }, .{ .int64 = 500 } }, &.{});
+    _ = try gw.execute(seed, &.{ .{ .int64 = 1 }, .{ .int64 = 500 } }, &.{});
 
     // Conditional update: only commit if expected_balance matches what we read.
     const conditional = (try gw.register(
@@ -297,10 +297,10 @@ test "txn: optimistic concurrency — ASSERT on caller-supplied precondition" {
     )).hash;
 
     // First call: precondition matches current balance (500 >= 0), succeeds.
-    _ = try gw.execute(std.testing.io, conditional, &.{ .{ .int64 = 300 }, .{ .int64 = 500 } }, &.{});
+    _ = try gw.execute(conditional, &.{ .{ .int64 = 300 }, .{ .int64 = 500 } }, &.{});
 
     // Second call with stale precondition: expected_balance = -1 fails ASSERT.
-    const stale = gw.execute(std.testing.io, conditional, &.{ .{ .int64 = 100 }, .{ .int64 = -1 } }, &.{});
+    const stale = gw.execute(conditional, &.{ .{ .int64 = 100 }, .{ .int64 = -1 } }, &.{});
     try testing.expectError(error.ConstraintViolation, stale);
 
     const sel = (try gw.register("SELECT balance FROM accounts WHERE id = $1")).hash;

@@ -171,8 +171,8 @@ fn runSubqueryDeterminismTest(seed: u64, n_ops: usize, alloc: std.mem.Allocator)
     // Seed 4 users each with 10000.
     var uid: i64 = 1;
     while (uid <= 4) : (uid += 1) {
-        _ = try gw_a.execute(std.testing.io, seed_a, &.{ .{ .int64 = uid }, .{ .int64 = 10_000 } }, &.{});
-        _ = try gw_b.execute(std.testing.io, seed_b, &.{ .{ .int64 = uid }, .{ .int64 = 10_000 } }, &.{});
+        _ = try gw_a.execute(seed_a, &.{ .{ .int64 = uid }, .{ .int64 = 10_000 } }, &.{});
+        _ = try gw_b.execute(seed_b, &.{ .{ .int64 = uid }, .{ .int64 = 10_000 } }, &.{});
         clock.advance(1);
     }
 
@@ -185,11 +185,11 @@ fn runSubqueryDeterminismTest(seed: u64, n_ops: usize, alloc: std.mem.Allocator)
         const amount: i64 = @intCast(rng.random().intRangeAtMost(u32, 10, 500));
         const cap: i64 = 2;
 
-        _ = gw_a.execute(std.testing.io, ins_a, &.{
+        _ = gw_a.execute(ins_a, &.{
             .{ .int64 = order_id }, .{ .int64 = user_id },
             .{ .int64 = amount },   .{ .int64 = cap },
         }, &.{}) catch {};
-        _ = gw_b.execute(std.testing.io, ins_b, &.{
+        _ = gw_b.execute(ins_b, &.{
             .{ .int64 = order_id }, .{ .int64 = user_id },
             .{ .int64 = amount },   .{ .int64 = cap },
         }, &.{}) catch {};
@@ -234,17 +234,17 @@ test "dst: subquery crash recovery — COUNT-guarded inserts survive log replay"
         const seed = (try gw.register(SEED_USER_SQL)).hash;
         const ins = (try gw.register(INSERT_ORDER_SQL)).hash;
 
-        _ = try gw.execute(std.testing.io, seed, &.{ .{ .int64 = 1 }, .{ .int64 = 5_000 } }, &.{});
-        _ = try gw.execute(std.testing.io, seed, &.{ .{ .int64 = 2 }, .{ .int64 = 5_000 } }, &.{});
+        _ = try gw.execute(seed, &.{ .{ .int64 = 1 }, .{ .int64 = 5_000 } }, &.{});
+        _ = try gw.execute(seed, &.{ .{ .int64 = 2 }, .{ .int64 = 5_000 } }, &.{});
 
         // Flush seed so the baseline is in SSTables.
         try gw.flushAll();
 
         // Three INSERT_ORDER transactions committed to log but NOT flushed.
         // cap=3 so all pass. order_ids: 10, 11, 12.
-        _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 10 }, .{ .int64 = 1 }, .{ .int64 = 100 }, .{ .int64 = 3 } }, &.{});
-        _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 11 }, .{ .int64 = 1 }, .{ .int64 = 200 }, .{ .int64 = 3 } }, &.{});
-        _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 12 }, .{ .int64 = 2 }, .{ .int64 = 300 }, .{ .int64 = 3 } }, &.{});
+        _ = try gw.execute(ins, &.{ .{ .int64 = 10 }, .{ .int64 = 1 }, .{ .int64 = 100 }, .{ .int64 = 3 } }, &.{});
+        _ = try gw.execute(ins, &.{ .{ .int64 = 11 }, .{ .int64 = 1 }, .{ .int64 = 200 }, .{ .int64 = 3 } }, &.{});
+        _ = try gw.execute(ins, &.{ .{ .int64 = 12 }, .{ .int64 = 2 }, .{ .int64 = 300 }, .{ .int64 = 3 } }, &.{});
 
         // Crash — no deinit.
     }
@@ -300,14 +300,14 @@ test "dst: subquery ASSERT abort leaves no state after crash recovery" {
         const seed = (try gw.register(SEED_USER_SQL)).hash;
         const ins = (try gw.register(INSERT_ORDER_SQL)).hash;
 
-        _ = try gw.execute(std.testing.io, seed, &.{ .{ .int64 = 1 }, .{ .int64 = 1_000 } }, &.{});
+        _ = try gw.execute(seed, &.{ .{ .int64 = 1 }, .{ .int64 = 1_000 } }, &.{});
         try gw.flushAll();
 
         // Insert one order successfully.
-        _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 1 }, .{ .int64 = 100 }, .{ .int64 = 1 } }, &.{});
+        _ = try gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 1 }, .{ .int64 = 100 }, .{ .int64 = 1 } }, &.{});
 
         // This must abort: cap=1 and user 1 already has 1 order.
-        _ = gw.execute(std.testing.io, ins, &.{ .{ .int64 = 2 }, .{ .int64 = 1 }, .{ .int64 = 50 }, .{ .int64 = 1 } }, &.{}) catch {};
+        _ = gw.execute(ins, &.{ .{ .int64 = 2 }, .{ .int64 = 1 }, .{ .int64 = 50 }, .{ .int64 = 1 } }, &.{}) catch {};
 
         // Crash — no deinit.
     }

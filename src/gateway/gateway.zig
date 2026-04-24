@@ -296,6 +296,7 @@ pub const Gateway = struct {
         };
         gw.sequencer = try sequencer_mod.Sequencer.init(storage_dir, seq_cfg, alloc);
         errdefer gw.sequencer.deinit();
+        try gw.sequencer.start();
 
         gw.cdc = cdc_mod.CdcManager.init(alloc);
         gw.sql_exec.initCdc(&gw.cdc);
@@ -422,7 +423,6 @@ pub const Gateway = struct {
     // This is the domain boundary — all data past this point is validated.
     pub fn execute(
         self: *Gateway,
-        io: std.Io,
         hash: QueryHash,
         params: []const ColumnValue,
         nondet: []const ResolvedValue,
@@ -482,10 +482,10 @@ pub const Gateway = struct {
                 self.alloc,
             );
 
-            // Submit to Sequencer — infallible; blocks on awaitCommit
-            var handle = self.sequencer.submitBytes(io, intent_buf.items, self.client_id, op_seq);
-            defer if (handle.future.cancel(io)) |_| {} else |_| {};
-            const result = try handle.awaitCommit(io);
+            // Submit to Sequencer — enqueues to owner thread; spins until committed.
+            var pending: sequencer_mod.PendingSubmit = undefined;
+            const handle = self.sequencer.submitBytes(&pending, intent_buf.items, self.client_id, op_seq);
+            const result = try handle.awaitCommit();
 
             // Read committed entry from partition log
             const partition_log = self.sequencer.partitionLog(result.partition);

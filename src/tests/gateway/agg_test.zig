@@ -66,7 +66,7 @@ fn teardown(gw: *Gateway, dir: []const u8) void {
 
 fn insertEvent(gw: *Gateway, id: i64, category: i64, label: []const u8, score: i64) !void {
     const h = (try gw.register("INSERT INTO events (id, category, label, score) VALUES ($1, $2, $3, $4)")).hash;
-    _ = try gw.execute(std.testing.io, h, &.{
+    _ = try gw.execute(h, &.{
         .{ .int64 = id },
         .{ .int64 = category },
         .{ .string = label },

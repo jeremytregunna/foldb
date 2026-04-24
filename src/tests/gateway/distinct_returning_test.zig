@@ -60,11 +60,11 @@ fn setupGateway() !struct { gw: *Gateway, dir: []const u8 } {
 
     const ins = (try gw.register("INSERT INTO tags (id, item_id, tag) VALUES ($1, $2, $3)")).hash;
     // item_id=1 appears with tag=10, tag=20, tag=10 (duplicate tag for item 1)
-    _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 2 }, .{ .int64 = 1 }, .{ .int64 = 20 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 3 }, .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try gw.execute(ins, &.{ .{ .int64 = 2 }, .{ .int64 = 1 }, .{ .int64 = 20 } }, &.{});
+    _ = try gw.execute(ins, &.{ .{ .int64 = 3 }, .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
     // item_id=2 with tag=30
-    _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 4 }, .{ .int64 = 2 }, .{ .int64 = 30 } }, &.{});
+    _ = try gw.execute(ins, &.{ .{ .int64 = 4 }, .{ .int64 = 2 }, .{ .int64 = 30 } }, &.{});
 
     return .{ .gw = gw, .dir = dir };
 }
@@ -148,7 +148,7 @@ test "returning: INSERT RETURNING returns the inserted row values" {
     try gw.applyDdl(TAGS_DDL);
 
     const ins = (try gw.register("INSERT INTO tags (id, item_id, tag) VALUES ($1, $2, $3) RETURNING id, tag")).hash;
-    const result = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 7 }, .{ .int64 = 99 }, .{ .int64 = 42 } }, &.{});
+    const result = try gw.execute(ins, &.{ .{ .int64 = 7 }, .{ .int64 = 99 }, .{ .int64 = 42 } }, &.{});
     try testing.expectEqual(@as(u64, 1), result.rows_affected);
     try testing.expect(result.result_set != null);
 
@@ -170,7 +170,7 @@ test "returning: INSERT without RETURNING returns null result_set" {
     try gw.applyDdl(TAGS_DDL);
 
     const ins = (try gw.register("INSERT INTO tags (id, item_id, tag) VALUES ($1, $2, $3)")).hash;
-    const result = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 2 }, .{ .int64 = 3 } }, &.{});
+    const result = try gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 2 }, .{ .int64 = 3 } }, &.{});
     try testing.expect(result.result_set == null);
 }
 
@@ -185,10 +185,10 @@ test "returning: UPDATE RETURNING returns updated row values" {
     try gw.applyDdl(TAGS_DDL);
 
     const ins = (try gw.register("INSERT INTO tags (id, item_id, tag) VALUES ($1, $2, $3)")).hash;
-    _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 5 }, .{ .int64 = 10 } }, &.{});
+    _ = try gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 5 }, .{ .int64 = 10 } }, &.{});
 
     const upd = (try gw.register("UPDATE tags SET tag = 99 WHERE id = 1 RETURNING id, tag")).hash;
-    const result = try gw.execute(std.testing.io, upd, &.{}, &.{});
+    const result = try gw.execute(upd, &.{}, &.{});
     try testing.expectEqual(@as(u64, 1), result.rows_affected);
     try testing.expect(result.result_set != null);
 
@@ -210,10 +210,10 @@ test "returning: DELETE RETURNING returns the deleted row values" {
     try gw.applyDdl(TAGS_DDL);
 
     const ins = (try gw.register("INSERT INTO tags (id, item_id, tag) VALUES ($1, $2, $3)")).hash;
-    _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 5 }, .{ .int64 = 77 } }, &.{});
+    _ = try gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 5 }, .{ .int64 = 77 } }, &.{});
 
     const del = (try gw.register("DELETE FROM tags WHERE id = 1 RETURNING id, tag")).hash;
-    const result = try gw.execute(std.testing.io, del, &.{}, &.{});
+    const result = try gw.execute(del, &.{}, &.{});
     try testing.expectEqual(@as(u64, 1), result.rows_affected);
     try testing.expect(result.result_set != null);
 
@@ -235,7 +235,7 @@ test "returning: RETURNING column names match aliases" {
     try gw.applyDdl(TAGS_DDL);
 
     const ins = (try gw.register("INSERT INTO tags (id, item_id, tag) VALUES ($1, $2, $3) RETURNING id AS row_id, tag AS t")).hash;
-    const result = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 5 }, .{ .int64 = 9 }, .{ .int64 = 3 } }, &.{});
+    const result = try gw.execute(ins, &.{ .{ .int64 = 5 }, .{ .int64 = 9 }, .{ .int64 = 3 } }, &.{});
     defer {
         var opt_rs = result.result_set;
         if (opt_rs) |*rs| rs.deinit();
@@ -259,9 +259,9 @@ test "distinct: SELECT DISTINCT treats two NULLs as equal (deduplicates them)" {
     try gw.applyDdl("CREATE TABLE nullable_tbl (id INT64 NOT NULL, v INT64, PRIMARY KEY (id))");
 
     const ins = (try gw.register("INSERT INTO nullable_tbl (id, v) VALUES ($1, $2)")).hash;
-    _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 2 }, .{ .int64 = 10 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 3 }, .{ .int64 = 20 } }, &.{});
+    _ = try gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 10 } }, &.{});
+    _ = try gw.execute(ins, &.{ .{ .int64 = 2 }, .{ .int64 = 10 } }, &.{});
+    _ = try gw.execute(ins, &.{ .{ .int64 = 3 }, .{ .int64 = 20 } }, &.{});
 
     const q = (try gw.register("SELECT DISTINCT v FROM nullable_tbl")).hash;
     var rs = try gw.querySelect(q, &.{}, &.{});
@@ -299,12 +299,12 @@ test "returning: UPDATE affecting multiple rows returns all updated rows" {
     try gw.applyDdl(TAGS_DDL);
 
     const ins = (try gw.register("INSERT INTO tags (id, item_id, tag) VALUES ($1, $2, $3)")).hash;
-    _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 1 }, .{ .int64 = 5 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 2 }, .{ .int64 = 1 }, .{ .int64 = 5 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 3 }, .{ .int64 = 2 }, .{ .int64 = 5 } }, &.{});
+    _ = try gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 1 }, .{ .int64 = 5 } }, &.{});
+    _ = try gw.execute(ins, &.{ .{ .int64 = 2 }, .{ .int64 = 1 }, .{ .int64 = 5 } }, &.{});
+    _ = try gw.execute(ins, &.{ .{ .int64 = 3 }, .{ .int64 = 2 }, .{ .int64 = 5 } }, &.{});
 
     const upd = (try gw.register("UPDATE tags SET tag = 99 WHERE item_id = 1 RETURNING id")).hash;
-    const result = try gw.execute(std.testing.io, upd, &.{}, &.{});
+    const result = try gw.execute(upd, &.{}, &.{});
     try testing.expectEqual(@as(u64, 2), result.rows_affected);
     try testing.expect(result.result_set != null);
     var rs = result.result_set.?;
@@ -323,11 +323,11 @@ test "returning: DELETE affecting multiple rows returns all deleted rows" {
     try gw.applyDdl(TAGS_DDL);
 
     const ins = (try gw.register("INSERT INTO tags (id, item_id, tag) VALUES ($1, $2, $3)")).hash;
-    _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 7 }, .{ .int64 = 1 } }, &.{});
-    _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 2 }, .{ .int64 = 7 }, .{ .int64 = 2 } }, &.{});
+    _ = try gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 7 }, .{ .int64 = 1 } }, &.{});
+    _ = try gw.execute(ins, &.{ .{ .int64 = 2 }, .{ .int64 = 7 }, .{ .int64 = 2 } }, &.{});
 
     const del = (try gw.register("DELETE FROM tags WHERE item_id = 7 RETURNING id, tag")).hash;
-    const result = try gw.execute(std.testing.io, del, &.{}, &.{});
+    const result = try gw.execute(del, &.{}, &.{});
     try testing.expectEqual(@as(u64, 2), result.rows_affected);
     try testing.expect(result.result_set != null);
     var rs = result.result_set.?;

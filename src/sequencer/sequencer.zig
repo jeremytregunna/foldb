@@ -11,6 +11,7 @@ const obs = @import("observability.zig");
 const types_mod = @import("types.zig");
 const idempotency_mod = @import("idempotency.zig");
 const epoch_mod = @import("epoch.zig");
+const mpsc_mod = @import("mpsc_queue.zig");
 
 pub const Seq = log_mod.Seq;
 pub const PartitionId = log_mod.PartitionId;
@@ -20,6 +21,7 @@ pub const EpochDecision = types_mod.EpochDecision;
 pub const OrderingEntry = types_mod.OrderingEntry;
 pub const SubmitResult = types_mod.SubmitResult;
 pub const SubmitHandle = types_mod.SubmitHandle;
+pub const PendingSubmit = types_mod.PendingSubmit;
 pub const ValidatedSubmit = types_mod.ValidatedSubmit;
 pub const IdempotencyCache = idempotency_mod.IdempotencyCache;
 pub const EpochBatcher = epoch_mod.EpochBatcher;
@@ -64,6 +66,9 @@ pub const SequencerError = error{
 };
 
 /// The Sequencer: global ordering for TxnIntents across partition logs.
+///
+/// Runs a dedicated owner thread (start/deinit). All mutable state is owned exclusively
+/// by that thread — callers submit via submitBytes() and spin on PendingSubmit.done.
 pub const Sequencer = struct {
     raft: raft_mod.RaftNode,
     raft_log: Log,
@@ -78,6 +83,11 @@ pub const Sequencer = struct {
     metrics: obs.SequencerMetrics = .{},
     /// TCP transport for Raft inter-node messaging.
     transport: raft_mod.TcpTransport,
+    /// Owner thread fields.
+    tick_interval_ms: u32,
+    queue: mpsc_mod.MpscQueue(types_mod.PendingSubmit) = undefined,
+    shutdown: std.atomic.Value(bool) = .init(false),
+    thread: ?std.Thread = null,
 
     /// Initialize a Sequencer at the given base path.
     /// Creates:
@@ -170,10 +180,21 @@ pub const Sequencer = struct {
             .next_epoch = 1,
             .alloc = alloc,
             .transport = transport,
+            .tick_interval_ms = cfg.tick_interval_ms,
         };
     }
 
+    /// Start the Sequencer's owner thread. Must be called once after the Sequencer is
+    /// at its final address (i.e. after assignment into the heap-allocated Gateway).
+    pub fn start(self: *Sequencer) !void {
+        self.queue.init();
+        self.thread = try std.Thread.spawn(.{}, runLoop, .{self});
+    }
+
     pub fn deinit(self: *Sequencer) void {
+        self.shutdown.store(true, .release);
+        self.queue.wakeConsumer();
+        if (self.thread) |t| t.join();
         self.raft.deinit();
         self.raft_log.deinit();
         std.heap.page_allocator.free(self.raft_path);
@@ -347,94 +368,125 @@ pub const Sequencer = struct {
         return &self.partition_logs[partition];
     }
 
-    /// Domain boundary — accepts raw gateway input and wraps it in a ValidatedSubmit
-    /// before handing off to the sequencer core. The intent_payload is opaque here;
-    /// TxnIntent structural validation happened at the gateway before this call.
-    /// Infallible — errors surface when the caller calls awaitCommit() on the handle.
+    /// Domain boundary — accepts raw gateway input and enqueues it for the Sequencer thread.
+    /// The caller stack-allocates pending and must not access it until awaitCommit() returns.
     /// Idempotent on (client_id, client_seq_num).
     pub fn submitBytes(
         self: *Sequencer,
-        io: std.Io,
+        pending: *types_mod.PendingSubmit,
         intent_payload: []const u8,
         client_id: u64,
         client_seq_num: u64,
-    ) SubmitHandle {
-        // This is the domain boundary — external gateway data enters the sequencer here.
-        const validated = ValidatedSubmit{
-            .client_id = client_id,
-            .client_seq = client_seq_num,
-            .intent_payload = intent_payload,
+    ) types_mod.SubmitHandle {
+        pending.* = .{
+            .submit = .{
+                .client_id = client_id,
+                .client_seq = client_seq_num,
+                .intent_payload = intent_payload,
+            },
+            .result = undefined,
+            .err = null,
+            .done = .init(false),
+            .next = .init(null),
         };
-        return .{ .future = io.async(doCommit, .{ self, validated }) };
+        self.queue.push(pending);
+        return .{ .pending = pending };
     }
 };
 
-/// Free function passed to io.async — contains all durable commit work.
-/// Receives a ValidatedSubmit: all external data validation happened at the boundary
-/// (submitBytes). This function is pure domain logic: idempotency, batching, seq
-/// assignment, Raft replication of ordering decisions, and data log writes.
-/// For M7 single-node io.async executes this synchronously; future milestones block here on
-/// multi-node Raft round-trips.
-fn doCommit(sequencer: *Sequencer, submit: ValidatedSubmit) anyerror!SubmitResult {
-    sequencer.metrics.intents_submitted.inc();
+/// Sequencer owner thread: drains the MPSC queue, drives Raft ticks, signals completions.
+fn runLoop(self: *Sequencer) void {
+    const tick_ns: u64 = @as(u64, self.tick_interval_ms) * 1_000_000;
+    while (!self.shutdown.load(.acquire)) {
+        // Sample seq before pop — if a producer pushes between the failed pop and
+        // waitForWork, the seq change causes waitForWork to return immediately.
+        const seq = self.queue.currentSeq();
+
+        if (self.queue.pop()) |p| {
+            processCommit(self, p);
+        } else {
+            self.queue.waitForWork(seq, tick_ns);
+        }
+
+        self.tickOnce(self.alloc) catch {};
+    }
+}
+
+fn processCommit(self: *Sequencer, pending: *types_mod.PendingSubmit) void {
+    const result = commitInner(self, pending.submit) catch |e| {
+        pending.err = e;
+        pending.done.store(true, .release);
+        return;
+    };
+    pending.result = result;
+    pending.done.store(true, .release);
+}
+
+/// Core commit logic, called only from the Sequencer owner thread.
+fn commitInner(self: *Sequencer, submit: ValidatedSubmit) !SubmitResult {
+    self.metrics.intents_submitted.inc();
 
     const client_id = submit.client_id;
     const client_seq_num = submit.client_seq;
 
     // Idempotency fast path
-    if (sequencer.idempotency.lookup(client_id, client_seq_num)) |existing_seq| {
-        sequencer.metrics.dedup_hits.inc();
-        const partition: PartitionId = @intCast(existing_seq % @as(Seq, sequencer.partition_logs.len));
+    if (self.idempotency.lookup(client_id, client_seq_num)) |existing_seq| {
+        self.metrics.dedup_hits.inc();
+        const partition: PartitionId = @intCast(existing_seq % @as(Seq, self.partition_logs.len));
         return .{ .seq = existing_seq, .partition = partition };
     }
 
-    // Single-entry epoch (M7 synchronous mode)
-    try sequencer.batcher.submit(client_id, client_seq_num);
+    try self.batcher.submit(client_id, client_seq_num);
 
-    const decision = try sequencer.batcher.closeEpoch(
-        sequencer.next_epoch,
-        sequencer.next_seq,
-        @intCast(sequencer.partition_logs.len),
-        sequencer.alloc,
+    const decision = try self.batcher.closeEpoch(
+        self.next_epoch,
+        self.next_seq,
+        @intCast(self.partition_logs.len),
+        self.alloc,
     );
-    defer sequencer.alloc.free(decision.entries);
+    defer self.alloc.free(decision.entries);
 
-    sequencer.next_epoch += 1;
-    sequencer.next_seq += @intCast(decision.entries.len);
-    sequencer.metrics.epochs_closed.inc();
-    sequencer.metrics.last_epoch_size.set(@intCast(decision.entries.len));
+    self.next_epoch += 1;
+    self.next_seq += @intCast(decision.entries.len);
+    self.metrics.epochs_closed.inc();
+    self.metrics.last_epoch_size.set(@intCast(decision.entries.len));
 
-    // Replicate ordering decision via Raft
     var payload_buf: std.ArrayList(u8) = .empty;
-    defer payload_buf.deinit(sequencer.alloc);
-    try types_mod.serializeEpochDecision(decision, &payload_buf, sequencer.alloc);
+    defer payload_buf.deinit(self.alloc);
+    try types_mod.serializeEpochDecision(decision, &payload_buf, self.alloc);
 
     var outputs: std.ArrayList(raft_mod.Output) = .empty;
-    defer outputs.deinit(sequencer.alloc);
+    defer outputs.deinit(self.alloc);
 
-    const ordering_seq = try sequencer.raft.propose(
-        &sequencer.raft_log,
+    const ordering_seq = try self.raft.propose(
+        &self.raft_log,
         .epoch_decision,
         payload_buf.items,
         &outputs,
     ) orelse {
-        sequencer.metrics.not_leader_errors.inc();
+        self.metrics.not_leader_errors.inc();
         return SequencerError.NotLeader;
     };
-    _ = ordering_seq;
 
-    try sequencer.flushOutputs(outputs.items, sequencer.alloc);
+    try self.flushOutputs(outputs.items, self.alloc);
+
+    // Wait for Raft commit. For single-node, commit_index already advanced (quorum=1)
+    // so this loop body never executes.
+    const wait_ts: std.os.linux.timespec = .{ .sec = 0, .nsec = 1_000_000 };
+    while (self.raft.commit_index < ordering_seq) {
+        try self.tickOnce(self.alloc);
+        _ = std.os.linux.nanosleep(&wait_ts, null);
+    }
 
     // Sequencer→data-log boundary: write the opaque intent payload at the assigned
-    // global seq. Raft replicated only the ordering decision above; the intent bytes
-    // are written here directly to the data partition log.
-    const entry = decision.entries[0]; // single-entry epoch
-    const partition_log = &sequencer.partition_logs[entry.partition];
+    // global seq. Raft replicated only the ordering decision; intent bytes go here.
+    const entry = decision.entries[0];
+    const partition_log = &self.partition_logs[entry.partition];
     const log_entry = LogEntry.create(entry.seq, 0, .txn_intent, submit.intent_payload);
     try partition_log.appendEntryAt(log_entry);
 
-    try sequencer.idempotency.record(client_id, client_seq_num, entry.seq);
-    sequencer.metrics.current_seq.set(@intCast(entry.seq));
+    try self.idempotency.record(client_id, client_seq_num, entry.seq);
+    self.metrics.current_seq.set(@intCast(entry.seq));
 
     return .{ .seq = entry.seq, .partition = entry.partition };
 }

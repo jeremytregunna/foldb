@@ -617,6 +617,12 @@ pub fn build(b: *std.Build) void {
     const run_sql_planner_tests = b.addRunArtifact(sql_planner_tests);
 
     // Sequencer sub-modules
+    const seq_mpsc_module = b.createModule(.{
+        .root_source_file = b.path("src/sequencer/mpsc_queue.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const seq_types_module = b.createModule(.{
         .root_source_file = b.path("src/sequencer/types.zig"),
         .target = target,
@@ -650,6 +656,7 @@ pub fn build(b: *std.Build) void {
     sequencer_module.addImport("idempotency.zig", seq_idempotency_module);
     sequencer_module.addImport("epoch.zig", seq_epoch_module);
     sequencer_module.addImport("observability.zig", observability_module);
+    sequencer_module.addImport("mpsc_queue.zig", seq_mpsc_module);
 
     // Wire sequencer into lib.zig now that it exists
     lib_module.addImport("sequencer.zig", sequencer_module);

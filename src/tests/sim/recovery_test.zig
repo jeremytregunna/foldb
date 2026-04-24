@@ -80,15 +80,15 @@ fn runWorkload(
         switch (op.kind) {
             .insert => {
                 const params = [_]ColumnValue{ .{ .int64 = op.id }, .{ .int64 = op.value } };
-                _ = gw.execute(std.testing.io, insert_hash, &params, &.{}) catch {};
+                _ = gw.execute(insert_hash, &params, &.{}) catch {};
             },
             .update => {
                 const params = [_]ColumnValue{ .{ .int64 = op.id }, .{ .int64 = op.value } };
-                _ = gw.execute(std.testing.io, update_hash, &params, &.{}) catch {};
+                _ = gw.execute(update_hash, &params, &.{}) catch {};
             },
             .delete => {
                 const params = [_]ColumnValue{.{ .int64 = op.id }};
-                _ = gw.execute(std.testing.io, delete_hash, &params, &.{}) catch {};
+                _ = gw.execute(delete_hash, &params, &.{}) catch {};
             },
             .select => {},
         }
@@ -182,7 +182,7 @@ test "sim: recovery — schema and flushed data survive crash" {
         var i: i64 = 1;
         while (i <= 10) : (i += 1) {
             const params = [_]ColumnValue{ .{ .int64 = i }, .{ .int64 = i * 100 } };
-            _ = try gw.execute(std.testing.io, ins, &params, &.{});
+            _ = try gw.execute(ins, &params, &.{});
         }
         // Flush to SSTables — this batch is durable.
         try gw.flushAll();
@@ -190,7 +190,7 @@ test "sim: recovery — schema and flushed data survive crash" {
         // Unflushed batch — lost on crash.
         while (i <= 20) : (i += 1) {
             const params = [_]ColumnValue{ .{ .int64 = i }, .{ .int64 = i * 100 } };
-            _ = gw.execute(std.testing.io, ins, &params, &.{}) catch {};
+            _ = gw.execute(ins, &params, &.{}) catch {};
         }
 
         // Simulate crash: abandon gateway without deinit.

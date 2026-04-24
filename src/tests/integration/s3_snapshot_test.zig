@@ -173,7 +173,7 @@ test "S3 integration: snapshot round-trip against real object store" {
         for (0..20) |i| {
             const id = try std.fmt.allocPrint(alloc, "row_{d:04}", .{i});
             defer alloc.free(id);
-            _ = try gw.execute(std.testing.io, ins, &.{
+            _ = try gw.execute(ins, &.{
                 .{ .string = id },
                 .{ .int64 = @intCast(i) },
             }, &.{});

@@ -65,7 +65,7 @@ test "CREATE INDEX ORDERED: index created and queries still work" {
     try gw.applyDdl("CREATE ORDERED INDEX idx_products_name ON products (name)");
 
     const ins = (try gw.register("INSERT INTO products (id, name) VALUES ($1, $2)")).hash;
-    _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 42 } }, &.{});
+    _ = try gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 42 } }, &.{});
 
     const q = (try gw.register("SELECT name FROM products WHERE id = 1")).hash;
     var rs = try gw.querySelect(q, &.{}, &.{});
@@ -88,7 +88,7 @@ test "CREATE INDEX HASH: index created and queries still work" {
     try gw.applyDdl("CREATE HASH INDEX idx_sessions_token ON sessions (token)");
 
     const ins = (try gw.register("INSERT INTO sessions (id, token) VALUES ($1, $2)")).hash;
-    _ = try gw.execute(std.testing.io, ins, &.{ .{ .int64 = 1 }, .{ .int64 = 999 } }, &.{});
+    _ = try gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 999 } }, &.{});
 
     const q = (try gw.register("SELECT token FROM sessions WHERE id = 1")).hash;
     var rs = try gw.querySelect(q, &.{}, &.{});
@@ -157,7 +157,7 @@ test "ANN: WHERE ANN(col, $1, k) returns nearest neighbours via HNSW index" {
     }) |row| {
         const encoded = try storage_mod.vector_codec.encode(row.vec, alloc);
         defer alloc.free(encoded);
-        _ = try gw.execute(std.testing.io, insert_hash, &.{
+        _ = try gw.execute(insert_hash, &.{
             .{ .string = row.id },
             .{ .bytes = encoded },
         }, &.{});
@@ -207,7 +207,7 @@ test "ANN: k > 1 returns multiple results ordered by distance" {
     }) |row| {
         const encoded = try storage_mod.vector_codec.encode(row.vec, alloc);
         defer alloc.free(encoded);
-        _ = try gw.execute(std.testing.io, insert_hash, &.{
+        _ = try gw.execute(insert_hash, &.{
             .{ .string = row.id },
             .{ .bytes = encoded },
         }, &.{});
