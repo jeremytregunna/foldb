@@ -4,7 +4,7 @@ The config subsystem loads node configuration from a JSON file. All fields are o
 
 ## Loading
 
-`fromFile(path, alloc)` reads the file with raw Linux syscalls and delegates to `fromSlice`. Files are capped at 1 MiB. `fromSlice(json, alloc)` parses the JSON top-level object field by field; unknown keys are silently ignored.
+`from_file(path, alloc)` reads the file with raw Linux syscalls and delegates to `from_slice`. Files are capped at 1 MiB. `from_slice(json, alloc)` parses the JSON top-level object field by field; unknown keys are silently ignored.
 
 `Config{}` (zero-initialised) is a valid single-node, no-auth, no-S3 configuration.
 
@@ -22,7 +22,7 @@ The config subsystem loads node configuration from a JSON file. All fields are o
 | `election_timeout_min_ms` | `150` | Raft election timeout lower bound. |
 | `election_timeout_max_ms` | `300` | Raft election timeout upper bound. |
 | `heartbeat_interval_ms` | `50` | Raft leader heartbeat interval. |
-| `s3_endpoint` | `""` | IPv4 endpoint URL, e.g. `"http://1.2.3.4:9000"`. Hostname resolution is not supported — IPv4 only. |
+| `s3_endpoint` | `""` | Endpoint URL, e.g. `"http://1.2.3.4:9000"` or `"https://s3.example.com"`. Bare `host[:port]` without a scheme is also accepted (defaults to port 443). The S3 client handles hostname resolution at connect time. |
 | `s3_bucket` | `""` | S3 bucket name. |
 | `s3_access_key` | `""` | S3 access key. |
 | `s3_secret_key` | `""` | S3 secret key. |
@@ -54,9 +54,12 @@ Tokens are derived offline: `add-user --config <path> --name <name> --password <
 ## Invariants
 
 - All string fields in a parsed config are owned by the config's arena. Do not free individually.
+- `partition_count` must be ≥ 1. `from_slice` rejects zero with `error.InvalidConfig`.
+- `listen_port` must be ≥ 1. `from_slice` rejects zero with `error.InvalidConfig`.
+- `election_timeout_min_ms` must be strictly less than `election_timeout_max_ms`. `from_slice` enforces this and rejects equal or inverted values with `error.InvalidConfig`.
 - `partition_count` sizes internal arrays at startup. Changing it while data exists under `storage_dir` produces incorrect behaviour.
 - A rotated `auth_secret` invalidates all existing tokens.
 
 ## Source Files
 
-- `src/config/config.zig` — `Config`, `UserEntry`, `ParsedConfig`, `fromFile`, `fromSlice`
+- `src/config/config.zig` — `Config`, `UserEntry`, `ParsedConfig`, `from_file`, `from_slice`, `parse_s3_endpoint`

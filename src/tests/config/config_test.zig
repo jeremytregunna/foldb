@@ -35,7 +35,7 @@ test "Config: round-trip JSON" {
         \\}
     ;
 
-    var pc = try config_mod.fromSlice(json, std.testing.allocator);
+    var pc = try config_mod.from_slice(json, std.testing.allocator);
     defer pc.deinit();
     const cfg = pc.value;
 
@@ -47,7 +47,7 @@ test "Config: round-trip JSON" {
     try std.testing.expectEqual(@as(usize, 2), cfg.peers.len);
     try std.testing.expectEqualStrings("10.0.0.1:7432", cfg.peers[0]);
     try std.testing.expectEqualStrings("10.0.0.2:7432", cfg.peers[1]);
-    try std.testing.expectEqual(@as(usize, 5000), cfg.max_epoch_size);
+    try std.testing.expectEqual(@as(u32, 5000), cfg.max_epoch_size);
     try std.testing.expectEqual(@as(u32, 200), cfg.election_timeout_min_ms);
     try std.testing.expectEqual(@as(u32, 400), cfg.election_timeout_max_ms);
     try std.testing.expectEqual(@as(u32, 75), cfg.heartbeat_interval_ms);
@@ -67,7 +67,7 @@ test "Config: partial JSON uses defaults" {
     const json =
         \\{"storage_dir": "/custom", "listen_port": 8080}
     ;
-    var pc = try config_mod.fromSlice(json, std.testing.allocator);
+    var pc = try config_mod.from_slice(json, std.testing.allocator);
     defer pc.deinit();
     const cfg = pc.value;
 
@@ -81,12 +81,12 @@ test "Config: invalid type returns error" {
     const json =
         \\{"node_id": "not-a-number"}
     ;
-    const result = config_mod.fromSlice(json, std.testing.allocator);
+    const result = config_mod.from_slice(json, std.testing.allocator);
     try std.testing.expectError(error.InvalidConfig, result);
 }
 
 test "Config: non-object JSON returns error" {
-    const result = config_mod.fromSlice("[1,2,3]", std.testing.allocator);
+    const result = config_mod.from_slice("[1,2,3]", std.testing.allocator);
     try std.testing.expectError(error.InvalidConfig, result);
 }
 
@@ -121,7 +121,7 @@ test "Config: fromFile reads and parses JSON file" {
     _ = std.os.linux.close(@intCast(fd));
     defer _ = std.os.linux.unlink(null_path.ptr);
 
-    var pc = try config_mod.fromFile(path, alloc);
+    var pc = try config_mod.from_file(path, alloc);
     defer pc.deinit();
 
     try std.testing.expectEqual(@as(u64, 7), pc.value.node_id);

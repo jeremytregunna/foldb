@@ -185,7 +185,7 @@ fn cmdAddUser(alloc: std.mem.Allocator, it: *std.process.Args.Iterator) !void {
         std.process.exit(1);
     };
 
-    var pc = config_mod.fromFile(cfg_path, alloc) catch |e| {
+    var pc = config_mod.from_file(cfg_path, alloc) catch |e| {
         std.debug.print("error: could not read config: {s}\n", .{@errorName(e)});
         return e;
     };
@@ -251,7 +251,7 @@ fn cmdServe(io: std.Io, alloc: std.mem.Allocator, it: *std.process.Args.Iterator
     defer if (parsed) |*p| p.deinit();
 
     const cfg: config_mod.Config = if (config_path) |path| blk: {
-        parsed = try config_mod.fromFile(path, alloc);
+        parsed = try config_mod.from_file(path, alloc);
         break :blk parsed.?.value;
     } else config_mod.Config{};
 
@@ -274,7 +274,7 @@ fn cmdServe(io: std.Io, alloc: std.mem.Allocator, it: *std.process.Args.Iterator
     }
 
     const s3ep: config_mod.ParsedS3Endpoint = if (s3_enabled)
-        config_mod.parseS3Endpoint(cfg.s3_endpoint) catch {
+        config_mod.parse_s3_endpoint(cfg.s3_endpoint) catch {
             std.debug.print("error: could not parse s3_endpoint — expected http[s]://host[:port]\n", .{});
             return error.InvalidConfig;
         }

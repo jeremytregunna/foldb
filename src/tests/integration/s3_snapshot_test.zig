@@ -135,7 +135,7 @@ test "S3 integration: snapshot round-trip against real object store" {
     const alloc = testing.allocator;
 
     // Load test config — skip if absent.
-    var pc = config_mod.fromFile("test-s3.json", alloc) catch return error.SkipZigTest;
+    var pc = config_mod.from_file("test-s3.json", alloc) catch return error.SkipZigTest;
     defer pc.deinit();
     const cfg = pc.value;
 
@@ -143,7 +143,7 @@ test "S3 integration: snapshot round-trip against real object store" {
     if (cfg.s3_access_key.len == 0 or cfg.s3_bucket.len == 0 or
         cfg.s3_endpoint.len == 0 or cfg.s3_region.len == 0) return error.SkipZigTest;
 
-    const ep = try config_mod.parseS3Endpoint(cfg.s3_endpoint);
+    const ep = try config_mod.parse_s3_endpoint(cfg.s3_endpoint);
 
     const dir = try makeTempDir("snap", alloc);
     defer {
