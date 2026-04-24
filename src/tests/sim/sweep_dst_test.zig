@@ -28,7 +28,7 @@ fn virtualNowMicros(ptr: ?*anyopaque) i64 {
 }
 
 fn clockSourceFrom(vc: *sim.VirtualClock) ClockSource {
-    return .{ .ptr = vc, .now_micros_fn = virtualNowMicros };
+    return .{ .clock_ctx = vc, .now_micros_fn = virtualNowMicros };
 }
 
 fn simRandFill(ptr: ?*anyopaque, buf: []u8) void {
@@ -37,7 +37,7 @@ fn simRandFill(ptr: ?*anyopaque, buf: []u8) void {
 }
 
 fn randSourceFrom(sched: *sim.SimScheduler) RandSource {
-    return .{ .ptr = sched, .fill_fn = simRandFill };
+    return .{ .rand_ctx = sched, .fill_fn = simRandFill };
 }
 
 // ---------------------------------------------------------------------------

@@ -27,7 +27,7 @@ fn virtualNowMicros(ptr: ?*anyopaque) i64 {
 }
 
 fn clockSourceFrom(vc: *sim.VirtualClock) ClockSource {
-    return .{ .ptr = vc, .now_micros_fn = virtualNowMicros };
+    return .{ .clock_ctx = vc, .now_micros_fn = virtualNowMicros };
 }
 
 // ---- Temp dir helpers ----

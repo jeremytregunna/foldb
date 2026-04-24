@@ -7,7 +7,7 @@ const storage_mod = @import("storage.zig");
 const executor_mod = @import("executor.zig");
 const sequencer_mod = @import("sequencer.zig");
 const log_mod = @import("log.zig");
-const obs = @import("observability.zig");
+const observability_mod = @import("observability.zig");
 const cdc_mod = @import("cdc.zig");
 
 pub const QueryHash = sql_mod.QueryHash;
@@ -54,11 +54,11 @@ pub const ReconStrategy = enum {
 /// Injectable clock source. Production uses real clock_gettime; sim substitutes VirtualClock.
 /// now_micros_fn returns unix microseconds as i64.
 pub const ClockSource = struct {
-    ptr: ?*anyopaque = null,
+    clock_ctx: ?*anyopaque = null,
     now_micros_fn: *const fn (?*anyopaque) i64 = realNowMicros,
 
     pub fn now(self: ClockSource) i64 {
-        return self.now_micros_fn(self.ptr);
+        return self.now_micros_fn(self.clock_ctx);
     }
 
     fn realNowMicros(_: ?*anyopaque) i64 {
@@ -72,11 +72,11 @@ pub const ClockSource = struct {
 
 /// Injectable random source. Production uses clock-seeded PRNG; sim substitutes SimScheduler.
 pub const RandSource = struct {
-    ptr: ?*anyopaque = null,
+    rand_ctx: ?*anyopaque = null,
     fill_fn: *const fn (?*anyopaque, []u8) void = realFill,
 
     pub fn fill(self: RandSource, buf: []u8) void {
-        self.fill_fn(self.ptr, buf);
+        self.fill_fn(self.rand_ctx, buf);
     }
 
     fn realFill(_: ?*anyopaque, buf: []u8) void {
@@ -133,20 +133,19 @@ const SnapshotWriterCtx = struct {
 /// Context for the post-snapshot truncation hook. Stable once set in init.
 const TruncateCtx = struct { gateway: *Gateway };
 
-fn postSnapshotImpl(ptr: *anyopaque, snapshot_seq: sequencer_mod.Seq) void {
+fn onSnapshotComplete(ptr: *anyopaque, snapshot_seq: sequencer_mod.Seq) void {
     const ctx: *TruncateCtx = @ptrCast(@alignCast(ptr));
     const gw = ctx.gateway;
     if (snapshot_seq > gw.durable_snapshot_seq) gw.durable_snapshot_seq = snapshot_seq;
     gw.truncateLog() catch |err| std.log.warn("truncateLog failed after snapshot: {}", .{err});
 }
 
-fn snapshotLogWriteImpl(ptr: *anyopaque, manifest_key: []const u8, seq: u64, partition_id: u32, alloc: std.mem.Allocator) anyerror!void {
-    _ = partition_id;
+fn writeSnapshotToLog(ptr: *anyopaque, manifest_key: []const u8, seq: u64, partition_id: u32, alloc: std.mem.Allocator) anyerror!void {
     const ctx: *SnapshotWriterCtx = @ptrCast(@alignCast(ptr));
     const payload = storage_mod.SnapshotMarkerPayload{
         .manifest_key = manifest_key,
         .seq = seq,
-        .partition_id = ctx.partition_id,
+        .partition_id = partition_id,
     };
     const bytes = try payload.serialize(alloc);
     defer alloc.free(bytes);
@@ -184,7 +183,7 @@ pub const Gateway = struct {
     partition_count: u32,
     recon_strategy: ReconStrategy,
     alloc: std.mem.Allocator,
-    metrics: obs.GatewayMetrics = .{},
+    metrics: observability_mod.GatewayMetrics = .{},
     /// Background executor thread — applies committed partition log entries to storage
     /// on follower nodes. On the leader, runValidated() in execute() is the apply path.
     /// TODO: the leader↔follower transition window is a known gap — a briefly demoted
@@ -351,7 +350,7 @@ pub const Gateway = struct {
                         .partition_id = @intCast(i),
                         // XOR with a per-partition salt so snapshot client_ids don't
                         // collide with each other or with gateway.client_id.
-                        .client_id = gw.client_id ^ (@as(u64, @intCast(i)) +% 0x9e3779b97f4a7c15),
+                        .client_id = gw.client_id ^ (@as(u64, @intCast(i)) +% 0x9e3779b97f4a7c15), // Fibonacci hashing salt
                         .client_seq = 0,
                     };
                 }
@@ -362,12 +361,12 @@ pub const Gateway = struct {
                         .store = obj,
                         .log_writer = .{
                             .ptr = &ctxs[i],
-                            .writeFn = &snapshotLogWriteImpl,
+                            .writeFn = &writeSnapshotToLog,
                         },
                         .partition_id = @intCast(i),
                         .post_snapshot = .{
                             .ptr = &gw.truncate_ctx,
-                            .hookFn = &postSnapshotImpl,
+                            .hookFn = &onSnapshotComplete,
                         },
                     });
                 }
@@ -381,10 +380,10 @@ pub const Gateway = struct {
 
         // Derive a stable client_id from the storage path hash
         gw.client_id = blk: {
-            var h: u64 = 0xcbf29ce484222325;
+            var h: u64 = 0xcbf29ce484222325; // FNV-1a 64-bit offset basis
             for (storage_dir) |b| {
                 h ^= b;
-                h *%= 0x100000001b3;
+                h *%= 0x100000001b3; // FNV-1a 64-bit prime
             }
             break :blk h;
         };
@@ -575,22 +574,23 @@ pub const Gateway = struct {
 
         // On retry, re-run reconnaissance at the seq the executor assigned to the
         // conflicting entry so hints reflect state as of that point.
-        var recon_seq: Seq = self.sql_exec.currentSeq();
+        var hint_seq: Seq = self.sql_exec.currentSeq();
 
         const max_retries: usize = 3;
         std.debug.assert(max_retries > 0);
+        var intent_buf: std.ArrayList(u8) = .empty;
+        defer intent_buf.deinit(self.alloc);
         var attempt: usize = 0;
         while (attempt < max_retries) : (attempt += 1) {
             if (attempt > 0) self.metrics.recon_retries.inc();
 
-            var intent_buf: std.ArrayList(u8) = .empty;
-            defer intent_buf.deinit(self.alloc);
+            intent_buf.clearRetainingCapacity();
             try self.buildTxnIntent(
-                &hash, rq.plan, op_seq, recon_seq, params, params_bytes, all_nondet, &intent_buf,
+                &hash, rq.plan, op_seq, hint_seq, params, params_bytes, all_nondet, &intent_buf,
             );
             switch (try self.submitAndDrain(intent_buf.items, op_seq)) {
                 .done => |r| return r,
-                .retry => |conflict_seq| recon_seq = conflict_seq,
+                .retry => |conflict_seq| hint_seq = conflict_seq,
             }
         }
         std.debug.assert(attempt == max_retries);
@@ -948,19 +948,18 @@ fn resolveNondet(sql_text: []const u8, resolver: *const NondetResolver, alloc: s
     errdefer results.deinit(alloc);
 
     var i: usize = 0;
-    while (i < sql_text.len) {
-        // Try to match NOW(), RANDOM(), UUID() at position i (case-insensitive).
-        if (matchToken(sql_text, i, "now(")) {
+    while (std.mem.indexOfAnyPos(u8, sql_text, i, "nNrRuU")) |pos| {
+        if (matchToken(sql_text, pos, "now(")) {
             try results.append(alloc, resolver.resolveNow());
-            i += 4;
-        } else if (matchToken(sql_text, i, "random(")) {
+            i = pos + 4;
+        } else if (matchToken(sql_text, pos, "random(")) {
             try results.append(alloc, resolver.resolveRandom());
-            i += 7;
-        } else if (matchToken(sql_text, i, "uuid(")) {
+            i = pos + 7;
+        } else if (matchToken(sql_text, pos, "uuid(")) {
             try results.append(alloc, resolver.resolveUuidV7());
-            i += 5;
+            i = pos + 5;
         } else {
-            i += 1;
+            i = pos + 1;
         }
     }
 
