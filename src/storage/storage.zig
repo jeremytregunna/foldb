@@ -1,5 +1,7 @@
 /// Public storage API: unified module re-exporting all storage types.
 const std = @import("std");
+
+const assert = std.debug.assert;
 const types = @import("types.zig");
 const obs = @import("observability.zig");
 const lsm_mod = @import("lsm.zig");
@@ -324,7 +326,7 @@ pub const Storage = struct {
         var lsm = try lsm_mod.LSM.init(schema, table_dir, self.alloc);
         lsm.fault_hook = self.fault_hook;
         if (self.object_store) |store| {
-            lsm.withObjectStore(store, self.cache_dir orelse table_dir);
+            try lsm.withObjectStore(store, self.cache_dir orelse table_dir);
         }
         try self.tables.put(schema.table_id, lsm);
     }
@@ -386,45 +388,37 @@ pub const Storage = struct {
         if (result == null) self.metrics.get_misses.inc();
         if (self.read_tracker) |tracker| {
             const row_seq: Seq = if (result) |row| row.seq else 0;
-            // Best-effort: if tracker allocation fails we miss this read, accepting a
-            // potential false negative (no retry when one might be warranted).
+            // Best-effort: OOM here causes a false negative (no retry trigger).
+            // The tracker is advisory; correctness does not depend on it.
             tracker.record(table_id, key, row_seq) catch {};
         }
         return result;
     }
 
     pub fn apply(self: *Storage, mutations: []const Mutation, at_seq: Seq) !void {
-        // Collect pre-images for UPDATE/DELETE mutations in indexed tables
-        // (must be read before base-table mutations are applied)
+        // Collect pre-images for UPDATE/DELETE mutations in indexed tables —
+        // must be read before base-table mutations are applied.
         var pre_images: []?Row = &.{};
         defer {
             for (pre_images) |*r| if (r.*) |*row| row.deinit(self.alloc);
             if (pre_images.len > 0) self.alloc.free(pre_images);
         }
         if (self.indexes.count() > 0) {
-            pre_images = try self.alloc.alloc(?Row, mutations.len);
-            for (pre_images) |*r| r.* = null;
-            for (mutations, 0..) |m, i| {
-                if (m.kind == .insert) continue;
-                if (!self.tableHasIndexes(m.table_id)) continue;
-                pre_images[i] = try self.get(m.table_id, m.key, at_seq);
-            }
+            pre_images = try self.applyCollectPreImages(mutations, at_seq);
         }
 
         var table_ids: std.ArrayListUnmanaged(TableId) = .empty;
         defer table_ids.deinit(self.alloc);
-
         for (mutations) |m| {
             var found = false;
             for (table_ids.items) |t| {
-                if (t == m.table_id) {
-                    found = true;
-                    break;
-                }
+                if (t == m.table_id) { found = true; break; }
             }
             if (!found) try table_ids.append(self.alloc, m.table_id);
         }
 
+        assert(mutations.len <= std.math.maxInt(u32));
+        assert(at_seq <= std.math.maxInt(u32));
         self.metrics.applies.inc();
         self.metrics.mutations_applied.add(@intCast(mutations.len));
         self.metrics.current_seq.set(@intCast(at_seq));
@@ -436,7 +430,7 @@ pub const Storage = struct {
             const l0_after = lsm.levels[0].files.items.len;
             if (l0_before > 0 and l0_after < l0_before) {
                 self.metrics.compactions.inc();
-                // Compaction fired; prune tombstoned HNSW nodes for this table
+                // Compaction fired; prune tombstoned HNSW nodes for this table.
                 var idx_it = self.indexes.iterator();
                 while (idx_it.next()) |kv| {
                     switch (kv.value_ptr.*) {
@@ -447,27 +441,8 @@ pub const Storage = struct {
             }
         }
 
-        // Maintain specialty indexes
         if (self.indexes.count() > 0) {
-            for (mutations, 0..) |m, i| {
-                var idx_it = self.indexes.iterator();
-                while (idx_it.next()) |kv| {
-                    const entry = kv.value_ptr;
-                    if (entry.tableId() != m.table_id) continue;
-                    const old_row: ?Row = if (pre_images.len > i) pre_images[i] else null;
-                    // Domain boundary — op is derived from the validated mutation kind;
-                    // each variant carries exactly the values that exist for that operation.
-                    const op: IndexOp = switch (m.kind) {
-                        .insert => .{ .insert = m.values.? },
-                        .delete => .{ .delete = if (old_row) |r| r.values else &.{} },
-                        .update => .{ .update = .{
-                            .old = if (old_row) |r| r.values else &.{},
-                            .new = m.values.?,
-                        } },
-                    };
-                    try maintainEntry(entry, m.key, op, at_seq, self.alloc);
-                }
-            }
+            try self.applyIndexMaintenance(mutations, pre_images, at_seq);
         }
 
         if (self.snapshot_policy) |*policy| {
@@ -488,6 +463,39 @@ pub const Storage = struct {
                 }
                 self.metrics.snapshots_taken.inc();
                 policy.post_snapshot.call(at_seq);
+            }
+        }
+    }
+
+    fn applyCollectPreImages(self: *Storage, mutations: []const Mutation, at_seq: Seq) ![]?Row {
+        const pre_images = try self.alloc.alloc(?Row, mutations.len);
+        for (pre_images) |*r| r.* = null;
+        for (mutations, 0..) |m, i| {
+            if (m.kind == .insert) continue;
+            if (!self.tableHasIndexes(m.table_id)) continue;
+            pre_images[i] = try self.get(m.table_id, m.key, at_seq);
+        }
+        return pre_images;
+    }
+
+    fn applyIndexMaintenance(self: *Storage, mutations: []const Mutation, pre_images: []const ?Row, at_seq: Seq) !void {
+        for (mutations, 0..) |m, i| {
+            var idx_it = self.indexes.iterator();
+            while (idx_it.next()) |kv| {
+                const entry = kv.value_ptr;
+                if (entry.tableId() != m.table_id) continue;
+                const old_row: ?Row = if (pre_images.len > i) pre_images[i] else null;
+                // Domain boundary — op is derived from the validated mutation kind;
+                // each variant carries exactly the values that exist for that operation.
+                const op: IndexOp = switch (m.kind) {
+                    .insert => .{ .insert = m.values.? },
+                    .delete => .{ .delete = if (old_row) |r| r.values else &.{} },
+                    .update => .{ .update = .{
+                        .old = if (old_row) |r| r.values else &.{},
+                        .new = m.values.?,
+                    } },
+                };
+                try maintainEntry(entry, m.key, op, at_seq, self.alloc);
             }
         }
     }

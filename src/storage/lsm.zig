@@ -21,9 +21,17 @@ const SSTableMeta = sstable_mod.SSTableMeta;
 const BlockCache = block_cache_mod.BlockCache;
 const ObjectStore = object_store_mod.ObjectStore;
 
-const L0_COMPACTION_TRIGGER: usize = 4;
-const L2_TIERING_TRIGGER: usize = 4;
-const BLOCK_CACHE_BYTES: usize = 32 * 1024 * 1024; // 32 MiB default
+const assert = std.debug.assert;
+
+const L0_COMPACTION_TRIGGER: u32 = 4;
+const L2_TIERING_TRIGGER: u32 = 4;
+const BLOCK_CACHE_BYTES: u64 = 32 * 1024 * 1024; // 32 MiB default
+
+comptime {
+    assert(L0_COMPACTION_TRIGGER > 0);
+    assert(L2_TIERING_TRIGGER > 0);
+    assert(BLOCK_CACHE_BYTES > 0);
+}
 
 /// Injectable disk fault hook. Production leaves this null. Sim tests set it
 /// to a function backed by DiskSim.shouldFault() to inject failures at flush
@@ -93,9 +101,10 @@ pub const LSM = struct {
         if (self.cache_dir) |cd| self.alloc.free(cd);
     }
 
-    pub fn withObjectStore(self: *LSM, store: ObjectStore, cache_dir: []const u8) void {
+    pub fn withObjectStore(self: *LSM, store: ObjectStore, cache_dir: []const u8) !void {
+        assert(cache_dir.len > 0);
         self.object_store = store;
-        self.cache_dir = self.alloc.dupe(u8, cache_dir) catch null;
+        self.cache_dir = try self.alloc.dupe(u8, cache_dir);
     }
 
     pub fn apply(self: *LSM, mutations: []const Mutation, at_seq: Seq) !void {
@@ -184,8 +193,8 @@ pub const LSM = struct {
         // Check if already cached
         if (fileExists(local_path)) return local_path;
 
-        // Download from object store
-        const data = store.get(remote_key, self.alloc) catch return fallback_path;
+        // Download from object store; propagate errors so callers see real fetch failures.
+        const data = try store.get(remote_key, self.alloc);
         defer self.alloc.free(data);
 
         try mkdirAll(cd);
@@ -209,33 +218,9 @@ pub const LSM = struct {
             all_entries.deinit(alloc);
         }
 
-        // 1. Memtable (sorted key ASC, seq DESC; break on past-end)
-        for (self.memtable.entries.items) |entry| {
-            if (entry.seq > at_seq) continue;
-            if (range.end) |e| {
-                if (std.mem.order(u8, entry.key, e) != .lt) break;
-            }
-            if (!range.contains(entry.key)) continue;
-            const key_copy = try alloc.dupe(u8, entry.key);
-            errdefer alloc.free(key_copy);
-            var vals: ?[]ColumnValue = null;
-            if (!entry.is_tombstone) {
-                if (entry.values) |vs| {
-                    const vc = try alloc.alloc(ColumnValue, vs.len);
-                    errdefer alloc.free(vc);
-                    for (vs, 0..) |v, i| vc[i] = try v.dupe(alloc);
-                    vals = vc;
-                }
-            }
-            try all_entries.append(alloc, .{
-                .key = key_copy,
-                .seq = entry.seq,
-                .values = vals,
-                .is_tombstone = entry.is_tombstone,
-            });
-        }
+        try self.scanCollectMemtable(range, at_seq, &all_entries, alloc);
 
-        // 2. All SSTable levels (skip remote-only L3 files)
+        // 2. All SSTable levels (skip remote-only L3 files).
         for (&self.levels) |*level| {
             for (level.files.items) |*meta| {
                 if (!fileExists(meta.path)) continue;
@@ -243,10 +228,10 @@ pub const LSM = struct {
             }
         }
 
-        // 3. Sort: key ASC, seq DESC
+        // 3. Sort: key ASC, seq DESC.
         std.sort.pdq(MergeEntry, all_entries.items, {}, mergeEntryCmp);
 
-        // 4. Deduplicate: first (most-recent) entry per key; skip tombstones
+        // 4. Deduplicate: first (most-recent) entry per key; skip tombstones.
         var rows: std.ArrayListUnmanaged(Row) = .empty;
         errdefer {
             for (rows.items) |*r| r.deinit(alloc);
@@ -268,6 +253,34 @@ pub const LSM = struct {
             try rows.append(alloc, Row{ .key = key_copy, .seq = e.seq, .values = vals_copy });
         }
         return rows.toOwnedSlice(alloc);
+    }
+
+    /// Collect matching memtable entries into `out` (sorted key ASC, seq DESC).
+    fn scanCollectMemtable(self: *const LSM, range: KeyRange, at_seq: Seq, out: *std.ArrayList(MergeEntry), alloc: std.mem.Allocator) !void {
+        for (self.memtable.entries.items) |entry| {
+            if (entry.seq > at_seq) continue;
+            if (range.end) |e| {
+                if (std.mem.order(u8, entry.key, e) != .lt) break;
+            }
+            if (!range.contains(entry.key)) continue;
+            const key_copy = try alloc.dupe(u8, entry.key);
+            errdefer alloc.free(key_copy);
+            var vals: ?[]ColumnValue = null;
+            if (!entry.is_tombstone) {
+                if (entry.values) |vs| {
+                    const vc = try alloc.alloc(ColumnValue, vs.len);
+                    errdefer alloc.free(vc);
+                    for (vs, 0..) |v, i| vc[i] = try v.dupe(alloc);
+                    vals = vc;
+                }
+            }
+            try out.append(alloc, .{
+                .key = key_copy,
+                .seq = entry.seq,
+                .values = vals,
+                .is_tombstone = entry.is_tombstone,
+            });
+        }
     }
 
     fn collectRangeFromFile(self: *LSM, meta: *const SSTableMeta, range: KeyRange, at_seq: Seq, out: *std.ArrayList(MergeEntry), alloc: std.mem.Allocator) !void {
@@ -361,7 +374,7 @@ pub const LSM = struct {
         self.levels[0].files.clearRetainingCapacity();
     }
 
-    fn compactLevelN(self: *LSM, level: usize) !void {
+    fn compactLevelN(self: *LSM, level: u32) !void {
         if (level >= 2) return;
         var all_entries: std.ArrayList(MergeEntry) = .empty;
         defer {
@@ -394,6 +407,7 @@ pub const LSM = struct {
 
     fn compactL2toL3(self: *LSM) !void {
         const store = self.object_store orelse return;
+        assert(self.levels[2].files.items.len >= L2_TIERING_TRIGGER);
 
         var all_entries: std.ArrayList(MergeEntry) = .empty;
         defer {
@@ -410,53 +424,16 @@ pub const LSM = struct {
         for (self.levels[2].files.items) |*meta| {
             try self.collectFromFile(meta, &all_entries);
         }
-
         std.sort.pdq(MergeEntry, all_entries.items, {}, mergeEntryCmp);
 
         if (all_entries.items.len > 0) {
-            // Write merged SSTable locally, then upload
             const path = try self.nextFilePath(3);
             defer self.alloc.free(path);
-
-            var writer = try SSTableWriter.create(path, self.schema, 3, self.alloc);
-            defer writer.deinit();
-
-            var last_key: ?[]const u8 = null;
-            for (all_entries.items) |e| {
-                if (last_key) |lk| {
-                    if (std.mem.eql(u8, lk, e.key)) continue;
-                }
-                last_key = e.key;
-                try writer.append(e.key, e.seq, e.values);
-            }
-            try writer.finish();
-
-            // Read meta
+            try self.compactL2toL3WriteFile(path, all_entries.items);
             var reader = try SSTableReader.open(path, self.schema, self.alloc);
             defer reader.deinit();
             var m = try reader.meta(path, self.alloc);
-
-            // Upload to object store
-            const file_id = self.next_file_id - 1;
-            const remote_key = try std.fmt.allocPrint(self.alloc, "sst/L3_{d:010}.sst", .{file_id});
-            errdefer self.alloc.free(remote_key);
-
-            const file_data = try readFileAlloc(path, self.alloc);
-            defer self.alloc.free(file_data);
-
-            store.put(remote_key, file_data) catch {
-                // Upload failed; keep local copy, no remote_key
-                self.alloc.free(remote_key);
-                try self.levels[3].files.append(self.alloc, m);
-                for (self.levels[2].files.items) |*meta| {
-                    deleteFile(meta.path);
-                    meta.deinit(self.alloc);
-                }
-                self.levels[2].files.clearRetainingCapacity();
-                return;
-            };
-
-            m.remote_key = remote_key;
+            try self.compactL2toL3Upload(store, path, &m);
             try self.levels[3].files.append(self.alloc, m);
         }
 
@@ -465,6 +442,39 @@ pub const LSM = struct {
             meta.deinit(self.alloc);
         }
         self.levels[2].files.clearRetainingCapacity();
+    }
+
+    fn compactL2toL3WriteFile(self: *LSM, path: []const u8, entries: []const MergeEntry) !void {
+        var writer = try SSTableWriter.create(path, self.schema, 3, self.alloc);
+        defer writer.deinit();
+        var last_key: ?[]const u8 = null;
+        for (entries) |e| {
+            if (last_key) |lk| {
+                if (std.mem.eql(u8, lk, e.key)) continue;
+            }
+            last_key = e.key;
+            try writer.append(e.key, e.seq, e.values);
+        }
+        try writer.finish();
+    }
+
+    /// Upload the merged SSTable to object store. On failure, keeps the local file
+    /// with no remote key so future reads serve from disk until the next compaction.
+    fn compactL2toL3Upload(self: *LSM, store: ObjectStore, path: []const u8, m: *SSTableMeta) !void {
+        const file_id = self.next_file_id - 1;
+        const remote_key = try std.fmt.allocPrint(self.alloc, "sst/L3_{d:010}.sst", .{file_id});
+        errdefer self.alloc.free(remote_key);
+
+        const file_data = try readFileAlloc(path, self.alloc);
+        defer self.alloc.free(file_data);
+
+        store.put(remote_key, file_data) catch {
+            // Upload failed; keep local file with no remote key. Future compaction retries.
+            self.alloc.free(remote_key);
+            return;
+        };
+
+        m.remote_key = remote_key;
     }
 
     fn collectFromFile(self: *LSM, meta: *const SSTableMeta, out: *std.ArrayList(MergeEntry)) !void {
@@ -493,7 +503,7 @@ pub const LSM = struct {
         }
     }
 
-    fn writeMergedEntries(self: *LSM, entries: []const MergeEntry, target_level: usize) !void {
+    fn writeMergedEntries(self: *LSM, entries: []const MergeEntry, target_level: u32) !void {
         const path = try self.nextFilePath(target_level);
         defer self.alloc.free(path);
 
@@ -592,7 +602,7 @@ pub const LSM = struct {
         }
     }
 
-    fn nextFilePath(self: *LSM, level: usize) ![]const u8 {
+    fn nextFilePath(self: *LSM, level: u32) ![]const u8 {
         const id = self.next_file_id;
         self.next_file_id += 1;
         return std.fmt.allocPrint(self.alloc, "{s}/L{d}_{d:010}.sst", .{ self.dir, level, id });

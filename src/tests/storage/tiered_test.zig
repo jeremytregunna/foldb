@@ -104,7 +104,7 @@ test "tiered_write_and_read" {
     var obj_store = MemoryObjectStore.init(alloc);
     defer obj_store.deinit();
 
-    lsm.withObjectStore(obj_store.objectStore(), cache_dir);
+    try lsm.withObjectStore(obj_store.objectStore(), cache_dir);
 
     // Insert enough rows to trigger L0→L1→L2→L3 compaction
     // L0 triggers at 4 files; each flush = 1 file

@@ -1,5 +1,7 @@
 /// PAX block: column-major layout for SSTable storage.
 const std = @import("std");
+
+const assert = std.debug.assert;
 const types = @import("types.zig");
 const codec_mod = @import("codec.zig");
 const crc_mod = @import("crc.zig");
@@ -126,83 +128,25 @@ pub const BlockWriter = struct {
 
     /// Serialize to a heap-allocated buffer (caller owns result).
     pub fn flush(self: *BlockWriter, alloc: std.mem.Allocator) ![]u8 {
+        assert(self.keys.items.len > 0);
+        assert(self.keys.items.len <= std.math.maxInt(u32));
+        assert(self.schema.columns.len <= std.math.maxInt(u16));
         const row_count: u32 = @intCast(self.keys.items.len);
         const col_count: u16 = @intCast(self.schema.columns.len);
 
-        // Build key_offsets section (row_count × 4 bytes)
-        var key_offsets_buf: std.ArrayList(u8) = .empty;
-        defer key_offsets_buf.deinit(alloc);
-        // Build key_data section
-        var key_data_buf: std.ArrayList(u8) = .empty;
-        defer key_data_buf.deinit(alloc);
-        // Build seq section (row_count × 8 bytes)
-        var seq_buf: std.ArrayList(u8) = .empty;
-        defer seq_buf.deinit(alloc);
-
-        for (self.keys.items, self.seqs.items) |k, s| {
-            var off_buf: [4]u8 = undefined;
-            std.mem.writeInt(u32, &off_buf, @intCast(key_data_buf.items.len), .little);
-            try key_offsets_buf.appendSlice(alloc, &off_buf);
-            try key_data_buf.appendSlice(alloc, k);
-            var seq_b: [8]u8 = undefined;
-            std.mem.writeInt(u64, &seq_b, s, .little);
-            try seq_buf.appendSlice(alloc, &seq_b);
-        }
-
-        // key_section = key_offsets + key_data + seqs
-        var key_section: std.ArrayList(u8) = .empty;
+        var key_section = try flushBuildKeySection(self, row_count, alloc);
         defer key_section.deinit(alloc);
-        try key_section.appendSlice(alloc, key_offsets_buf.items);
-        try key_section.appendSlice(alloc, key_data_buf.items);
-        try key_section.appendSlice(alloc, seq_buf.items);
 
-        // Build column data section
-        var col_section: std.ArrayList(u8) = .empty;
+        var col_section = try flushBuildColSection(self, alloc);
         defer col_section.deinit(alloc);
 
-        for (self.schema.columns, 0..) |col_schema, ci| {
-            const chosen = codec_mod.chooseCodec(col_schema.col_type, self.columns[ci].items);
-            var encoded: std.ArrayList(u8) = .empty;
-            defer encoded.deinit(alloc);
-            try codec_mod.encode(chosen, col_schema.col_type, self.columns[ci].items, &encoded, alloc);
-            try col_section.append(alloc, @intFromEnum(chosen));
-            var sz_buf: [4]u8 = undefined;
-            std.mem.writeInt(u32, &sz_buf, @intCast(encoded.items.len), .little);
-            try col_section.appendSlice(alloc, &sz_buf);
-            try col_section.appendSlice(alloc, encoded.items);
-        }
-
-        // Build null bitmap (column-major, 1 bit per cell)
-        var null_section: std.ArrayList(u8) = .empty;
+        var null_section = try flushBuildNullSection(self, row_count, alloc);
         defer null_section.deinit(alloc);
 
-        var has_nulls = false;
-        outer: for (self.null_bits) |nb| {
-            for (nb.items) |b| {
-                if (b) {
-                    has_nulls = true;
-                    break :outer;
-                }
-            }
-        }
-        if (has_nulls) {
-            for (self.null_bits) |nb| {
-                const byte_count = (row_count + 7) / 8;
-                var i: u32 = 0;
-                while (i < byte_count) : (i += 1) {
-                    var b: u8 = 0;
-                    for (0..8) |bit| {
-                        const row_idx = i * 8 + @as(u32, @intCast(bit));
-                        if (row_idx < row_count and nb.items[row_idx]) {
-                            b |= @as(u8, 1) << @intCast(bit);
-                        }
-                    }
-                    try null_section.append(alloc, b);
-                }
-            }
-        }
-
-        // Compute offsets
+        // Compute section offsets and assemble final block.
+        assert(key_section.items.len <= std.math.maxInt(u32));
+        assert(col_section.items.len <= std.math.maxInt(u32));
+        assert(null_section.items.len <= std.math.maxInt(u32));
         const key_section_offset: u32 = HEADER_SIZE;
         const col_section_offset: u32 = key_section_offset + @as(u32, @intCast(key_section.items.len));
         const null_bmp_offset: u32 = col_section_offset + @as(u32, @intCast(col_section.items.len));
@@ -213,7 +157,6 @@ pub const BlockWriter = struct {
         defer out.deinit(alloc);
         try out.ensureTotalCapacity(alloc, total_size);
 
-        // Header
         const hdr = BlockHeader{
             .magic = MAGIC,
             .row_count = row_count,
@@ -230,17 +173,87 @@ pub const BlockWriter = struct {
         try out.appendSlice(alloc, col_section.items);
         try out.appendSlice(alloc, null_section.items);
 
-        // Footer
         const checksum = crc_mod.crc32c(out.items);
-        const footer = BlockFooter{
-            .block_size = total_size,
-            .crc = checksum,
-        };
+        const footer = BlockFooter{ .block_size = total_size, .crc = checksum };
         try out.appendSlice(alloc, std.mem.asBytes(&footer));
 
         return out.toOwnedSlice(alloc);
     }
 };
+
+/// Build the key section: key_offsets (row_count×4) + key_data + seqs (row_count×8).
+fn flushBuildKeySection(w: *const BlockWriter, row_count: u32, alloc: std.mem.Allocator) !std.ArrayList(u8) {
+    assert(row_count == w.keys.items.len);
+    var key_offsets_buf: std.ArrayList(u8) = .empty;
+    defer key_offsets_buf.deinit(alloc);
+    var key_data_buf: std.ArrayList(u8) = .empty;
+    defer key_data_buf.deinit(alloc);
+    var seq_buf: std.ArrayList(u8) = .empty;
+    defer seq_buf.deinit(alloc);
+
+    for (w.keys.items, w.seqs.items) |k, s| {
+        assert(key_data_buf.items.len <= std.math.maxInt(u32));
+        var off_buf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &off_buf, @intCast(key_data_buf.items.len), .little);
+        try key_offsets_buf.appendSlice(alloc, &off_buf);
+        try key_data_buf.appendSlice(alloc, k);
+        var seq_b: [8]u8 = undefined;
+        std.mem.writeInt(u64, &seq_b, s, .little);
+        try seq_buf.appendSlice(alloc, &seq_b);
+    }
+
+    var section: std.ArrayList(u8) = .empty;
+    errdefer section.deinit(alloc);
+    try section.appendSlice(alloc, key_offsets_buf.items);
+    try section.appendSlice(alloc, key_data_buf.items);
+    try section.appendSlice(alloc, seq_buf.items);
+    return section;
+}
+
+/// Build the column data section: [codec_tag(1) + size(4) + encoded_data] per column.
+fn flushBuildColSection(w: *const BlockWriter, alloc: std.mem.Allocator) !std.ArrayList(u8) {
+    var section: std.ArrayList(u8) = .empty;
+    errdefer section.deinit(alloc);
+    for (w.schema.columns, 0..) |col_schema, ci| {
+        const chosen = codec_mod.chooseCodec(col_schema.col_type, w.columns[ci].items);
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(alloc);
+        try codec_mod.encode(chosen, col_schema.col_type, w.columns[ci].items, &encoded, alloc);
+        assert(encoded.items.len <= std.math.maxInt(u32));
+        try section.append(alloc, @intFromEnum(chosen));
+        var sz_buf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &sz_buf, @intCast(encoded.items.len), .little);
+        try section.appendSlice(alloc, &sz_buf);
+        try section.appendSlice(alloc, encoded.items);
+    }
+    return section;
+}
+
+/// Build the null bitmap section (column-major, 1 bit per cell). Empty if no nulls.
+fn flushBuildNullSection(w: *const BlockWriter, row_count: u32, alloc: std.mem.Allocator) !std.ArrayList(u8) {
+    var section: std.ArrayList(u8) = .empty;
+    errdefer section.deinit(alloc);
+    var has_nulls = false;
+    outer: for (w.null_bits) |nb| {
+        for (nb.items) |b| { if (b) { has_nulls = true; break :outer; } }
+    }
+    if (!has_nulls) return section;
+    for (w.null_bits) |nb| {
+        const byte_count = (row_count + 7) / 8;
+        var i: u32 = 0;
+        while (i < byte_count) : (i += 1) {
+            var b: u8 = 0;
+            for (0..8) |bit| {
+                const row_idx = i * 8 + @as(u32, @intCast(bit));
+                if (row_idx < row_count and nb.items[row_idx]) {
+                    b |= @as(u8, 1) << @intCast(bit);
+                }
+            }
+            try section.append(alloc, b);
+        }
+    }
+    return section;
+}
 
 // --- BlockReader ---
 

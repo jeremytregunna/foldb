@@ -3,6 +3,8 @@ const std = @import("std");
 const types = @import("types.zig");
 const sstable_mod = @import("sstable.zig");
 
+const assert = std.debug.assert;
+
 const TableSchema = types.TableSchema;
 const ColumnValue = types.ColumnValue;
 const Seq = types.Seq;
@@ -10,7 +12,11 @@ const Row = types.Row;
 const KeyRange = types.KeyRange;
 const SSTableWriter = sstable_mod.SSTableWriter;
 
-pub const MEMTABLE_SIZE_THRESHOLD: usize = 64 * 1024 * 1024; // 64 MiB
+pub const MEMTABLE_SIZE_THRESHOLD: u64 = 64 * 1024 * 1024; // 64 MiB
+
+comptime {
+    assert(MEMTABLE_SIZE_THRESHOLD > 0);
+}
 
 pub const MemEntry = struct {
     key: []const u8,
@@ -22,7 +28,7 @@ pub const MemEntry = struct {
 pub const Memtable = struct {
     schema: TableSchema,
     entries: std.ArrayList(MemEntry),
-    size_bytes: usize,
+    size_bytes: u64,
 
     pub fn init(schema: TableSchema, alloc: std.mem.Allocator) Memtable {
         _ = alloc;
@@ -45,6 +51,8 @@ pub const Memtable = struct {
     }
 
     pub fn put(self: *Memtable, key: []const u8, seq: Seq, values: ?[]const ColumnValue, alloc: std.mem.Allocator) !void {
+        assert(key.len > 0);
+        assert(seq > 0);
         const key_copy = try alloc.dupe(u8, key);
         errdefer alloc.free(key_copy);
 
