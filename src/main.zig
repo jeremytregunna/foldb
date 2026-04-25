@@ -241,11 +241,6 @@ fn cmdServe(io: std.Io, alloc: std.mem.Allocator, it: *std.process.Args.Iterator
         }
     }
 
-    if (config_path == null and storage_dir_override == null) {
-        std.log.info(help_serve, .{});
-        std.process.exit(1);
-    }
-
     var parsed: ?config_mod.ParsedConfig = null;
     defer if (parsed) |*p| p.deinit();
 
