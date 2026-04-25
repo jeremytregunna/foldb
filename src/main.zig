@@ -80,17 +80,17 @@ pub fn main(init: std.process.Init) !void {
     _ = it.skip(); // skip argv[0]
 
     const subcommand = it.next() orelse {
-        std.debug.print(help_root, .{version});
+        std.log.info(help_root, .{version});
         return;
     };
 
     if (isHelp(subcommand) or std.mem.eql(u8, subcommand, "help")) {
-        std.debug.print(help_root, .{version});
+        std.log.info(help_root, .{version});
         return;
     }
 
     if (isVersion(subcommand)) {
-        std.debug.print("{s}\n", .{version});
+        std.log.info("{s}", .{version});
         return;
     }
 
@@ -115,8 +115,8 @@ pub fn main(init: std.process.Init) !void {
         return cmdServe(io, alloc, &it2);
     }
 
-    std.debug.print("error: unknown command '{s}'\n\n", .{subcommand});
-    std.debug.print(help_root, .{version});
+    std.log.err("unknown command '{s}'", .{subcommand});
+    std.log.info(help_root, .{version});
     std.process.exit(1);
 }
 
@@ -127,19 +127,19 @@ pub fn main(init: std.process.Init) !void {
 fn cmdGenSecret(it: *std.process.Args.Iterator) !void {
     while (it.next()) |arg| {
         if (isHelp(arg)) {
-            std.debug.print(help_gen_secret, .{});
+            std.log.info(help_gen_secret, .{});
             return;
         }
-        std.debug.print("error: unknown argument '{s}'\n\n", .{arg});
-        std.debug.print(help_gen_secret, .{});
+        std.log.err("unknown argument '{s}'", .{arg});
+        std.log.info(help_gen_secret, .{});
         std.process.exit(1);
     }
     var secret: [32]u8 = undefined;
     _ = std.os.linux.getrandom(&secret, secret.len, 0);
     var encoded_buf: [std.base64.standard.Encoder.calcSize(32)]u8 = undefined;
     const encoded = std.base64.standard.Encoder.encode(&encoded_buf, &secret);
-    std.debug.print(
-        "Add this to your config:\n  \"auth_secret\": \"{s}\"\n\nKeep auth_secret secure -- anyone with it can derive valid tokens.\n",
+    std.log.info(
+        "Add this to your config:\n  \"auth_secret\": \"{s}\"\n\nKeep auth_secret secure -- anyone with it can derive valid tokens.",
         .{encoded},
     );
 }
@@ -155,7 +155,7 @@ fn cmdAddUser(alloc: std.mem.Allocator, it: *std.process.Args.Iterator) !void {
 
     while (it.next()) |arg| {
         if (isHelp(arg)) {
-            std.debug.print(help_add_user, .{});
+            std.log.info(help_add_user, .{});
             return;
         } else if (std.mem.eql(u8, arg, "--config")) {
             config_path = it.next();
@@ -164,37 +164,36 @@ fn cmdAddUser(alloc: std.mem.Allocator, it: *std.process.Args.Iterator) !void {
         } else if (std.mem.eql(u8, arg, "--password")) {
             password = it.next();
         } else {
-            std.debug.print("error: unknown argument '{s}'\n\n", .{arg});
-            std.debug.print(help_add_user, .{});
+            std.log.err("unknown argument '{s}'", .{arg});
+            std.log.info(help_add_user, .{});
             std.process.exit(1);
         }
     }
 
     const cfg_path = config_path orelse {
-        std.debug.print(help_add_user, .{});
+        std.log.info(help_add_user, .{});
         std.process.exit(1);
     };
     const user_name = name orelse {
-        std.debug.print("error: --name is required\n\n", .{});
-        std.debug.print(help_add_user, .{});
+        std.log.err("--name is required", .{});
+        std.log.info(help_add_user, .{});
         std.process.exit(1);
     };
     const user_pw = password orelse {
-        std.debug.print("error: --password is required\n\n", .{});
-        std.debug.print(help_add_user, .{});
+        std.log.err("--password is required", .{});
+        std.log.info(help_add_user, .{});
         std.process.exit(1);
     };
 
     var pc = config_mod.from_file(cfg_path, alloc) catch |e| {
-        std.debug.print("error: could not read config: {s}\n", .{@errorName(e)});
+        std.log.err("could not read config: {s}", .{@errorName(e)});
         return e;
     };
     defer pc.deinit();
 
     if (pc.value.auth_secret.len == 0) {
-        std.debug.print(
-            "error: auth_secret is not set in config.\n" ++
-                "Run `foldb gen-secret` to generate one.\n",
+        std.log.err(
+            "auth_secret is not set in config. Run `foldb gen-secret` to generate one.",
             .{},
         );
         return error.NoAuthSecret;
@@ -210,8 +209,8 @@ fn cmdAddUser(alloc: std.mem.Allocator, it: *std.process.Args.Iterator) !void {
     var token_buf: [std.base64.standard.Encoder.calcSize(32)]u8 = undefined;
     const token = std.base64.standard.Encoder.encode(&token_buf, &mac);
 
-    std.debug.print(
-        "Token for '{s}': {s}\n\nAdd this entry to your config's \"users\" array:\n  {{\"name\": \"{s}\", \"token\": \"{s}\"}}\n\nGive the token to the client. It will not be shown again.\n",
+    std.log.info(
+        "Token for '{s}': {s}\n\nAdd this entry to your config's \"users\" array:\n  {{\"name\": \"{s}\", \"token\": \"{s}\"}}\n\nGive the token to the client. It will not be shown again.",
         .{ user_name, token, user_name, token },
     );
 }
@@ -227,7 +226,7 @@ fn cmdServe(io: std.Io, alloc: std.mem.Allocator, it: *std.process.Args.Iterator
 
     while (it.next()) |arg| {
         if (isHelp(arg)) {
-            std.debug.print(help_serve, .{});
+            std.log.info(help_serve, .{});
             return;
         } else if (std.mem.eql(u8, arg, "--config")) {
             if (it.next()) |val| config_path = val;
@@ -236,14 +235,14 @@ fn cmdServe(io: std.Io, alloc: std.mem.Allocator, it: *std.process.Args.Iterator
         } else if (std.mem.eql(u8, arg, "--port")) {
             if (it.next()) |val| port_override = try std.fmt.parseInt(u16, val, 10);
         } else {
-            std.debug.print("error: unknown argument '{s}'\n\n", .{arg});
-            std.debug.print(help_serve, .{});
+            std.log.err("unknown argument '{s}'", .{arg});
+            std.log.info(help_serve, .{});
             std.process.exit(1);
         }
     }
 
     if (config_path == null and storage_dir_override == null) {
-        std.debug.print(help_serve, .{});
+        std.log.info(help_serve, .{});
         std.process.exit(1);
     }
 
@@ -265,17 +264,17 @@ fn cmdServe(io: std.Io, alloc: std.mem.Allocator, it: *std.process.Args.Iterator
         @as(u8, if (cfg.s3_secret_key.len > 0) 1 else 0);
     const s3_enabled = s3_fields_set == 4;
     if (s3_fields_set > 0 and s3_fields_set < 4) {
-        std.debug.print("error: S3 is partially configured — set all of s3_endpoint, s3_bucket, s3_access_key, s3_secret_key or none of them.\n", .{});
+        std.log.err("S3 is partially configured — set all of s3_endpoint, s3_bucket, s3_access_key, s3_secret_key or none of them.", .{});
         return error.InvalidConfig;
     }
     if (s3_enabled and cfg.s3_region.len == 0) {
-        std.debug.print("error: s3_region is required when S3 is configured.\n", .{});
+        std.log.err("s3_region is required when S3 is configured.", .{});
         return error.InvalidConfig;
     }
 
     const s3ep: config_mod.ParsedS3Endpoint = if (s3_enabled)
         config_mod.parse_s3_endpoint(cfg.s3_endpoint) catch {
-            std.debug.print("error: could not parse s3_endpoint — expected http[s]://host[:port]\n", .{});
+            std.log.err("could not parse s3_endpoint — expected http[s]://host[:port]", .{});
             return error.InvalidConfig;
         }
     else
@@ -292,7 +291,7 @@ fn cmdServe(io: std.Io, alloc: std.mem.Allocator, it: *std.process.Args.Iterator
         next_id += 1;
     }
 
-    std.debug.print("foldb starting: storage={s} port={d} node_id={d} partitions={d} peers={d} auth={s} s3={s}\n", .{
+    std.log.info("foldb starting: storage={s} port={d} node_id={d} partitions={d} peers={d} auth={s} s3={s}", .{
         storage_dir,
         port,
         cfg.node_id,
@@ -303,9 +302,9 @@ fn cmdServe(io: std.Io, alloc: std.mem.Allocator, it: *std.process.Args.Iterator
     });
 
     if (!s3_enabled) {
-        std.debug.print("warning: S3 is not configured. Snapshots and log truncation are disabled. " ++
+        std.log.warn("S3 is not configured. Snapshots and log truncation are disabled. " ++
             "Recovery requires full log replay from the beginning. " ++
-            "See docs/internal/config.md for S3 setup.\n", .{});
+            "See docs/internal/config.md for S3 setup.", .{});
     }
 
     const gw = try gateway_mod.Gateway.init(storage_dir, alloc, .{
