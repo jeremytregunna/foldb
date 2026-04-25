@@ -215,6 +215,13 @@ pub const Conn = struct {
         // protocol error is detected. Each iteration reads one complete frame from
         // the wire, so progress is guaranteed — we never spin without I/O.
         while (true) {
+            // Drain any committed partition log entries before handling each
+            // request. On the leader this is a no-op (entries are applied inline
+            // in execute() after each commit). On followers this brings schema,
+            // registry, and storage up to date before serving reads. Running apply
+            // here on the I/O thread means schema/registry are never mutated from
+            // a background thread concurrently with connection reads — no lock needed.
+            self.gw.applyNewEntries() catch {};
             const hdr = frame.readHeader(self.fd) catch |e| switch (e) {
                 error.ConnectionClosed => return,
                 else => return e,
@@ -480,6 +487,9 @@ pub const Conn = struct {
             if (recv_ni < 0) {
                 const errno = std.os.linux.errno(recv_n);
                 if (errno == .AGAIN) {
+                    // Apply committed log entries before sleeping so CDC events
+                    // produced by new writes become visible on this iteration.
+                    self.gw.applyNewEntries() catch {};
                     var ts = std.os.linux.timespec{ .sec = 0, .nsec = @intCast(DRAIN_POLL_SLEEP_NS) };
                     _ = std.os.linux.nanosleep(&ts, null);
                     continue;

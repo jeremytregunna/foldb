@@ -85,13 +85,6 @@ pub const Gateway = struct {
     recon_strategy: ReconStrategy,
     alloc: std.mem.Allocator,
     metrics: observability_mod.GatewayMetrics = .{},
-    /// Background executor thread — applies committed partition log entries to storage
-    /// on follower nodes. On the leader, runValidated() in execute() is the apply path.
-    /// TODO: the leader↔follower transition window is a known gap — a briefly demoted
-    /// leader may have an in-flight runValidated concurrent with the apply loop starting.
-    /// Needs a proper handoff mechanism when leadership changes are handled end-to-end.
-    apply_thread: ?std.Thread = null,
-    apply_shutdown: std.atomic.Value(bool) = .init(false),
     /// Heap-allocated S3 store; non-null when S3 is configured. Freed in deinit.
     s3_store: ?*storage_mod.S3ObjectStore = null,
     /// Per-partition context structs for snapshot log writers. Freed in deinit.
@@ -294,15 +287,10 @@ pub const Gateway = struct {
         gw.client_seq = 0;
         gw.partition_count = opts.partition_count;
         gw.recon_strategy = opts.recon_strategy;
-        gw.apply_shutdown = .init(false);
-        gw.apply_thread = null;
-
         return gw;
     }
 
     pub fn deinit(self: *Gateway) void {
-        self.apply_shutdown.store(true, .release);
-        if (self.apply_thread) |t| t.join();
         self.cdc.deinit();
         self.sequencer.deinit();
         self.registry.deinit();
@@ -935,16 +923,6 @@ pub const Gateway = struct {
         return self.schema.getTableById(id) != null;
     }
 };
-
-// Drives applyNewEntries() in a loop until apply_shutdown is set.
-// Schema_change entries are applied to the registry before sql_exec advances
-// committed_seq, so txn_intent entries that follow always see current schema.
-fn applyThreadFn(gw: *Gateway) void {
-    while (!gw.apply_shutdown.load(.acquire)) {
-        gw.applyNewEntries() catch |err| std.log.err("applyNewEntries failed in apply thread: {}", .{err});
-        std.Thread.yield() catch {}; // EINTR is benign; the loop continues regardless.
-    }
-}
 
 fn decodeParams(
     params: []const ColumnValue,

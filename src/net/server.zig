@@ -22,12 +22,14 @@ const LISTEN_BACKLOG: u32 = 128;
 /// Maximum number of concurrently tracked client connections.
 const MAX_CONNECTIONS: u32 = 4096;
 
-/// Follower apply-loop poll interval in nanoseconds (5 ms).
-const APPLY_LOOP_SLEEP_NS: u64 = 5_000_000;
+/// Sleep between accept attempts when no connection is pending (nanoseconds).
+/// Keeps the accept loop from busy-spinning and provides a regular window for
+/// followers to drain committed log entries with no client actively connected.
+const ACCEPT_IDLE_NS: u64 = 5_000_000; // 5 ms
 
 comptime {
     assert(MAX_CONNECTIONS > 0);
-    assert(APPLY_LOOP_SLEEP_NS > 0);
+    assert(ACCEPT_IDLE_NS > 0);
     assert(LISTEN_BACKLOG > 0);
 }
 
@@ -190,20 +192,6 @@ fn handleConn(
     try conn_mod.Conn.run(client_fd, gw, users, alloc);
 }
 
-/// Follower apply loop: continuously applies newly committed partition log entries to
-/// local storage when this node is not the leader. On the leader, execute() drives
-/// apply inline via runValidated(). On followers, connections return NotLeader so this
-/// is the only apply path.
-fn applyLoop(gw: *gateway_mod.Gateway) void {
-    const sleep_ts = std.os.linux.timespec{ .sec = 0, .nsec = @intCast(APPLY_LOOP_SLEEP_NS) };
-    while (!gw.apply_shutdown.load(.acquire)) {
-        if (!gw.sequencer.isLeader()) {
-            gw.applyNewEntries() catch {};
-        }
-        _ = std.os.linux.nanosleep(&sleep_ts, null);
-    }
-}
-
 /// Main server loop. Accepts connections and spawns a concurrent task per connection.
 /// Returns cleanly when SIGINT is received so deferred cleanup (flush, deinit) runs.
 pub fn serve(
@@ -217,8 +205,6 @@ pub fn serve(
 
     installSignalHandlers();
 
-    gw.apply_thread = try std.Thread.spawn(.{}, applyLoop, .{gw});
-
     const server_fd = try bindListen(port);
     defer _ = std.os.linux.close(@intCast(server_fd));
 
@@ -229,6 +215,11 @@ pub fn serve(
         const client_fd = acceptOne(server_fd) catch {
             // accept4 returns EINTR when interrupted by a signal; check for shutdown.
             if (shutdown_requested.load(.acquire)) break;
+            // No pending connection — drain any committed log entries on this thread
+            // so followers stay current, then sleep before trying again.
+            gw.applyNewEntries() catch {};
+            const ts = std.os.linux.timespec{ .sec = 0, .nsec = ACCEPT_IDLE_NS };
+            _ = std.os.linux.nanosleep(&ts, null);
             continue;
         };
         group.async(io, handleConn, .{ io, client_fd, gw, users, alloc, &registry });
