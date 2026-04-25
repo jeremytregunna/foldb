@@ -351,7 +351,29 @@ pub const Gateway = struct {
     pub fn register(self: *Gateway, sql: []const u8) !RegisterResult {
         self.error_detail_len = 0;
         // Register locally to compute the hash (idempotent — safe to call before commit).
-        const hash = try self.registry.register(sql);
+        const hash = self.registry.register(sql) catch |e| {
+            // On parse error, re-parse directly to surface the offending token.
+            if (e == error.UnexpectedToken or e == error.UnsupportedSyntax) {
+                var arena = std.heap.ArenaAllocator.init(self.alloc);
+                defer arena.deinit();
+                var p = sql_mod.parser.Parser.init(sql, arena.allocator());
+                _ = p.parseQuery() catch {};
+                if (p.err_msg) |msg| {
+                    const pos = p.err_pos;
+                    if (pos < sql.len) {
+                        var end = pos;
+                        while (end < sql.len and end - pos < 24) : (end += 1) {
+                            const c = sql[end];
+                            if (c == ' ' or c == '\t' or c == '\n' or c == ';') break;
+                        }
+                        self.setDetail("{s} '{s}'", .{ msg, sql[pos..end] });
+                    } else {
+                        self.setDetail("{s}", .{msg});
+                    }
+                }
+            }
+            return e;
+        };
         self.metrics.queries_registered.inc();
         // Replicate via Raft — all nodes will apply this schema_change from the
         // committed Raft entry and register the query in their local registries.
