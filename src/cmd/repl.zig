@@ -223,7 +223,8 @@ fn classify(sql: []const u8) SqlKind {
     if (end == 0) return .unknown;
     const kw = s[0..end];
     if (std.ascii.eqlIgnoreCase(kw, "select") or
-        std.ascii.eqlIgnoreCase(kw, "with")) return .select;
+        std.ascii.eqlIgnoreCase(kw, "with") or
+        std.ascii.eqlIgnoreCase(kw, "describe")) return .select;
     if (std.ascii.eqlIgnoreCase(kw, "insert") or
         std.ascii.eqlIgnoreCase(kw, "update") or
         std.ascii.eqlIgnoreCase(kw, "delete") or
@@ -446,6 +447,17 @@ pub fn main(init: std.process.Init) !void {
         }
 
         if (trimmed.len == 0) continue;
+
+        if (std.mem.startsWith(u8, trimmed, "\\d ")) {
+            const tname = std.mem.trim(u8, trimmed[3..], " \t");
+            if (tname.len > 0) {
+                const sql = try std.fmt.allocPrint(alloc, "describe {s};", .{tname});
+                defer alloc.free(sql);
+                historyPush(&history, sql, alloc) catch {};
+                dispatch(&c, sql, &out) catch |e| try out.print("error: {}\n", .{e});
+                continue;
+            }
+        }
 
         if (buf.items.len > 0) try buf.append(alloc, ' ');
         try buf.appendSlice(alloc, trimmed);

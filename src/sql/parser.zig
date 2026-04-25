@@ -131,10 +131,14 @@ pub const Parser = struct {
             .kw_transaction => .{ .transaction = try self.parseTransaction() },
             else => {
                 const t = try self.advance();
-                // Reject ISOLATION LEVEL at parse time
                 if (t.kind == .ident and std.ascii.eqlIgnoreCase(t.text(self.src), "isolation")) {
                     self.err_msg = "ISOLATION LEVEL is not supported; foldb enforces strict serializable always";
                     return error.UnsupportedSyntax;
+                }
+                if (t.kind == .ident and std.ascii.eqlIgnoreCase(t.text(self.src), "describe")) {
+                    const name = try self.expectIdent();
+                    assert(name.len > 0);
+                    return .{ .describe_table = .{ .name = name } };
                 }
                 self.err_pos = t.span.start;
                 self.err_msg = "unexpected statement";

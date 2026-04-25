@@ -419,6 +419,10 @@ pub const TransactionBlock = struct {
 
 // ─── Top-level ───────────────────────────────────────────────────────────────
 
+pub const DescribeTableStmt = struct {
+    name: []const u8,
+};
+
 pub const Stmt = union(enum) {
     select: SelectStmt,
     insert: InsertStmt,
@@ -429,6 +433,7 @@ pub const Stmt = union(enum) {
     create_index: CreateIndexStmt,
     alter_table: AlterTableStmt,
     drop_table: DropTableStmt,
+    describe_table: DescribeTableStmt,
     transaction: TransactionBlock,
 };
 

@@ -397,6 +397,7 @@ pub const SqlExecutor = struct {
             .delete => |del| try self.executeDelete(del, ctx, mutations, returning_rows),
             .assert => |a| try self.executeAssert(a, ctx),
             .merge => |m| try self.executeMerge(m, ctx, mutations),
+            .describe_table => {},
         }
     }
 

@@ -338,7 +338,7 @@ pub const Gateway = struct {
         const rq = self.registry.lookup(hash) orelse return false;
         for (rq.plan.stmts) |stmt| {
             switch (stmt) {
-                .select => {},
+                .select, .describe_table => {},
                 else => return false,
             }
         }
@@ -531,6 +531,10 @@ pub const Gateway = struct {
     ) !ResultSet {
         const rq = self.registry.lookup(hash) orelse return error.QueryNotFound;
 
+        if (rq.plan.stmts.len > 0 and rq.plan.stmts[0] == .describe_table) {
+            return self.buildDescribeResult(rq.plan.stmts[0].describe_table);
+        }
+
         const decoded_params = try decodeParams(params, rq.param_types, self.alloc);
         defer self.alloc.free(decoded_params);
 
@@ -551,6 +555,41 @@ pub const Gateway = struct {
             .rows = rows_slice,
             .alloc = self.alloc,
         };
+    }
+
+    fn buildDescribeResult(self: *Gateway, table_name: []const u8) !ResultSet {
+        std.debug.assert(table_name.len > 0);
+        const tbl = self.schema.getTable(table_name) orelse return error.TableNotFound;
+        std.debug.assert(tbl.columns.len <= std.math.maxInt(u32));
+
+        const col_names = [_][]const u8{ "column", "type", "nullable", "primary_key" };
+        const columns = try self.alloc.alloc([]const u8, col_names.len);
+        errdefer self.alloc.free(columns);
+        for (col_names, 0..) |n, i| columns[i] = try self.alloc.dupe(u8, n);
+
+        const rows = try self.alloc.alloc([]const ?ColumnValue, tbl.columns.len);
+        errdefer self.alloc.free(rows);
+        var built: usize = 0;
+        errdefer for (rows[0..built]) |r| {
+            for (r) |v| if (v) |cv| cv.freeIfOwned(self.alloc);
+            self.alloc.free(r);
+        };
+
+        for (tbl.columns, 0..) |col, i| {
+            var is_pk = false;
+            for (tbl.primary_key) |pk_id| {
+                if (pk_id == col.id) { is_pk = true; break; }
+            }
+            const type_str = try sqlTypeStr(col.typ, self.alloc);
+            const row = try self.alloc.alloc(?ColumnValue, 4);
+            row[0] = .{ .string = try self.alloc.dupe(u8, col.name) };
+            row[1] = .{ .string = type_str };
+            row[2] = .{ .string = try self.alloc.dupe(u8, if (col.nullable == .nullable) "YES" else "NO") };
+            row[3] = .{ .string = try self.alloc.dupe(u8, if (is_pk) "YES" else "NO") };
+            rows[i] = row;
+            built += 1;
+        }
+        return ResultSet{ .columns = columns, .rows = rows, .alloc = self.alloc };
     }
 
     /// Read data at a specific sequence number (historical read).
@@ -944,6 +983,32 @@ fn sqlTypeToColumnType(t: sql_mod.ast.SqlType) storage_mod.ColumnType {
         .decimal => .decimal,
         .json, .vector, .array, .struct_type => .bytes,
         .null_type => .bytes,
+    };
+}
+
+fn sqlTypeStr(t: sql_mod.ast.SqlType, alloc: std.mem.Allocator) ![]u8 {
+    return switch (t) {
+        .bool => alloc.dupe(u8, "bool"),
+        .int8 => alloc.dupe(u8, "int8"),
+        .int16 => alloc.dupe(u8, "int16"),
+        .int32 => alloc.dupe(u8, "int32"),
+        .int64 => alloc.dupe(u8, "int64"),
+        .uint8 => alloc.dupe(u8, "uint8"),
+        .uint16 => alloc.dupe(u8, "uint16"),
+        .uint32 => alloc.dupe(u8, "uint32"),
+        .uint64 => alloc.dupe(u8, "uint64"),
+        .decimal => |d| std.fmt.allocPrint(alloc, "decimal({d},{d})", .{ d.precision, d.scale }),
+        .string => alloc.dupe(u8, "string"),
+        .bytes => alloc.dupe(u8, "bytes"),
+        .uuid => alloc.dupe(u8, "uuid"),
+        .timestamp => alloc.dupe(u8, "timestamp"),
+        .interval_months => alloc.dupe(u8, "interval_months"),
+        .interval_micros => alloc.dupe(u8, "interval_micros"),
+        .json => alloc.dupe(u8, "json"),
+        .vector => |dim| std.fmt.allocPrint(alloc, "vector({d})", .{dim}),
+        .array => alloc.dupe(u8, "array"),
+        .struct_type => alloc.dupe(u8, "struct"),
+        .null_type => alloc.dupe(u8, "null"),
     };
 }
 

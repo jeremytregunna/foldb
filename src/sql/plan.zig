@@ -401,6 +401,7 @@ pub const StmtPlan = union(enum) {
     delete: DeletePlan,
     assert: AssertPlan,
     merge: MergePlan,
+    describe_table: []const u8, // table name (arena-owned)
 };
 
 // ─── CTE tracking ────────────────────────────────────────────────────────────
@@ -525,6 +526,7 @@ pub const Planner = struct {
             .delete => |q| .{ .delete = try self.planDelete(q) },
             .merge => |q| .{ .merge = try self.planMerge(q) },
             .create_table, .create_index, .alter_table, .drop_table => error.UnsupportedOperation,
+            .describe_table => |dt| .{ .describe_table = dt.name },
             .transaction => error.UnsupportedOperation,
         };
     }
