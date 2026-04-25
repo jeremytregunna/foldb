@@ -14,6 +14,8 @@ const rpc = @import("rpc.zig");
 const persistent = @import("persistent_state.zig");
 const sim_mod = @import("sim.zig");
 
+const assert = std.debug.assert;
+
 const Log = log_mod.Log;
 const LogEntry = log_mod.LogEntry;
 const Seq = log_mod.Seq;
@@ -36,11 +38,14 @@ pub const ClusterError = error{
     ProposeTimeout,
 };
 
+/// Maximum iterations for a single drainBus() call. Protects against infinite
+/// loops if a bug causes messages to generate more messages without converging.
+const MAX_DRAIN_ITERATIONS: u32 = 65_536;
+
 /// A simulation cluster of N Raft nodes sharing an in-process message bus.
 pub fn SimCluster(comptime N: usize) type {
     return struct {
-        const Self = @This();
-
+        // Fields first, then types, then methods.
         allocator: std.mem.Allocator,
         nodes: [N]RaftNode,
         logs: [N]Log,
@@ -50,6 +55,12 @@ pub fn SimCluster(comptime N: usize) type {
         dirs: [N][]u8,
         /// Optional fault-injection network. Set after init to enable drop/delay.
         net: ?NetworkSim = null,
+
+        const Self = @This();
+
+        comptime {
+            assert(N > 0);
+        }
 
         pub fn init(
             allocator: std.mem.Allocator,
@@ -123,14 +134,12 @@ pub fn SimCluster(comptime N: usize) type {
 
         /// Advance all nodes by one tick and deliver all pending messages.
         pub fn step(self: *Self) !void {
-            // Tick all nodes.
             for (0..N) |i| {
                 var outputs: std.ArrayList(Output) = .empty;
                 defer outputs.deinit(self.allocator);
                 try self.nodes[i].tick(&self.logs[i], &outputs);
                 try self.processOutputs(i, &outputs);
             }
-            // Deliver all messages currently in the bus.
             try self.drainBus();
         }
 
@@ -169,7 +178,6 @@ pub fn SimCluster(comptime N: usize) type {
             try self.processOutputs(leader_idx, &outputs);
             try self.drainBus();
 
-            // Drive until committed on majority.
             var steps: usize = 0;
             while (steps < max_steps) : (steps += 1) {
                 if (try self.isCommitted(seq)) return seq;
@@ -209,11 +217,8 @@ pub fn SimCluster(comptime N: usize) type {
                         try self.bus.send(self.node_ids[node_idx], s.to, s.msg);
                     },
                     .send_entries => |se| {
-                        // Drop if sender is partitioned.
                         if (self.bus.partitioned_from.contains(self.node_ids[node_idx])) continue;
                         const target_idx = self.nodeIndex(se.to) orelse continue;
-                        // Read entries while alive, deliver inline to avoid use-after-free
-                        // if we buffered the slice pointer through the bus queue.
                         const entries = try self.logs[node_idx].read(
                             se.from_index,
                             self.nodes[node_idx].cfg.max_append_batch,
@@ -237,7 +242,16 @@ pub fn SimCluster(comptime N: usize) type {
                             },
                             &target_outs,
                         );
-                        try self.processOutputs(target_idx, &target_outs);
+                        // Handle sub-outputs inline. handleAppendEntries (a follower
+                        // handler) never emits send_entries, so no recursion is possible.
+                        for (target_outs.items) |sub| {
+                            switch (sub) {
+                                .send => |s| try self.bus.send(self.node_ids[target_idx], s.to, s.msg),
+                                .committed, .apply_config => {},
+                                .persist => |p| try persistent.save(self.dirs[target_idx], self.allocator, p.term, p.voted_for),
+                                .send_entries => unreachable, // handleAppendEntries never emits send_entries
+                            }
+                        }
                     },
                     .committed => {
                         // Cluster driver can hook here for client notifications.
@@ -259,7 +273,9 @@ pub fn SimCluster(comptime N: usize) type {
         }
 
         fn drainBus(self: *Self) !void {
-            while (self.bus.deliverOne()) |env| {
+            var iterations: u32 = 0;
+            while (self.bus.deliverOne()) |env| : (iterations += 1) {
+                assert(iterations < MAX_DRAIN_ITERATIONS);
                 // Drop the message if NetworkSim says so.
                 if (self.net) |*net| {
                     if (net.shouldDrop()) continue;
@@ -270,7 +286,6 @@ pub fn SimCluster(comptime N: usize) type {
 
                 switch (env.msg) {
                     .append_entries => |args| {
-                        // Entries in args point into bus memory valid for this call.
                         try self.nodes[target_idx].handleAppendEntries(
                             &self.logs[target_idx],
                             args,
@@ -332,6 +347,8 @@ pub const DynSimCluster = struct {
         initial_ids: []const NodeId,
         seeds: []const u64,
     ) !DynSimCluster {
+        assert(initial_ids.len > 0);
+
         var self = DynSimCluster{
             .allocator = allocator,
             .nodes = .empty,
@@ -400,6 +417,8 @@ pub const DynSimCluster = struct {
         base_dir: []const u8,
         cfg: Config,
     ) !void {
+        assert(new_id > 0);
+
         const dir = try std.fmt.allocPrint(self.allocator, "{s}/node{d}", .{ base_dir, new_id });
         errdefer self.allocator.free(dir);
 
@@ -536,7 +555,16 @@ pub const DynSimCluster = struct {
                         },
                         &target_outs,
                     );
-                    try self.processOutputs(target_idx, &target_outs);
+                    // Handle sub-outputs inline. handleAppendEntries (a follower
+                    // handler) never emits send_entries, so no recursion is possible.
+                    for (target_outs.items) |sub| {
+                        switch (sub) {
+                            .send => |s| try self.bus.send(self.node_ids.items[target_idx], s.to, s.msg),
+                            .committed, .apply_config => {},
+                            .persist => |p| try persistent.save(self.dirs.items[target_idx], self.allocator, p.term, p.voted_for),
+                            .send_entries => unreachable, // handleAppendEntries never emits send_entries
+                        }
+                    }
                 },
                 .committed, .apply_config => {
                     // apply_config: the node has already updated its own peer list.
@@ -556,7 +584,9 @@ pub const DynSimCluster = struct {
     }
 
     fn drainBus(self: *DynSimCluster) !void {
-        while (self.bus.deliverOne()) |env| {
+        var iterations: u32 = 0;
+        while (self.bus.deliverOne()) |env| : (iterations += 1) {
+            assert(iterations < MAX_DRAIN_ITERATIONS);
             const target_idx = self.nodeIndex(env.to) orelse continue;
             var outputs: std.ArrayList(Output) = .empty;
             defer outputs.deinit(self.allocator);

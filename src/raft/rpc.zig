@@ -12,6 +12,8 @@ const std = @import("std");
 const log_mod = @import("log.zig");
 const types = @import("types.zig");
 
+const assert = std.debug.assert;
+
 pub const Term = types.Term;
 pub const NodeId = log_mod.NodeId;
 pub const Seq = log_mod.Seq;
@@ -66,6 +68,15 @@ pub const Message = union(MessageKind) {
     request_vote: RequestVoteArgs,
     request_vote_result: RequestVoteResult,
 };
+
+// Wire format buffer sizes. Comptime assertions verify each size equals the
+// sum of its field widths so layout bugs are caught before any packet is sent.
+comptime {
+    assert(32 == 4 * 8); // RequestVoteArgs: 4 × u64
+    assert(9 == 8 + 1);  // RequestVoteResult: u64 + bool(u8)
+    assert(17 == 8 + 1 + 8); // AppendEntriesResult: u64 + bool(u8) + u64
+    assert(40 == 5 * 8); // AppendEntriesHeader: 5 × u64
+}
 
 // ---------------------------------------------------------------------------
 // Fixed-size serialization for message types that carry no entries.
@@ -162,6 +173,7 @@ pub fn encodeMessage(from_id: NodeId, msg: Message, buf: *std.ArrayList(u8), all
             try buf.appendSlice(alloc, &payload);
         },
         .append_entries => |a| {
+            assert(a.entries.len <= std.math.maxInt(u32));
             try buf.append(alloc, @intFromEnum(MessageKind.append_entries));
             var hdr: [40]u8 = undefined;
             serializeAppendEntriesHeader(a, &hdr);
@@ -170,6 +182,7 @@ pub fn encodeMessage(from_id: NodeId, msg: Message, buf: *std.ArrayList(u8), all
             std.mem.writeInt(u32, &entry_count_buf, @intCast(a.entries.len), .little);
             try buf.appendSlice(alloc, &entry_count_buf);
             for (a.entries) |entry| {
+                assert(entry.payload.len <= std.math.maxInt(u32));
                 var eh: [entry_header_size]u8 = undefined;
                 entry.header.serialize_to(&eh);
                 try buf.appendSlice(alloc, &eh);
@@ -182,6 +195,7 @@ pub fn encodeMessage(from_id: NodeId, msg: Message, buf: *std.ArrayList(u8), all
     }
 
     // Fill in length prefix (total_len = everything after the 4-byte prefix).
+    assert(buf.items.len - len_pos - 4 <= std.math.maxInt(u32));
     const total_len: u32 = @intCast(buf.items.len - len_pos - 4);
     std.mem.writeInt(u32, buf.items[len_pos..][0..4], total_len, .little);
 }
@@ -214,13 +228,13 @@ pub fn decodeMessage(data: []const u8, alloc: std.mem.Allocator) !Envelope {
             const entry_count = std.mem.readInt(u32, payload[40..44], .little);
             const entries = try alloc.alloc(LogEntry, entry_count);
             errdefer alloc.free(entries);
-            var pos: usize = 44;
-            var n_init: usize = 0;
+            var pos: u32 = 44;
+            var n_init: u32 = 0;
             errdefer for (entries[0..n_init]) |*e| e.deinit(alloc);
             for (0..entry_count) |i| {
                 if (pos + entry_header_size + 4 > payload.len) return error.MessageTooShort;
                 const eh = try LogEntryHeader.deserialize_from(payload[pos..][0..entry_header_size]);
-                pos += entry_header_size;
+                pos += @intCast(entry_header_size);
                 const pl_len = std.mem.readInt(u32, payload[pos..][0..4], .little);
                 pos += 4;
                 if (pos + pl_len > payload.len) return error.MessageTooShort;

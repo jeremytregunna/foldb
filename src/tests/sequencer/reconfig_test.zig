@@ -148,6 +148,7 @@ test "removeNode: leader stages remove config change" {
         .tick_interval_ms = 5,
         .election_timeout_min_ms = 10,
         .election_timeout_max_ms = 20,
+        .heartbeat_interval_ms = 3, // must be < election_timeout_min (Raft liveness)
         .peers = &peers,
     }, alloc);
     defer seq.deinit();

@@ -10,9 +10,36 @@
 const std = @import("std");
 const rpc = @import("rpc.zig");
 
+const assert = std.debug.assert;
+
 pub const NodeId = rpc.NodeId;
 pub const Message = rpc.Message;
 pub const Envelope = rpc.Envelope;
+
+// ---- socket / syscall constants ----
+
+const AF_INET: u32 = 2;
+const SOCK_STREAM: u32 = 1;
+const SOCK_NONBLOCK: u32 = 0o4000;
+const SOCK_CLOEXEC: u32 = 0o2000000;
+const SOL_SOCKET: u32 = 1;
+const SO_REUSEADDR: u32 = 2;
+const LISTEN_BACKLOG: u32 = 32;
+const EAGAIN: isize = -11;
+
+/// Maximum payload for a single incoming message (1 MiB).
+/// Frames larger than this are rejected in pollOnce without allocation.
+const MAX_MESSAGE_SIZE_BYTES: u32 = 1 << 20;
+
+/// Maximum messages in any single queue before assertions fire.
+/// Protects against unbounded queue growth from runaway simulation loops.
+const MAX_QUEUE_SIZE: u32 = 65_536;
+
+comptime {
+    assert(MAX_MESSAGE_SIZE_BYTES > 0);
+    assert(MAX_QUEUE_SIZE > 0);
+    assert(LISTEN_BACKLOG > 0);
+}
 
 // ---------------------------------------------------------------------------
 // InProcessTransport — for simulation and testing.
@@ -43,6 +70,7 @@ pub const InProcessBus = struct {
 
     /// Queue a message. Silently drops it if sender is partitioned.
     pub fn send(self: *InProcessBus, from: NodeId, to: NodeId, msg: Message) !void {
+        assert(self.queue.items.len < MAX_QUEUE_SIZE);
         if (self.partitioned_from.contains(from)) return;
         try self.queue.append(self.allocator, .{ .from = from, .to = to, .msg = msg });
     }
@@ -57,8 +85,8 @@ pub const InProcessBus = struct {
     }
 
     /// Return count of pending messages.
-    pub fn pending(self: *const InProcessBus) usize {
-        return self.queue.items.len;
+    pub fn pending(self: *const InProcessBus) u32 {
+        return @intCast(self.queue.items.len);
     }
 
     /// Partition: messages from any node in `node_ids` will be dropped.
@@ -87,15 +115,6 @@ pub const InProcessBus = struct {
 // a single driver thread (the sequencer tick loop).
 // ---------------------------------------------------------------------------
 
-const AF_INET: u32 = 2;
-const SOCK_STREAM: u32 = 1;
-const SOCK_NONBLOCK: u32 = 0o4000;
-const SOCK_CLOEXEC: u32 = 0o2000000;
-const SOL_SOCKET: u32 = 1;
-const SO_REUSEADDR: u32 = 2;
-const EAGAIN: isize = -11;
-const EWOULDBLOCK: isize = -11;
-
 const PeerConn = struct {
     ip: u32, // network byte order (big-endian)
     port: u16, // host byte order
@@ -123,6 +142,7 @@ pub const TcpTransport = struct {
     fault_hook: SendFaultHook = .{},
 
     pub fn init(alloc: std.mem.Allocator, self_id: NodeId) TcpTransport {
+        assert(self_id > 0);
         return .{
             .peers = std.AutoHashMap(NodeId, PeerConn).init(alloc),
             .inbox = .empty,
@@ -144,6 +164,8 @@ pub const TcpTransport = struct {
 
     /// Register a peer. Parses "host:port"; does not connect yet.
     pub fn addPeer(self: *TcpTransport, id: NodeId, addr: []const u8) !void {
+        assert(id > 0);
+        assert(id != self.self_id);
         const colon = std.mem.lastIndexOfScalar(u8, addr, ':') orelse return error.InvalidAddr;
         const host = addr[0..colon];
         const port_str = addr[colon + 1 ..];
@@ -163,11 +185,9 @@ pub const TcpTransport = struct {
     pub fn send(self: *TcpTransport, to: NodeId, msg: Message) void {
         if (self.fault_hook.shouldDrop(to)) return;
         const entry = self.peers.getPtr(to) orelse return;
-        // Lazy connect
         if (entry.fd < 0) {
             entry.fd = tcpConnect(entry.ip, entry.port) catch return;
         }
-        // Encode
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(self.alloc);
         rpc.encodeMessage(self.self_id, msg, &buf, self.alloc) catch {
@@ -175,7 +195,6 @@ pub const TcpTransport = struct {
             entry.fd = -1;
             return;
         };
-        // Encoding succeeded — now write and close.
         // Write then close — each message is a short-lived connection so
         // pollOnce's accept-one-read-one design sees one message per accept.
         writeAll(entry.fd, buf.items) catch {};
@@ -212,7 +231,7 @@ pub const TcpTransport = struct {
         const bind_rc = std.os.linux.bind(fd, @ptrCast(@alignCast(&addr_buf)), 16);
         if (@as(isize, @bitCast(bind_rc)) < 0) return error.BindError;
 
-        const listen_rc = std.os.linux.listen(@intCast(fd), 32);
+        const listen_rc = std.os.linux.listen(@intCast(fd), LISTEN_BACKLOG);
         if (@as(isize, @bitCast(listen_rc)) < 0) return error.ListenError;
 
         self.listen_fd = fd;
@@ -222,7 +241,6 @@ pub const TcpTransport = struct {
     /// Returns true if a message was appended to inbox.
     pub fn pollOnce(self: *TcpTransport, alloc: std.mem.Allocator) !bool {
         if (self.listen_fd < 0) return false;
-        // Non-blocking accept
         const raw = std.os.linux.accept4(@intCast(self.listen_fd), null, null, SOCK_NONBLOCK | SOCK_CLOEXEC);
         const ri: isize = @bitCast(raw);
         if (ri == EAGAIN) return false;
@@ -230,20 +248,21 @@ pub const TcpTransport = struct {
         const client_fd: std.posix.fd_t = @intCast(ri);
         defer _ = std.os.linux.close(@intCast(client_fd));
 
-        // Read 4-byte length prefix (blocking on the already-connected fd)
+        // Read 4-byte length prefix (blocking on the already-connected fd).
         var len_buf: [4]u8 = undefined;
         readExact(client_fd, &len_buf) catch return false;
         const total_len = std.mem.readInt(u32, &len_buf, .little);
-        if (total_len == 0 or total_len > 1 << 20) return false;
+        if (total_len == 0 or total_len > MAX_MESSAGE_SIZE_BYTES) return false;
 
-        // Read payload
+        // Read payload.
         const data = alloc.alloc(u8, total_len) catch return false;
         defer alloc.free(data);
         readExact(client_fd, data) catch return false;
 
-        // Decode
+        // Decode; caller fills in env.to.
         var env = rpc.decodeMessage(data, alloc) catch return false;
         env.to = self.self_id;
+        assert(self.inbox.items.len < MAX_QUEUE_SIZE);
         try self.inbox.append(alloc, env);
         return true;
     }
@@ -269,7 +288,7 @@ fn parseIpv4(host: []const u8) !u32 {
         i += 1;
     }
     if (i != 4) return error.InvalidAddr;
-    // Return in network byte order (big-endian) as a u32
+    // Return in network byte order (big-endian) as a u32.
     return std.mem.readInt(u32, &octets, .big);
 }
 
@@ -291,6 +310,7 @@ fn tcpConnect(ip: u32, port: u16) !std.posix.fd_t {
 }
 
 fn readExact(fd: std.posix.fd_t, buf: []u8) !void {
+    assert(buf.len > 0);
     var total: usize = 0;
     while (total < buf.len) {
         const n = std.os.linux.read(@intCast(fd), buf.ptr + total, buf.len - total);
@@ -298,9 +318,11 @@ fn readExact(fd: std.posix.fd_t, buf: []u8) !void {
         if (ni <= 0) return error.ReadError;
         total += @intCast(ni);
     }
+    assert(total == buf.len);
 }
 
 fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
+    assert(data.len > 0);
     var sent: usize = 0;
     while (sent < data.len) {
         const n = std.os.linux.write(@intCast(fd), data.ptr + sent, data.len - sent);
@@ -308,4 +330,5 @@ fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
         if (ni <= 0) return error.WriteError;
         sent += @intCast(ni);
     }
+    assert(sent == data.len);
 }

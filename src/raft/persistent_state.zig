@@ -8,13 +8,21 @@ const std = @import("std");
 const crc_mod = @import("log.zig");
 const types = @import("types.zig");
 
+const assert = std.debug.assert;
+
 pub const Term = types.Term;
 pub const NodeId = @import("log.zig").NodeId;
 
-const FILE_SIZE: usize = 20;
+const FILE_SIZE: u32 = 20;
 const FILENAME = "raft_state.bin";
 
+comptime {
+    // term(8) + voted_for(8) + crc(4) = 20 bytes.
+    assert(FILE_SIZE == 8 + 8 + 4);
+}
+
 fn buildPath(dir: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    assert(dir.len > 0);
     return std.mem.concat(allocator, u8, &.{ dir, "/", FILENAME });
 }
 
@@ -30,6 +38,8 @@ pub const PersistentState = struct {
 };
 
 pub fn load(dir: []const u8, allocator: std.mem.Allocator) !PersistentState {
+    assert(dir.len > 0);
+
     const path = try buildPath(dir, allocator);
     defer allocator.free(path);
     const z = try toNullZ(path, allocator);
@@ -42,7 +52,8 @@ pub fn load(dir: []const u8, allocator: std.mem.Allocator) !PersistentState {
     defer _ = std.os.linux.close(@intCast(fd));
 
     var buf: [FILE_SIZE]u8 = undefined;
-    const n = std.os.linux.read(@intCast(fd), &buf, FILE_SIZE);
+    const n_raw = std.os.linux.read(@intCast(fd), &buf, FILE_SIZE);
+    const n: isize = @bitCast(n_raw);
     if (n != FILE_SIZE) return .{ .term = 0, .voted_for = null };
 
     const stored_crc = std.mem.readInt(u32, buf[16..20], .little);
@@ -58,6 +69,8 @@ pub fn load(dir: []const u8, allocator: std.mem.Allocator) !PersistentState {
 }
 
 pub fn save(dir: []const u8, allocator: std.mem.Allocator, term: Term, voted_for: ?NodeId) !void {
+    assert(dir.len > 0);
+
     const path = try buildPath(dir, allocator);
     defer allocator.free(path);
     const z = try toNullZ(path, allocator);
@@ -79,6 +92,9 @@ pub fn save(dir: []const u8, allocator: std.mem.Allocator, term: Term, voted_for
     const c = crc_mod.crc32c(buf[0..16]);
     std.mem.writeInt(u32, buf[16..20], c, .little);
 
-    _ = std.os.linux.write(@intCast(fd), &buf, FILE_SIZE);
-    _ = std.os.linux.fsync(@intCast(fd));
+    const w: isize = @bitCast(std.os.linux.write(@intCast(fd), &buf, FILE_SIZE));
+    if (w != FILE_SIZE) return error.WriteError;
+
+    const s: isize = @bitCast(std.os.linux.fsync(@intCast(fd)));
+    if (s < 0) return error.FsyncError;
 }

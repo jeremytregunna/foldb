@@ -16,6 +16,8 @@ const types = @import("types.zig");
 const rpc = @import("rpc.zig");
 const obs = @import("observability.zig");
 
+const assert = std.debug.assert;
+
 const Log = log_mod.Log;
 const LogEntry = log_mod.LogEntry;
 const Seq = log_mod.Seq;
@@ -84,8 +86,15 @@ pub const Config = struct {
     /// Heartbeat interval in ticks (must be << election_timeout_min).
     heartbeat_interval: u32 = 3,
     /// Max entries per AppendEntries batch.
-    max_append_batch: usize = 64,
+    max_append_batch: u32 = 64,
 };
+
+/// Returns the minimum number of votes required for a majority decision
+/// in a cluster of `cluster_size` voters (peers + self).
+fn quorumSize(cluster_size: usize) usize {
+    assert(cluster_size > 0);
+    return cluster_size / 2 + 1;
+}
 
 pub const RaftNode = struct {
     allocator: std.mem.Allocator,
@@ -117,6 +126,12 @@ pub const RaftNode = struct {
         cfg: Config,
         seed: u64,
     ) !RaftNode {
+        assert(id > 0);
+        assert(peer_ids.len < 256); // practical Raft cluster bound; quorum safety
+        assert(cfg.election_timeout_max > cfg.election_timeout_min);
+        // For multi-node clusters, heartbeat must fire before any follower times out.
+        // Single-node clusters (no peers) self-elect immediately; heartbeat timing is irrelevant.
+        if (peer_ids.len > 0) assert(cfg.heartbeat_interval < cfg.election_timeout_min);
         const peers = try allocator.alloc(PeerState, peer_ids.len);
         for (peer_ids, 0..) |pid, i| {
             peers[i] = .{
@@ -280,60 +295,16 @@ pub const RaftNode = struct {
             try self.stepDown(args.term, out);
         } else {
             // Same term: if we were candidate, leader won the election.
-            if (self.role == .candidate) {
-                self.role = .follower;
-            }
+            if (self.role == .candidate) self.role = .follower;
         }
 
         // Reset election timer on valid leader contact.
         self.election_ticks = 0;
 
-        // Log consistency check.
-        if (args.prev_log_index > 0) {
-            const our_head = try log.head();
-            if (our_head < args.prev_log_index) {
-                try out.append(self.allocator, .{ .send = .{ .to = args.leader_id, .msg = .{ .append_entries_result = .{
-                    .term = self.current_term,
-                    .success = false,
-                    .match_index = our_head,
-                } } } });
-                return;
-            }
-            const our_term = try log.term_at(args.prev_log_index, self.allocator);
-            if (our_term != args.prev_log_term) {
-                // Conflict: truncate back to prev_log_index so leader can retry.
-                try log.truncate_suffix(args.prev_log_index);
-                try out.append(self.allocator, .{ .send = .{ .to = args.leader_id, .msg = .{ .append_entries_result = .{
-                    .term = self.current_term,
-                    .success = false,
-                    .match_index = (try log.head()),
-                } } } });
-                return;
-            }
-        }
+        const consistent = try self.handleAppendEntriesCheckLog(log, args, out);
+        if (!consistent) return;
 
-        // Append new entries (skip any already present and matching).
-        var replicated: u64 = 0;
-        for (args.entries) |entry| {
-            const our_head = try log.head();
-            if (entry.header.seq <= our_head) {
-                const our_term = try log.term_at(entry.header.seq, self.allocator);
-                if (our_term == entry.header.epoch) continue; // already have it
-                // Conflict: truncate and clear any pending config change at or after this seq.
-                try log.truncate_suffix(entry.header.seq);
-                if (self.pending_config) |pc| {
-                    if (pc.seq >= entry.header.seq) self.pending_config = null;
-                }
-            }
-            try log.append_entry(entry);
-            replicated += 1;
-            // Domain boundary — decode config_change payload from the replication stream;
-            // only a fully-parsed PendingConfigChange crosses into domain state.
-            if (entry.header.kind == .config_change and self.pending_config == null) {
-                const cc = try ConfigChange.deserialize(entry.payload);
-                self.pending_config = .{ .seq = entry.header.seq, .op = cc.op, .peer_id = cc.node_id };
-            }
-        }
+        const replicated = try self.handleAppendEntriesApplyEntries(log, args);
         if (replicated > 0) self.metrics.entries_replicated.add(replicated);
 
         // Advance commit index.
@@ -352,6 +323,64 @@ pub const RaftNode = struct {
             .success = true,
             .match_index = new_head,
         } } } });
+    }
+
+    /// Verify prev_log_index consistency. Sends a failure AppendEntriesResult and
+    /// returns false when the follower's log does not match the leader's prefix.
+    fn handleAppendEntriesCheckLog(
+        self: *RaftNode,
+        log: *Log,
+        args: AppendEntriesArgs,
+        out: *std.ArrayList(Output),
+    ) !bool {
+        if (args.prev_log_index == 0) return true;
+
+        const our_head = try log.head();
+        if (our_head < args.prev_log_index) {
+            try out.append(self.allocator, .{ .send = .{ .to = args.leader_id, .msg = .{ .append_entries_result = .{
+                .term = self.current_term, .success = false, .match_index = our_head,
+            } } } });
+            return false;
+        }
+
+        const our_term = try log.term_at(args.prev_log_index, self.allocator);
+        if (our_term != args.prev_log_term) {
+            // Conflict: truncate back to prev_log_index so leader can retry.
+            try log.truncate_suffix(args.prev_log_index);
+            try out.append(self.allocator, .{ .send = .{ .to = args.leader_id, .msg = .{ .append_entries_result = .{
+                .term = self.current_term, .success = false, .match_index = (try log.head()),
+            } } } });
+            return false;
+        }
+
+        return true;
+    }
+
+    /// Append new entries from args, skipping already-present matching entries
+    /// and truncating on conflict. Updates pending_config for config_change entries.
+    /// Returns the count of entries actually appended to the log.
+    fn handleAppendEntriesApplyEntries(self: *RaftNode, log: *Log, args: AppendEntriesArgs) !u64 {
+        var replicated: u64 = 0;
+        for (args.entries) |entry| {
+            const our_head = try log.head();
+            if (entry.header.seq <= our_head) {
+                const our_term = try log.term_at(entry.header.seq, self.allocator);
+                if (our_term == entry.header.epoch) continue; // already have it
+                // Conflict: truncate and clear any pending config change at or after this seq.
+                try log.truncate_suffix(entry.header.seq);
+                if (self.pending_config) |pc| {
+                    if (pc.seq >= entry.header.seq) self.pending_config = null;
+                }
+            }
+            try log.append_entry(entry);
+            replicated += 1;
+            // Domain boundary — decode config_change payload from the replication stream.
+            if (entry.header.kind == .config_change and self.pending_config == null) {
+                const cc = try ConfigChange.deserialize(entry.payload);
+                self.pending_config = .{ .seq = entry.header.seq, .op = cc.op, .peer_id = cc.node_id };
+            }
+        }
+        return replicated;
     }
 
     pub fn handleAppendEntriesResult(
@@ -442,8 +471,7 @@ pub const RaftNode = struct {
 
         if (result.vote_granted) {
             self.votes_for_me += 1;
-            const majority = (self.peers.len + 1) / 2 + 1;
-            if (self.votes_for_me >= majority) {
+            if (self.votes_for_me >= quorumSize(self.peers.len + 1)) {
                 try self.becomeLeader(log, out);
             }
         }
@@ -490,13 +518,13 @@ pub const RaftNode = struct {
         }
 
         // Single-node cluster: self-vote already constitutes majority.
-        const majority = (self.peers.len + 1) / 2 + 1;
-        if (self.votes_for_me >= majority) {
+        if (self.votes_for_me >= quorumSize(self.peers.len + 1)) {
             try self.becomeLeader(log, out);
         }
     }
 
     fn becomeLeader(self: *RaftNode, log: *Log, out: *std.ArrayList(Output)) !void {
+        assert(self.role == .candidate);
         self.role = .leader;
         self.heartbeat_ticks = 0;
         self.metrics.leadership_won.inc();
@@ -511,6 +539,7 @@ pub const RaftNode = struct {
     }
 
     fn stepDown(self: *RaftNode, term: Term, out: *std.ArrayList(Output)) !void {
+        assert(term >= self.current_term); // Raft invariant: terms never decrease
         const was_leader = self.role == .leader;
         const need_persist = term > self.current_term;
         self.current_term = term;
@@ -561,6 +590,9 @@ pub const RaftNode = struct {
     ///
     /// During joint consensus, quorum requires majority from BOTH old AND new config.
     fn checkCommit(self: *RaftNode, log: *Log, out: *std.ArrayList(Output)) !void {
+        const old_majority = quorumSize(self.peers.len + 1);
+        assert(old_majority > 0);
+
         const our_head = try log.head();
         var n = our_head;
         while (n > self.commit_index) : (n -= 1) {
@@ -572,7 +604,6 @@ pub const RaftNode = struct {
             for (self.peers) |peer| {
                 if (peer.match_index >= n) old_count += 1;
             }
-            const old_majority = (self.peers.len + 1) / 2 + 1;
             if (old_count < old_majority) continue;
 
             // Joint consensus: also require new config quorum.
@@ -582,8 +613,7 @@ pub const RaftNode = struct {
                     const mi = if (self.findPeer(jid)) |p| p.match_index else 0;
                     if (mi >= n) new_count += 1;
                 }
-                const new_majority = (jids.len + 1) / 2 + 1;
-                if (new_count < new_majority) continue;
+                if (new_count < quorumSize(jids.len + 1)) continue;
             }
 
             self.commit_index = n;
@@ -681,7 +711,10 @@ pub const RaftNode = struct {
     }
 
     fn randomElectionTimeout(prng: *std.Random.Xoroshiro128, cfg: Config) u32 {
+        // Relationship assertions are checked once in init(); here we only
+        // assert the range is non-zero to prevent uintLessThan panicking.
         const range = cfg.election_timeout_max - cfg.election_timeout_min;
+        assert(range > 0);
         return cfg.election_timeout_min + prng.random().uintLessThan(u32, range);
     }
 };
