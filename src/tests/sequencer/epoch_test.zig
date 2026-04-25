@@ -5,7 +5,7 @@ const sequencer = @import("sequencer.zig");
 const EpochBatcher = sequencer.EpochBatcher;
 
 test "EpochBatcher: assigns dense gap-free seqs from next_seq" {
-    var batcher = EpochBatcher.init(testing.allocator);
+    var batcher = EpochBatcher.init(testing.allocator, 10_000);
     defer batcher.deinit();
 
     try batcher.submit(1, 1);
@@ -22,7 +22,7 @@ test "EpochBatcher: assigns dense gap-free seqs from next_seq" {
 }
 
 test "EpochBatcher: round-robin partition routing" {
-    var batcher = EpochBatcher.init(testing.allocator);
+    var batcher = EpochBatcher.init(testing.allocator, 10_000);
     defer batcher.deinit();
 
     try batcher.submit(1, 1);
@@ -41,7 +41,7 @@ test "EpochBatcher: round-robin partition routing" {
 }
 
 test "EpochBatcher: clears pending after close" {
-    var batcher = EpochBatcher.init(testing.allocator);
+    var batcher = EpochBatcher.init(testing.allocator, 10_000);
     defer batcher.deinit();
 
     try batcher.submit(1, 1);
@@ -54,7 +54,7 @@ test "EpochBatcher: clears pending after close" {
 }
 
 test "EpochBatcher: shouldClose when at max" {
-    var batcher = EpochBatcher.init(testing.allocator);
+    var batcher = EpochBatcher.init(testing.allocator, 10_000);
     defer batcher.deinit();
     batcher.max_batch_size = 2;
 
@@ -66,7 +66,7 @@ test "EpochBatcher: shouldClose when at max" {
 }
 
 test "EpochBatcher: epoch_num and client identity preserved" {
-    var batcher = EpochBatcher.init(testing.allocator);
+    var batcher = EpochBatcher.init(testing.allocator, 10_000);
     defer batcher.deinit();
 
     try batcher.submit(42, 7);

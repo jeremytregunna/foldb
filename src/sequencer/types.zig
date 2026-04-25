@@ -2,6 +2,8 @@
 const std = @import("std");
 const log_mod = @import("log.zig");
 
+const assert = std.debug.assert;
+
 pub const Seq = log_mod.Seq;
 pub const PartitionId = log_mod.PartitionId;
 
@@ -55,13 +57,19 @@ pub const PendingSubmit = struct {
     next: std.atomic.Value(?*PendingSubmit) = .init(null),
 };
 
+/// Maximum spins before asserting in awaitCommit. Guards against a dead sequencer thread.
+const AWAIT_MAX_SPINS: u32 = 100_000_000;
+
 /// Handle returned by Sequencer.submitBytes(). Spins on the done flag until the Sequencer
 /// thread commits the entry and writes the result.
 pub const SubmitHandle = struct {
     pending: *PendingSubmit,
 
     pub fn awaitCommit(self: *const SubmitHandle) !SubmitResult {
+        var spins: u32 = 0;
         while (!self.pending.done.load(.acquire)) {
+            assert(spins < AWAIT_MAX_SPINS);
+            spins += 1;
             _ = std.os.linux.sched_yield();
         }
         if (self.pending.err) |e| return e;
@@ -84,13 +92,20 @@ pub const SubmitHandle = struct {
 // entry_kind and payload allow all nodes to write the data entry to their local
 // partition log directly from the committed Raft entry.
 
-pub const ORDERING_ENTRY_SIZE: usize = 28;
+pub const ORDERING_ENTRY_SIZE: u32 = 28;
+
+comptime {
+    assert(ORDERING_ENTRY_SIZE == 8 + 4 + 8 + 8);
+}
 
 pub fn serializeEpochDecision(
     decision: EpochDecision,
     out: *std.ArrayList(u8),
     alloc: std.mem.Allocator,
 ) !void {
+    assert(decision.entries.len <= std.math.maxInt(u32));
+    assert(decision.payload.len <= std.math.maxInt(u32));
+
     var epoch_buf: [8]u8 = undefined;
     std.mem.writeInt(u64, &epoch_buf, decision.epoch_num, .little);
     try out.appendSlice(alloc, &epoch_buf);

@@ -13,6 +13,8 @@ const idempotency_mod = @import("idempotency.zig");
 const epoch_mod = @import("epoch.zig");
 const mpsc_mod = @import("mpsc_queue.zig");
 
+const assert = std.debug.assert;
+
 pub const Seq = log_mod.Seq;
 pub const PartitionId = log_mod.PartitionId;
 pub const NodeId = log_mod.NodeId;
@@ -42,7 +44,7 @@ pub const Config = struct {
     /// Number of data partition logs.
     partition_count: u32 = 1,
     /// Max intents per epoch before forcing a close.
-    max_epoch_size: usize = epoch_mod.DEFAULT_MAX_BATCH_SIZE,
+    max_epoch_size: u32 = epoch_mod.DEFAULT_MAX_BATCH_SIZE,
     /// Node ID for the Sequencer's Raft group.
     node_id: NodeId = 1,
     /// How often the tick loop fires (milliseconds).
@@ -64,6 +66,12 @@ pub const SequencerError = error{
     SerializeError,
     ConfigChangeInProgress,
 };
+
+/// Sleep duration per iteration of the commit-wait loop (1 ms in nanoseconds).
+const COMMIT_WAIT_SLEEP_NS: u32 = 1_000_000;
+/// Maximum iterations of the commit-wait loop before asserting.
+/// Prevents infinite looping when quorum is lost after a proposal.
+const COMMIT_WAIT_MAX_TICKS: u32 = 10_000;
 
 /// The Sequencer: global ordering for TxnIntents across partition logs.
 ///
@@ -99,18 +107,21 @@ pub const Sequencer = struct {
     ///   {base_path}/seq_raft/    — sequencer's ordering log
     ///   {base_path}/log_p{n}/    — data partition logs (0..partition_count-1)
     pub fn init(base_path: []const u8, cfg: Config, alloc: std.mem.Allocator) !Sequencer {
-        // Ensure base directory exists
+        assert(base_path.len > 0);
+        assert(cfg.partition_count > 0);
+
+        // Ensure base directory exists.
         const base_pathz = try std.heap.page_allocator.allocSentinel(u8, base_path.len, 0);
         defer std.heap.page_allocator.free(base_pathz);
         @memcpy(base_pathz[0..base_path.len], base_path);
         _ = std.os.linux.mkdir(base_pathz.ptr, 0o755);
 
-        // Create ordering log
-        const raft_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/seq_raft", .{base_path});
-        errdefer std.heap.page_allocator.free(raft_path);
+        // Allocate persistent paths using the caller's allocator for consistency.
+        const raft_path = try std.fmt.allocPrint(alloc, "{s}/seq_raft", .{base_path});
+        errdefer alloc.free(raft_path);
+        const last_applied_path = try std.fmt.allocPrint(alloc, "{s}/last_applied.bin", .{base_path});
+        errdefer alloc.free(last_applied_path);
 
-        const last_applied_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/last_applied.bin", .{base_path});
-        errdefer std.heap.page_allocator.free(last_applied_path);
         var persisted_last_applied: Seq = 0;
         readLastApplied(last_applied_path, &persisted_last_applied);
 
@@ -118,60 +129,20 @@ pub const Sequencer = struct {
         var raft_log = try Log.init_partitioned(raft_path, cfg.node_id, seq_partition_id, alloc);
         errdefer raft_log.deinit();
 
-        // Derive Raft tick counts from millisecond config values.
-        const tick_ms = if (cfg.tick_interval_ms == 0) 1 else cfg.tick_interval_ms;
-        const election_min = @max(1, cfg.election_timeout_min_ms / tick_ms);
-        const election_max = @max(1, cfg.election_timeout_max_ms / tick_ms);
-        const heartbeat = @max(1, cfg.heartbeat_interval_ms / tick_ms);
-
-        // Build peer NodeId list from PeerAddr slice.
-        const peer_ids = try alloc.alloc(NodeId, cfg.peers.len);
-        defer alloc.free(peer_ids);
-        for (cfg.peers, 0..) |p, i| peer_ids[i] = p.id;
-
-        const raft_cfg = raft_mod.Config{
-            .election_timeout_min = election_min,
-            .election_timeout_max = election_max,
-            .heartbeat_interval = heartbeat,
-            .max_append_batch = 64,
-        };
-        var raft_node = try raft_mod.RaftNode.init(alloc, cfg.node_id, peer_ids, raft_cfg, cfg.node_id);
+        var raft_node = try initRaftNode(cfg, &raft_log, alloc);
         errdefer raft_node.deinit();
 
-        // Single-node: tick until self-elected. Multi-node: leave election to the tick loop.
-        var outputs: std.ArrayList(raft_mod.Output) = .empty;
-        defer outputs.deinit(alloc);
-        if (cfg.peers.len == 0) {
-            for (0..election_max + 1) |_| {
-                try raft_node.tick(&raft_log, &outputs);
-                outputs.clearRetainingCapacity();
-                if (raft_node.role == .leader) break;
-            }
+        const partition_logs = try initPartitionLogs(base_path, cfg.node_id, cfg.partition_count, alloc);
+        errdefer {
+            for (partition_logs) |*pl| pl.deinit();
+            alloc.free(partition_logs);
         }
 
-        // Create data partition logs
-        const partition_logs = try alloc.alloc(Log, cfg.partition_count);
-        errdefer alloc.free(partition_logs);
-        var initialized: usize = 0;
-        errdefer for (partition_logs[0..initialized]) |*pl| pl.deinit();
-
-        for (0..cfg.partition_count) |i| {
-            const part_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/log_p{d}", .{ base_path, i });
-            defer std.heap.page_allocator.free(part_path);
-            partition_logs[i] = try Log.init_partitioned(part_path, cfg.node_id, @intCast(i), alloc);
-            initialized += 1;
-        }
-
-        var batcher = EpochBatcher.init(alloc);
-        batcher.max_batch_size = cfg.max_epoch_size;
-
-        // Resume from the highest committed seq across all partition logs.
         var max_seq: Seq = 0;
         for (partition_logs) |pl| {
             if (pl.current_seq > max_seq) max_seq = pl.current_seq;
         }
 
-        // Set up TCP transport.
         var transport = raft_mod.TcpTransport.init(alloc, cfg.node_id);
         errdefer transport.deinit();
         if (cfg.peers.len > 0) {
@@ -184,7 +155,7 @@ pub const Sequencer = struct {
             .raft_log = raft_log,
             .raft_path = raft_path,
             .last_applied_path = last_applied_path,
-            .batcher = batcher,
+            .batcher = EpochBatcher.init(alloc, cfg.max_epoch_size),
             .idempotency = IdempotencyCache.init(alloc),
             .partition_logs = partition_logs,
             .next_seq = max_seq + 1,
@@ -209,8 +180,8 @@ pub const Sequencer = struct {
         if (self.thread) |t| t.join();
         self.raft.deinit();
         self.raft_log.deinit();
-        std.heap.page_allocator.free(self.raft_path);
-        std.heap.page_allocator.free(self.last_applied_path);
+        self.alloc.free(self.raft_path);
+        self.alloc.free(self.last_applied_path);
         for (self.partition_logs) |*pl| pl.deinit();
         self.alloc.free(self.partition_logs);
         self.batcher.deinit();
@@ -361,12 +332,14 @@ pub const Sequencer = struct {
                     } });
                 },
                 .persist => |p| {
-                    raft_mod.savePersistentState(
+                    // Raft safety: term+voted_for must be durable before sending any messages.
+                    // Failure here risks acting on stale term after crash-restart.
+                    try raft_mod.savePersistentState(
                         self.raft_path,
                         alloc,
                         p.term,
                         p.voted_for,
-                    ) catch {};
+                    );
                 },
                 .committed => |commit_seq| {
                     // Apply all newly committed Raft entries to the local partition logs.
@@ -387,14 +360,15 @@ pub const Sequencer = struct {
                             };
                             defer alloc.free(dec.entries);
                             for (dec.entries) |oe| {
+                                assert(oe.partition < self.partition_logs.len);
                                 const pl = &self.partition_logs[oe.partition];
                                 const le = LogEntry.create(oe.seq, 0, dec.entry_kind, dec.payload);
-                                pl.append_entry_at(le) catch {};
+                                try pl.append_entry_at(le);
                             }
                         }
                         self.last_applied = idx;
                     }
-                    writeLastApplied(self.last_applied_path, self.last_applied);
+                    try writeLastApplied(self.last_applied_path, self.last_applied);
                 },
                 // Raft peer list is already updated internally by RaftNode when this fires.
                 // Transport was pre-registered in addNode / cleaned up in removeNode.
@@ -405,6 +379,7 @@ pub const Sequencer = struct {
 
     /// Return a pointer to the log for the given partition (for reading committed entries).
     pub fn partitionLog(self: *Sequencer, partition: PartitionId) *Log {
+        assert(partition < self.partition_logs.len);
         return &self.partition_logs[partition];
     }
 
@@ -419,6 +394,7 @@ pub const Sequencer = struct {
         client_seq_num: u64,
         entry_kind: log_mod.EntryKind,
     ) types_mod.SubmitHandle {
+        assert(!self.shutdown.load(.acquire));
         pending.* = .{
             .submit = .{
                 .client_id = client_id,
@@ -436,6 +412,58 @@ pub const Sequencer = struct {
     }
 };
 
+/// Initialize the RaftNode and perform single-node self-election if no peers.
+fn initRaftNode(cfg: Config, raft_log: *Log, alloc: std.mem.Allocator) !raft_mod.RaftNode {
+    const tick_ms = if (cfg.tick_interval_ms == 0) 1 else cfg.tick_interval_ms;
+    const election_min = @max(1, cfg.election_timeout_min_ms / tick_ms);
+    const election_max = @max(1, cfg.election_timeout_max_ms / tick_ms);
+    const heartbeat = @max(1, cfg.heartbeat_interval_ms / tick_ms);
+
+    const peer_ids = try alloc.alloc(NodeId, cfg.peers.len);
+    defer alloc.free(peer_ids);
+    for (cfg.peers, 0..) |p, i| peer_ids[i] = p.id;
+
+    const raft_cfg = raft_mod.Config{
+        .election_timeout_min = election_min,
+        .election_timeout_max = election_max,
+        .heartbeat_interval = heartbeat,
+        .max_append_batch = 64,
+    };
+    var raft_node = try raft_mod.RaftNode.init(alloc, cfg.node_id, peer_ids, raft_cfg, cfg.node_id);
+    errdefer raft_node.deinit();
+
+    // Single-node: tick until self-elected. Multi-node: leave election to the tick loop.
+    var outputs: std.ArrayList(raft_mod.Output) = .empty;
+    defer outputs.deinit(alloc);
+    if (cfg.peers.len == 0) {
+        for (0..election_max + 1) |_| {
+            try raft_node.tick(raft_log, &outputs);
+            outputs.clearRetainingCapacity();
+            if (raft_node.role == .leader) break;
+        }
+    }
+
+    return raft_node;
+}
+
+/// Allocate and initialize all partition logs. Caller owns the returned slice.
+fn initPartitionLogs(base_path: []const u8, node_id: NodeId, count: u32, alloc: std.mem.Allocator) ![]Log {
+    assert(count > 0);
+    const logs = try alloc.alloc(Log, count);
+    errdefer alloc.free(logs);
+    var initialized: u32 = 0;
+    errdefer for (logs[0..initialized]) |*pl| pl.deinit();
+
+    for (0..count) |i| {
+        const part_path = try std.fmt.allocPrint(alloc, "{s}/log_p{d}", .{ base_path, i });
+        defer alloc.free(part_path);
+        logs[i] = try Log.init_partitioned(part_path, node_id, @intCast(i), alloc);
+        initialized += 1;
+    }
+
+    return logs;
+}
+
 fn readLastApplied(path: []const u8, out: *Seq) void {
     const pathz = std.heap.page_allocator.allocSentinel(u8, path.len, 0) catch return;
     defer std.heap.page_allocator.free(pathz);
@@ -452,22 +480,25 @@ fn readLastApplied(path: []const u8, out: *Seq) void {
     out.* = std.mem.readInt(u64, &buf, .little);
 }
 
-fn writeLastApplied(path: []const u8, seq: Seq) void {
-    const pathz = std.heap.page_allocator.allocSentinel(u8, path.len, 0) catch return;
+fn writeLastApplied(path: []const u8, seq: Seq) !void {
+    const pathz = std.heap.page_allocator.allocSentinel(u8, path.len, 0) catch return error.OutOfMemory;
     defer std.heap.page_allocator.free(pathz);
     @memcpy(pathz[0..path.len], path);
     const raw_fd = std.os.linux.open(pathz.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
     const fd_i: isize = @bitCast(raw_fd);
-    if (fd_i < 0) return;
+    if (fd_i < 0) return error.WriteError;
     const fd: std.posix.fd_t = @intCast(fd_i);
     defer _ = std.os.linux.close(@intCast(fd));
     var buf: [8]u8 = undefined;
     std.mem.writeInt(u64, &buf, seq, .little);
-    _ = std.os.linux.write(@intCast(fd), &buf, 8);
-    _ = std.os.linux.fsync(@intCast(fd));
+    const w: isize = @bitCast(std.os.linux.write(@intCast(fd), &buf, 8));
+    if (w != 8) return error.WriteError;
+    const s: isize = @bitCast(std.os.linux.fsync(@intCast(fd)));
+    if (s < 0) return error.FsyncError;
 }
 
 /// Sequencer owner thread: drains the MPSC queue, drives Raft ticks, signals completions.
+/// This loop is non-terminating by design — it exits only when shutdown is set via deinit().
 fn runLoop(self: *Sequencer) void {
     const tick_ns: u64 = @as(u64, self.tick_interval_ms) * 1_000_000;
     while (!self.shutdown.load(.acquire)) {
@@ -497,6 +528,7 @@ fn processCommit(self: *Sequencer, pending: *types_mod.PendingSubmit) void {
 
 /// Core commit logic, called only from the Sequencer owner thread.
 fn commitInner(self: *Sequencer, submit: ValidatedSubmit) !SubmitResult {
+    assert(self.raft.role == .leader);
     self.metrics.intents_submitted.inc();
 
     const client_id = submit.client_id;
@@ -551,8 +583,11 @@ fn commitInner(self: *Sequencer, submit: ValidatedSubmit) !SubmitResult {
     // so this loop body never executes. For multi-node, tickOnce drives the round-trips.
     // The .committed output handler in flushOutputs writes to all nodes' partition logs,
     // so by the time we exit this loop the entry is already in the partition log.
-    const wait_ts: std.os.linux.timespec = .{ .sec = 0, .nsec = 1_000_000 };
+    const wait_ts: std.os.linux.timespec = .{ .sec = 0, .nsec = COMMIT_WAIT_SLEEP_NS };
+    var wait_ticks: u32 = 0;
     while (self.raft.commit_index < ordering_seq) {
+        assert(wait_ticks < COMMIT_WAIT_MAX_TICKS);
+        wait_ticks += 1;
         try self.tickOnce(self.alloc);
         _ = std.os.linux.nanosleep(&wait_ts, null);
     }

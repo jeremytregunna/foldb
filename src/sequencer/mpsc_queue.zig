@@ -22,8 +22,6 @@ pub fn MpscQueue(comptime T: type) type {
     }
 
     return struct {
-        const Self = @This();
-
         /// Producers atomically swap this to append. Consumer reads via tail.
         head: std.atomic.Value(?*T),
         /// Consumer-only pointer. Not atomic — only the consumer thread touches it.
@@ -34,6 +32,8 @@ pub fn MpscQueue(comptime T: type) type {
         /// Monotonically increasing counter. Incremented on every push.
         /// Consumer futex-waits on this value when the queue is empty.
         wake_seq: std.atomic.Value(u32),
+
+        const Self = @This();
 
         /// Initialize the queue. Must be called after the queue is at its final
         /// memory address — the stub's address is stored in head and tail.

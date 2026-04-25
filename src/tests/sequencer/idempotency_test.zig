@@ -41,7 +41,7 @@ test "IdempotencyCache: evictBefore removes stale entries" {
     try cache.record(1, 2, 10);
     try cache.record(1, 3, 15);
 
-    cache.evictBefore(10); // removes seq < 10, so seq=5 evicted
+    try cache.evictBefore(10); // removes seq < 10, so seq=5 evicted
 
     try testing.expectEqual(@as(?u64, null), cache.lookup(1, 1));
     try testing.expectEqual(@as(?u64, 10), cache.lookup(1, 2));
