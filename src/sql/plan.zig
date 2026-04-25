@@ -524,7 +524,7 @@ pub const Planner = struct {
             .update => |q| .{ .update = try self.planUpdate(q) },
             .delete => |q| .{ .delete = try self.planDelete(q) },
             .merge => |q| .{ .merge = try self.planMerge(q) },
-            .create_table, .create_index, .alter_table => error.UnsupportedOperation,
+            .create_table, .create_index, .alter_table, .drop_table => error.UnsupportedOperation,
             .transaction => error.UnsupportedOperation,
         };
     }

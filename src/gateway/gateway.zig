@@ -738,6 +738,7 @@ pub const Gateway = struct {
     fn replayDdl(self: *Gateway, sql: []const u8) !void {
         self.applyDdlToSchema(sql) catch |e| switch (e) {
             error.TableAlreadyExists, error.IndexAlreadyExists, error.ColumnAlreadyExists => {},
+            error.TableNotFound => {}, // DROP TABLE on already-dropped table is a no-op on replay
             else => return e,
         };
     }
@@ -769,11 +770,22 @@ pub const Gateway = struct {
         if (parsed.stmts.len == 0) return;
         const stmt = parsed.stmts[0];
 
+        // For DROP TABLE, capture the table_id before registry.applyDdl removes it from schema.
+        const drop_table_id: ?storage_mod.TableId = if (stmt == .drop_table) blk: {
+            const dt = stmt.drop_table;
+            const tbl = self.schema.getTable(dt.name) orelse {
+                if (dt.if_exists) return; // table doesn't exist but IF EXISTS — silent success
+                break :blk null;
+            };
+            break :blk tbl.id;
+        } else null;
+
         self.registry.applyDdl(stmt) catch |e| {
             switch (stmt) {
                 .create_table => |ct| self.setDetail("'{s}': {s}", .{ ct.name, errors.humanize(e) }),
                 .create_index => |ci| self.setDetail("'{s}' on '{s}': {s}", .{ ci.name, ci.table, errors.humanize(e) }),
                 .alter_table => |at| self.setDetail("'{s}': {s}", .{ at.table, errors.humanize(e) }),
+                .drop_table => |dt| self.setDetail("'{s}': {s}", .{ dt.name, errors.humanize(e) }),
                 else => self.setDetail("{s}", .{errors.humanize(e)}),
             }
             return e;
@@ -783,6 +795,9 @@ pub const Gateway = struct {
             .create_table => |ct| {
                 const tbl = self.schema.getTable(ct.name) orelse return error.TableNotFound;
                 try self.partitioned.registerTable(try sqlTableToStorage(tbl, self.storage_schema_arena.allocator()));
+            },
+            .drop_table => {
+                if (drop_table_id) |id| self.partitioned.unregisterTable(id);
             },
             .create_index => |ci| {
                 const tbl = self.schema.getTable(ci.table) orelse return error.TableNotFound;

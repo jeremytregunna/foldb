@@ -202,6 +202,10 @@ pub const PartitionedStorage = struct {
         for (self.partitions) |p| try p.registerTable(schema);
     }
 
+    pub fn unregisterTable(self: *PartitionedStorage, table_id: TableId) void {
+        for (self.partitions) |p| p.unregisterTable(table_id);
+    }
+
     /// Register a specialty index on every partition.
     pub fn registerIndex(self: *PartitionedStorage, desc: IndexDesc) !void {
         for (self.partitions) |p| try p.registerIndex(desc);
@@ -330,6 +334,13 @@ pub const Storage = struct {
             try lsm.withObjectStore(store, self.cache_dir orelse table_dir);
         }
         try self.tables.put(schema.table_id, lsm);
+    }
+
+    pub fn unregisterTable(self: *Storage, table_id: TableId) void {
+        if (self.tables.fetchRemove(table_id)) |kv| {
+            var lsm = kv.value;
+            lsm.deinit();
+        }
     }
 
     /// Register a specialty index (JSON path or vector). Backfills from existing rows.

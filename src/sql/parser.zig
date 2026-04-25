@@ -126,6 +126,7 @@ pub const Parser = struct {
             .kw_merge => .{ .merge = try self.parseMerge() },
             .kw_create => try self.parseCreate(),
             .kw_alter => .{ .alter_table = try self.parseAlter() },
+            .kw_drop => .{ .drop_table = try self.parseDropTable() },
             .kw_with => try self.parseWithStmt(),
             .kw_transaction => .{ .transaction = try self.parseTransaction() },
             else => {
@@ -875,6 +876,20 @@ pub const Parser = struct {
             } else return error.UnexpectedToken;
         };
         return .{ .table = table, .action = action };
+    }
+
+    // ─── DROP TABLE ──────────────────────────────────────────────────────
+
+    fn parseDropTable(self: *Parser) ParseError!ast.DropTableStmt {
+        _ = try self.expect(.kw_drop);
+        _ = try self.expect(.kw_table);
+        const if_exists = if (try self.eatIdent("if")) blk: {
+            _ = try self.expectIdent(); // "exists"
+            break :blk true;
+        } else false;
+        const name = try self.expectIdent();
+        assert(name.len > 0);
+        return .{ .name = name, .if_exists = if_exists };
     }
 
     // ─── TRANSACTION BLOCK ───────────────────────────────────────────────

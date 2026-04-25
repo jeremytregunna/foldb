@@ -391,6 +391,11 @@ pub const AlterTableStmt = struct {
     action: AlterAction,
 };
 
+pub const DropTableStmt = struct {
+    name: []const u8,
+    if_exists: bool,
+};
+
 // ─── Transaction block ───────────────────────────────────────────────────────
 
 pub const TxnParam = struct {
@@ -423,6 +428,7 @@ pub const Stmt = union(enum) {
     create_table: CreateTableStmt,
     create_index: CreateIndexStmt,
     alter_table: AlterTableStmt,
+    drop_table: DropTableStmt,
     transaction: TransactionBlock,
 };
 

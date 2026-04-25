@@ -121,6 +121,11 @@ pub const CanonWriter = struct {
                 try self.writeByte(0x12);
                 try self.writeAlterTable(q);
             },
+            .drop_table => |q| {
+                try self.writeByte(0x13);
+                try self.writeByte(if (q.if_exists) 1 else 0);
+                try self.writeStr(q.name);
+            },
             .transaction => |q| {
                 try self.writeByte(0x20);
                 try self.writeTransaction(q);

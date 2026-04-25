@@ -181,25 +181,41 @@ pub const SqlRegistry = struct {
                     .drop_column => |col| try self.schema.dropColumn(s.table, col),
                 }
             },
+            .drop_table => |s| {
+                _ = try self.schema.dropTable(s.name);
+            },
             else => return error.TypeCheckError,
         }
         self.schema_seq += 1;
 
-        // Re-validate all registered queries against new schema
+        // Re-validate all registered queries against the new schema.
+        // DROP TABLE evicts broken queries; other DDL rejects if queries would break.
+        const evict_broken = (stmt == .drop_table);
+        var to_evict: std.ArrayList(QueryHash) = .empty;
+        defer to_evict.deinit(self.alloc);
         var it = self.queries.iterator();
         while (it.next()) |entry| {
             const rq = entry.value_ptr.*;
-            // Re-parse and re-typecheck
             var tmp_arena = std.heap.ArenaAllocator.init(self.alloc);
             defer tmp_arena.deinit();
             const parsed = parser_mod.parse(rq.sql_text, tmp_arena.allocator()) catch {
+                if (evict_broken) { try to_evict.append(self.alloc, entry.key_ptr.*); continue; }
                 return error.SchemaBreakingChange;
             };
             var checker = tc_mod.TypeChecker.init(tmp_arena.allocator(), self.schema);
+            var broken = false;
             for (parsed.stmts) |s| {
-                checker.checkStmt(s, rq.param_types, true) catch {
-                    return error.SchemaBreakingChange;
-                };
+                checker.checkStmt(s, rq.param_types, true) catch { broken = true; break; };
+            }
+            if (broken) {
+                if (evict_broken) { try to_evict.append(self.alloc, entry.key_ptr.*); }
+                else return error.SchemaBreakingChange;
+            }
+        }
+        for (to_evict.items) |h| {
+            if (self.queries.fetchRemove(h)) |kv| {
+                kv.value.deinit();
+                self.alloc.destroy(kv.value);
             }
         }
     }

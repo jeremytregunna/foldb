@@ -2,6 +2,8 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 
+const assert = std.debug.assert;
+
 pub const TableId = u32;
 pub const IndexId = u32;
 pub const ColumnId = u16;
@@ -339,5 +341,35 @@ pub const SchemaRegistry = struct {
         }
         self.alloc.free(tbl.columns);
         tbl.columns = new_cols;
+    }
+
+    /// Drop a table from the schema. Callers must also unregister from storage.
+    pub fn dropTable(self: *SchemaRegistry, name: []const u8) SchemaError!TableId {
+        assert(name.len > 0);
+        const tbl = self.tables.get(name) orelse return error.TableNotFound;
+        const id = tbl.id;
+        assert(id > 0);
+        _ = self.tables.remove(name);
+        _ = self.tables_by_id.remove(id);
+        for (tbl.columns) |col| self.alloc.free(col.name);
+        self.alloc.free(tbl.columns);
+        self.alloc.free(tbl.primary_key);
+        for (tbl.indexes) |idx| {
+            self.alloc.free(idx.columns);
+            switch (idx.extra) {
+                .json_paths => |paths| self.alloc.free(paths),
+                else => {},
+            }
+        }
+        self.alloc.free(tbl.indexes);
+        for (tbl.foreign_keys) |fk| {
+            if (fk.name) |n| self.alloc.free(n);
+            self.alloc.free(fk.columns);
+            self.alloc.free(fk.ref_columns);
+        }
+        if (tbl.foreign_keys.len > 0) self.alloc.free(tbl.foreign_keys);
+        self.alloc.free(tbl.name);
+        self.alloc.destroy(tbl);
+        return id;
     }
 };
