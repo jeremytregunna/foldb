@@ -725,7 +725,24 @@ pub const Gateway = struct {
         var arena = std.heap.ArenaAllocator.init(self.alloc);
         defer arena.deinit();
 
-        const parsed = try @import("sql.zig").parser.parse(sql, arena.allocator());
+        var parser = sql_mod.parser.Parser.init(sql, arena.allocator());
+        const parsed = parser.parseQuery() catch |e| {
+            if (parser.err_msg) |msg| {
+                const pos = parser.err_pos;
+                if (pos < sql.len) {
+                    // Extract the token starting at err_pos (up to 24 chars).
+                    var end = pos;
+                    while (end < sql.len and end - pos < 24) : (end += 1) {
+                        const c = sql[end];
+                        if (c == ' ' or c == '\t' or c == '\n' or c == ';') break;
+                    }
+                    self.setDetail("{s} '{s}'", .{ msg, sql[pos..end] });
+                } else {
+                    self.setDetail("{s}", .{msg});
+                }
+            }
+            return e;
+        };
 
         if (parsed.stmts.len == 0) return;
         const stmt = parsed.stmts[0];

@@ -924,6 +924,7 @@ pub const Parser = struct {
     // ─── Types ───────────────────────────────────────────────────────────
 
     fn parseType(self: *Parser) ParseError!ast.SqlType {
+        const type_pos = try self.pos();
         const k = try self.peekKind();
         const overflow: ast.IntOverflow = blk: {
             const t = try self.advance();
@@ -932,17 +933,17 @@ pub const Parser = struct {
             break :blk .error_on_overflow;
         };
         return switch (k) {
-            .kw_bool => .bool,
-            .kw_int8 => .{ .int8 = overflow },
-            .kw_int16 => .{ .int16 = overflow },
-            .kw_int32 => .{ .int32 = overflow },
-            .kw_int64 => .{ .int64 = overflow },
+            .kw_bool, .kw_boolean => .bool,
+            .kw_int8, .kw_tinyint => .{ .int8 = overflow },
+            .kw_int16, .kw_smallint => .{ .int16 = overflow },
+            .kw_int32, .kw_int, .kw_integer => .{ .int32 = overflow },
+            .kw_int64, .kw_bigint => .{ .int64 = overflow },
             .kw_uint8 => .{ .uint8 = overflow },
             .kw_uint16 => .{ .uint16 = overflow },
             .kw_uint32 => .{ .uint32 = overflow },
             .kw_uint64 => .{ .uint64 = overflow },
-            .kw_float32 => .float32,
-            .kw_float64 => .float64,
+            .kw_float32, .kw_real => .float32,
+            .kw_float64, .kw_float, .kw_double => .float64,
             .kw_decimal => blk: {
                 _ = try self.expect(.sym_lparen);
                 const p = try self.parseInt();
@@ -951,7 +952,15 @@ pub const Parser = struct {
                 _ = try self.expect(.sym_rparen);
                 break :blk .{ .decimal = .{ .precision = @intCast(p), .scale = @intCast(s) } };
             },
-            .kw_string => .string,
+            .kw_string, .kw_text => .string,
+            .kw_varchar, .kw_char => blk: {
+                // Optional (n) length specifier — accepted and ignored.
+                if (try self.eat(.sym_lparen)) {
+                    _ = try self.parseInt();
+                    _ = try self.expect(.sym_rparen);
+                }
+                break :blk .string;
+            },
             .kw_bytes => .bytes,
             .kw_uuid => .uuid,
             .kw_timestamp => .timestamp,
@@ -990,6 +999,7 @@ pub const Parser = struct {
                 break :blk .{ .struct_type = try fields.toOwnedSlice(self.arena) };
             },
             else => {
+                self.err_pos = type_pos;
                 self.err_msg = "expected type name";
                 return error.UnexpectedToken;
             },

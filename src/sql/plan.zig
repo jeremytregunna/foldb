@@ -521,13 +521,14 @@ pub const Planner = struct {
             const cte_node = try self.planSelect(cte.query.*);
             try self.cte_stack.append(self.arena, .{ .name = cte.name, .node = cte_node, .items = cte.query.items });
         }
-        const tbl_ref = q.from orelse {
-            // SELECT without FROM — emit a single empty row so expressions can be evaluated.
-            const node = try self.arena.create(PlanNode);
+        var node: *PlanNode = undefined;
+        if (q.from) |tbl_ref| {
+            node = try self.planTableRef(tbl_ref);
+        } else {
+            // SELECT without FROM — single empty row so expressions can be evaluated.
+            node = try self.arena.create(PlanNode);
             node.* = .single_row;
-            return node;
-        };
-        var node = try self.planTableRef(tbl_ref);
+        }
         node = try self.planSelectJoins(q.joins, node);
         node = try self.planSelectWhere(q.where, node);
         node = try self.planSelectGroupBy(q, node, scope_save, post_agg_save);
