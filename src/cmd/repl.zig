@@ -386,6 +386,7 @@ fn isConnError(e: anyerror) bool {
 }
 
 fn tryReconnect(
+    io: std.Io,
     host: []const u8,
     port: u16,
     alloc: std.mem.Allocator,
@@ -399,7 +400,7 @@ fn tryReconnect(
             _ = std.os.linux.nanosleep(&ts, null);
         }
         out.print("reconnecting to {s}:{d}... ({d}/{d})\n", .{ host, port, attempt + 1, max_attempts }) catch {};
-        const c = client_mod.connect(host, port, alloc) catch continue;
+        const c = client_mod.connect(io, host, port, alloc) catch continue;
         out.print("reconnected\n", .{}) catch {};
         return c;
     }
@@ -411,6 +412,7 @@ fn tryReconnect(
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
+    const io = init.io;
     var out = Out{};
 
     var host: []const u8 = "127.0.0.1";
@@ -426,7 +428,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    var c = client_mod.connect(host, port, alloc) catch |e| {
+    var c = client_mod.connect(io, host, port, alloc) catch |e| {
         try out.print("error: could not connect to {s}:{d}: {}\n", .{ host, port, e });
         return;
     };
@@ -496,7 +498,7 @@ pub fn main(init: std.process.Init) !void {
                 } else {
                     try out.print("connection lost\n", .{});
                     c.deinit();
-                    if (tryReconnect(host, port, alloc, &out)) |new_c| {
+                    if (tryReconnect(io, host, port, alloc, &out)) |new_c| {
                         c = new_c;
                         dispatch(&c, buf.items, alloc, &out) catch {};
                     } else {

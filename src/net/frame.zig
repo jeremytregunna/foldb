@@ -1,5 +1,8 @@
-/// Wire protocol frame layer — header types, flags, kind enum, raw read/write.
+/// Wire protocol frame layer — header types, flags, kind enum, async read/write.
 const std = @import("std");
+
+pub const Reader = std.Io.Reader;
+pub const Writer = std.Io.Writer;
 
 pub const FRAME_HEADER_SIZE: u32 = 16;
 pub const TRACE_EXT_SIZE: u32 = 16;
@@ -69,61 +72,35 @@ pub const Kind = enum(u8) {
     _, // non-exhaustive: unknown values handled at call sites
 };
 
-// ---- low-level I/O helpers (raw Linux syscalls, consistent with codebase pattern) ----
-
-pub fn readExact(fd: std.posix.fd_t, buf: []u8) !void {
-    assert(buf.len > 0);
-    var total: usize = 0;
-    while (total < buf.len) {
-        const n = std.os.linux.read(@intCast(fd), buf.ptr + total, buf.len - total);
-        const ni: isize = @bitCast(n);
-        if (ni < 0) return error.ReadError;
-        if (ni == 0) return error.ConnectionClosed;
-        total += @intCast(ni);
-    }
-    assert(total == buf.len);
-}
-
-pub fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
-    assert(data.len > 0);
-    var sent: usize = 0;
-    while (sent < data.len) {
-        const n = std.os.linux.write(@intCast(fd), data.ptr + sent, data.len - sent);
-        const ni: isize = @bitCast(n);
-        if (ni <= 0) return error.WriteError;
-        sent += @intCast(ni);
-    }
-    assert(sent == data.len);
-}
-
 // ---- frame-level helpers ----
 
 /// Read and return the 16-byte base header. Does NOT read trace extension or payload.
-pub fn readHeader(fd: std.posix.fd_t) !FrameHeader {
+pub fn readHeader(r: *Reader) !FrameHeader {
     var hdr: FrameHeader = undefined;
-    try readExact(fd, std.mem.asBytes(&hdr));
+    try r.readSliceAll(std.mem.asBytes(&hdr));
     return hdr;
 }
 
 /// Read the 16-byte trace extension (call only when header.flags has trace=true).
-pub fn readTraceExt(fd: std.posix.fd_t) ![TRACE_EXT_SIZE]u8 {
+pub fn readTraceExt(r: *Reader) ![TRACE_EXT_SIZE]u8 {
     var trace: [TRACE_EXT_SIZE]u8 = undefined;
-    try readExact(fd, &trace);
+    try r.readSliceAll(&trace);
     return trace;
 }
 
 /// Read exactly payload_len bytes into a freshly allocated buffer. Caller owns the slice.
-pub fn readPayload(fd: std.posix.fd_t, len: u32, alloc: std.mem.Allocator) ![]u8 {
+pub fn readPayload(r: *Reader, len: u32, alloc: std.mem.Allocator) ![]u8 {
     assert(len <= HARD_CAP_PAYLOAD);
     const buf = try alloc.alloc(u8, len);
     errdefer alloc.free(buf);
-    if (len > 0) try readExact(fd, buf);
+    if (len > 0) try r.readSliceAll(buf);
     return buf;
 }
 
 /// Build and send a complete frame: header + optional trace ext + payload.
+/// Flushes the writer so the frame is atomic on the wire.
 pub fn sendFrame(
-    fd: std.posix.fd_t,
+    w: *Writer,
     stream_id: u64,
     kind: Kind,
     flags: Flags,
@@ -140,21 +117,22 @@ pub fn sendFrame(
         .kind = @intFromEnum(kind),
         .flags = @bitCast(f),
     };
-    try writeAll(fd, std.mem.asBytes(&hdr));
-    if (trace_id) |tid| try writeAll(fd, tid);
-    if (payload.len > 0) try writeAll(fd, payload);
+    try w.writeAll(std.mem.asBytes(&hdr));
+    if (trace_id) |tid| try w.writeAll(tid);
+    if (payload.len > 0) try w.writeAll(payload);
+    try w.flush();
 }
 
 /// Send a frame whose payload is in an ArrayList (convenience wrapper).
 pub fn sendFrameList(
-    fd: std.posix.fd_t,
+    w: *Writer,
     stream_id: u64,
     kind: Kind,
     flags: Flags,
     trace_id: ?*const [TRACE_EXT_SIZE]u8,
     payload_list: std.ArrayListUnmanaged(u8),
 ) !void {
-    return sendFrame(fd, stream_id, kind, flags, trace_id, payload_list.items);
+    return sendFrame(w, stream_id, kind, flags, trace_id, payload_list.items);
 }
 
 // ---- compile-time invariant checks ----

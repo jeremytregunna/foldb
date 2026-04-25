@@ -4,6 +4,8 @@ const frame = @import("frame.zig");
 const codec = @import("codec.zig");
 const messages = @import("messages.zig");
 
+const net = std.Io.net;
+
 pub const QueryHash = [32]u8;
 
 /// Maximum frames consumed per response before treating the connection as broken.
@@ -41,19 +43,35 @@ const Frame = struct {
 };
 
 pub const Client = struct {
-    fd: std.posix.fd_t,
+    io: std.Io,
+    stream: net.Stream,
+    reader: net.Stream.Reader,
+    writer: net.Stream.Writer,
+    read_buf: [8192]u8,
+    write_buf: [8192]u8,
     alloc: std.mem.Allocator,
     stream_id_next: u64,
     last_error: [256]u8 = undefined,
     last_error_len: u32 = 0,
 
-    pub fn init(fd: std.posix.fd_t, alloc: std.mem.Allocator) Client {
-        assert(fd >= 0);
-        return .{ .fd = fd, .alloc = alloc, .stream_id_next = 1 };
+    pub fn init(io: std.Io, stream: net.Stream, alloc: std.mem.Allocator) Client {
+        var c: Client = .{
+            .io = io,
+            .stream = stream,
+            .reader = undefined,
+            .writer = undefined,
+            .read_buf = undefined,
+            .write_buf = undefined,
+            .alloc = alloc,
+            .stream_id_next = 1,
+        };
+        c.reader = stream.reader(io, &c.read_buf);
+        c.writer = stream.writer(io, &c.write_buf);
+        return c;
     }
 
     pub fn deinit(self: *Client) void {
-        _ = std.os.linux.close(@intCast(self.fd));
+        self.stream.close(self.io);
     }
 
     fn alloc_stream_id(self: *Client) u64 {
@@ -81,17 +99,17 @@ pub const Client = struct {
     }
 
     pub fn close(self: *Client) void {
-        frame.sendFrame(self.fd, 0, .goodbye, frame.Flags.final_only, null, &.{}) catch {};
-        _ = std.os.linux.close(@intCast(self.fd));
+        frame.sendFrame(&self.writer.interface, 0, .goodbye, frame.Flags.final_only, null, &.{}) catch {};
+        self.stream.close(self.io);
     }
 
     fn read_frame(self: *Client) !Frame {
-        const header = try frame.readHeader(self.fd);
+        const header = try frame.readHeader(&self.reader.interface);
         const kind: frame.Kind = @enumFromInt(header.kind);
         if (@as(frame.Flags, @bitCast(header.flags)).trace) {
-            _ = try frame.readTraceExt(self.fd);
+            _ = try frame.readTraceExt(&self.reader.interface);
         }
-        const payload = try frame.readPayload(self.fd, header.payload_len, self.alloc);
+        const payload = try frame.readPayload(&self.reader.interface, header.payload_len, self.alloc);
         return .{ .kind = kind, .stream_id = header.stream_id, .payload = payload };
     }
 
@@ -121,7 +139,7 @@ pub const Client = struct {
             .client_max_frame_size = frame.DEFAULT_MAX_PAYLOAD,
             .payload = .none,
         });
-        try frame.sendFrameList(self.fd, 0, .auth, frame.Flags.final_only, null, auth_payload);
+        try frame.sendFrameList(&self.writer.interface, 0, .auth, frame.Flags.final_only, null, auth_payload);
 
         for (0..frames_per_response_max) |_| {
             const f = try self.read_frame();
@@ -144,7 +162,7 @@ pub const Client = struct {
         var payload: std.ArrayListUnmanaged(u8) = .empty;
         defer payload.deinit(self.alloc);
         try messages.encodeRegisterQuery(&payload, self.alloc, .{ .sql = sql });
-        try frame.sendFrameList(self.fd, stream_id, .register, frame.Flags.final_only, null, payload);
+        try frame.sendFrameList(&self.writer.interface, stream_id, .register, frame.Flags.final_only, null, payload);
         return self.register_read_response(stream_id);
     }
 
@@ -176,7 +194,7 @@ pub const Client = struct {
         var payload: std.ArrayListUnmanaged(u8) = .empty;
         defer payload.deinit(self.alloc);
         try messages.encodeExecute(&payload, self.alloc, .{ .query_hash = hash, .params = params });
-        try frame.sendFrameList(self.fd, stream_id, .execute, frame.Flags.final_only, null, payload);
+        try frame.sendFrameList(&self.writer.interface, stream_id, .execute, frame.Flags.final_only, null, payload);
         return self.execute_read_ok(stream_id);
     }
 
@@ -210,7 +228,7 @@ pub const Client = struct {
         var payload: std.ArrayListUnmanaged(u8) = .empty;
         defer payload.deinit(self.alloc);
         try messages.encodeExecute(&payload, self.alloc, .{ .query_hash = hash, .params = params });
-        try frame.sendFrameList(self.fd, stream_id, .execute, frame.Flags.final_only, null, payload);
+        try frame.sendFrameList(&self.writer.interface, stream_id, .execute, frame.Flags.final_only, null, payload);
         return self.query_read_result_set(stream_id);
     }
 
@@ -301,59 +319,21 @@ pub const Client = struct {
     }
 };
 
-/// Open a TCP socket and connect to host:port.
+/// Open a TCP connection to host:port using std.Io networking.
 /// host must be a dotted-quad IPv4 string, e.g. "127.0.0.1".
-pub fn connect_fd(host: []const u8, port: u16) !std.posix.fd_t {
+pub fn connect_stream(io: std.Io, host: []const u8, port: u16) !net.Stream {
     assert(host.len > 0);
     assert(port > 0);
-    const AF_INET: u32 = 2;
-    const SOCK_STREAM: u32 = 1;
-    const SOCK_CLOEXEC: u32 = 0o2000000;
-    const sockaddr_in_len: u32 = 16; // sizeof(struct sockaddr_in) per POSIX
-
-    const socket_rc = std.os.linux.socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    const socket_result: isize = @bitCast(socket_rc);
-    if (socket_result < 0) return error.SocketError;
-    const fd: std.posix.fd_t = @intCast(socket_result);
-    assert(fd >= 0);
-    errdefer _ = std.os.linux.close(@intCast(fd));
-
-    const addr_u32 = try parse_ipv4(host);
-
-    var addr_buf: [sockaddr_in_len]u8 align(2) = std.mem.zeroes([sockaddr_in_len]u8);
-    std.mem.writeInt(u16, addr_buf[0..2], AF_INET, .little);
-    std.mem.writeInt(u16, addr_buf[2..4], port, .big);
-    std.mem.writeInt(u32, addr_buf[4..8], addr_u32, .big);
-
-    const connect_rc = std.os.linux.connect(@intCast(fd), @ptrCast(@alignCast(&addr_buf)), sockaddr_in_len);
-    const connect_result: isize = @bitCast(connect_rc);
-    if (connect_result < 0) return error.ConnectError;
-    assert(connect_result == 0);
-
-    return fd;
-}
-
-fn parse_ipv4(host: []const u8) !u32 {
-    assert(host.len > 0);
-    var it = std.mem.splitScalar(u8, host, '.');
-    var addr: u32 = 0;
-    var octet_count: u8 = 0;
-    while (it.next()) |octet| : (octet_count += 1) {
-        if (octet_count >= 4) return error.InvalidAddress;
-        const byte = try std.fmt.parseInt(u8, octet, 10);
-        addr = (addr << 8) | byte;
-    }
-    if (octet_count != 4) return error.InvalidAddress;
-    assert(octet_count == 4);
-    return addr;
+    const address = try net.IpAddress.parse(host, port);
+    return address.connect(io, .{ .mode = .stream });
 }
 
 /// Connect to host:port and complete the Hello → Auth(none) → AuthOk handshake.
-pub fn connect(host: []const u8, port: u16, alloc: std.mem.Allocator) !Client {
+pub fn connect(io: std.Io, host: []const u8, port: u16, alloc: std.mem.Allocator) !Client {
     assert(host.len > 0);
     assert(port > 0);
-    const fd = try connect_fd(host, port);
-    var client = Client.init(fd, alloc);
+    const stream = try connect_stream(io, host, port);
+    var client = Client.init(io, stream, alloc);
     errdefer client.deinit();
     try client.handshake();
     return client;

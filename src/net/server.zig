@@ -185,11 +185,14 @@ fn handleConn(
     alloc: std.mem.Allocator,
     registry: *ConnRegistry,
 ) !void {
-    _ = io;
     assert(client_fd >= 0);
     registry.add(client_fd);
     defer registry.remove(client_fd);
-    try conn_mod.Conn.run(client_fd, gw, users, alloc);
+    const stream: std.Io.net.Stream = .{ .socket = .{
+        .handle = client_fd,
+        .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } },
+    } };
+    try conn_mod.Conn.run(io, stream, gw, users, alloc);
 }
 
 /// Main server loop. Accepts connections and spawns a concurrent task per connection.

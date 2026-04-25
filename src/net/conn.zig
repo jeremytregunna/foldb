@@ -9,6 +9,7 @@ const errors = @import("errors.zig");
 const config_mod = @import("config.zig");
 
 const assert = std.debug.assert;
+const net = std.Io.net;
 
 const FrameHeader = frame.FrameHeader;
 const Kind = frame.Kind;
@@ -19,19 +20,12 @@ const Cursor = codec.Cursor;
 
 pub const SERVER_VERSION = "1.0.0-dev";
 
-// ---- socket flag constants ----
-
-/// recvfrom(2) flags: MSG_PEEK (0x02) | MSG_DONTWAIT (0x40).
-const MSG_PEEK_DONTWAIT: u32 = 0x42;
-/// recvfrom(2) flag: MSG_DONTWAIT (0x40).
-const MSG_DONTWAIT: u32 = 0x40;
-
-/// Subscription drain poll sleep when no CDC events are ready (1 ms in nanoseconds).
+/// Subscription drain poll timeout (1 ms in nanoseconds).
 const DRAIN_POLL_SLEEP_NS: u64 = 1_000_000;
 
-/// Microseconds per second, for converting CLOCK_REALTIME tv_sec → µs.
+/// Microseconds per second, for converting wall-clock ns → µs.
 const US_PER_SEC: u64 = 1_000_000;
-/// Nanoseconds per microsecond, for converting tv_nsec → µs.
+/// Nanoseconds per microsecond.
 const NS_PER_US: u64 = 1_000;
 
 comptime {
@@ -53,7 +47,12 @@ const StreamState = struct {
 
 /// State machine for a single connection.
 pub const Conn = struct {
-    fd: std.posix.fd_t,
+    io: std.Io,
+    stream: net.Stream,
+    reader: net.Stream.Reader,
+    writer: net.Stream.Writer,
+    read_buf: [8192]u8,
+    write_buf: [8192]u8,
     max_payload: u32,
     negotiated: bool,
     streams: std.AutoHashMap(u64, StreamState),
@@ -62,10 +61,14 @@ pub const Conn = struct {
     gw: *gateway_mod.Gateway,
     users: []const config_mod.UserEntry,
 
-    fn init(fd: std.posix.fd_t, gw: *gateway_mod.Gateway, users: []const config_mod.UserEntry, alloc: std.mem.Allocator) Conn {
-        assert(fd >= 0);
+    fn init(io: std.Io, stream: net.Stream, gw: *gateway_mod.Gateway, users: []const config_mod.UserEntry, alloc: std.mem.Allocator) Conn {
         return .{
-            .fd = fd,
+            .io = io,
+            .stream = stream,
+            .reader = undefined,
+            .writer = undefined,
+            .read_buf = undefined,
+            .write_buf = undefined,
             .max_payload = frame.PRE_HELLO_CAP,
             .negotiated = false,
             .streams = std.AutoHashMap(u64, StreamState).init(alloc),
@@ -98,7 +101,7 @@ pub const Conn = struct {
         defer out.deinit(self.alloc);
         msg.encodeError(&out, self.alloc, code, severity, text, "") catch return;
         const flags: Flags = if (stream_id != 0) .final_only else .none;
-        frame.sendFrame(self.fd, stream_id, .err, flags, null, out.items) catch {};
+        frame.sendFrame(&self.writer.interface, stream_id, .err, flags, null, out.items) catch {};
     }
 
     fn sendFatalError(self: *Conn, code: msg.ErrorCode, text: []const u8) void {
@@ -110,31 +113,40 @@ pub const Conn = struct {
     }
 
     fn sendPong(self: *Conn, client_wall_micros: u64) !void {
-        var ts: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
-        const server_us: u64 = @as(u64, @intCast(ts.sec)) * US_PER_SEC +
-            @as(u64, @intCast(@divTrunc(ts.nsec, 1_000))); // 1_000 == NS_PER_US
+        const ts = std.Io.Timestamp.now(self.io, .real);
+        const server_us: u64 = @intCast(@divTrunc(ts.nanoseconds, std.time.ns_per_us));
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(self.alloc);
         try msg.encodePong(&out, self.alloc, .{
             .client_wall_micros = client_wall_micros,
             .server_wall_micros = server_us,
         });
-        try frame.sendFrame(self.fd, 0, .pong, .none, null, out.items);
+        try frame.sendFrame(&self.writer.interface, 0, .pong, .none, null, out.items);
     }
 
     // ---- TLS negotiation ----
 
     fn handleTlsNegotiation(self: *Conn) !void {
-        var peek: [4]u8 = undefined;
-        const n = std.os.linux.recvfrom(@intCast(self.fd), &peek, peek.len, MSG_PEEK_DONTWAIT, null, null);
-        const ni: isize = @bitCast(n);
-        if (ni < 4) return;
-        if (std.mem.eql(u8, &peek, "FDBT")) {
-            var consume: [4]u8 = undefined;
-            try frame.readExact(self.fd, &consume);
-            try frame.writeAll(self.fd, "N");
-        }
+        // Non-blocking check (zero timeout = return immediately if no data).
+        // Equivalent to MSG_PEEK | MSG_DONTWAIT: leaves bytes in socket buffer.
+        var probe_buf: [4]u8 = undefined;
+        var incoming: net.IncomingMessage = .init;
+        _ = self.io.operateTimeout(
+            .{ .net_receive = .{
+                .socket_handle = self.stream.socket.handle,
+                .message_buffer = (&incoming)[0..1],
+                .data_buffer = &probe_buf,
+                .flags = .{ .peek = true },
+            } },
+            .{ .duration = .{ .raw = .{ .nanoseconds = 0 }, .clock = .awake } },
+        ) catch return; // Timeout (no data ready) or error: proceed normally
+        if (incoming.data.len < 4) return;
+        if (!std.mem.eql(u8, incoming.data[0..4], "FDBT")) return;
+        // Consume the 4 peeked bytes via the reader so its state stays consistent
+        var consume: [4]u8 = undefined;
+        self.reader.interface.readSliceAll(&consume) catch return;
+        try self.writer.interface.writeByte('N');
+        try self.writer.interface.flush();
     }
 
     // ---- handshake ----
@@ -151,11 +163,11 @@ pub const Conn = struct {
             .auth_methods = auth_methods,
             .max_frame_payload_size = frame.DEFAULT_MAX_PAYLOAD,
         });
-        try frame.sendFrame(self.fd, 0, .hello, .none, null, out.items);
+        try frame.sendFrame(&self.writer.interface, 0, .hello, .none, null, out.items);
     }
 
     fn receiveAuth(self: *Conn) !void {
-        const hdr = try frame.readHeader(self.fd);
+        const hdr = try frame.readHeader(&self.reader.interface);
         if (hdr.payload_len > frame.PRE_HELLO_CAP) {
             self.sendFatalError(.frame_too_large, "Auth frame too large");
             return error.ProtocolError;
@@ -165,7 +177,7 @@ pub const Conn = struct {
             self.sendFatalError(.protocol_error, "expected Auth frame");
             return error.ProtocolError;
         }
-        const payload = try frame.readPayload(self.fd, hdr.payload_len, self.alloc);
+        const payload = try frame.readPayload(&self.reader.interface, hdr.payload_len, self.alloc);
         defer self.alloc.free(payload);
         var cur = Cursor.init(payload);
         const auth = msg.decodeAuth(&cur, self.alloc) catch {
@@ -194,16 +206,17 @@ pub const Conn = struct {
             self.sendFatalError(.auth_failed, "authentication failed");
             return error.ProtocolError;
         }
-        try frame.sendFrame(self.fd, 0, .auth_ok, .none, null, &.{});
+        try frame.sendFrame(&self.writer.interface, 0, .auth_ok, .none, null, &.{});
     }
 
     // ---- main dispatch loop ----
 
-    pub fn run(fd: std.posix.fd_t, gw: *gateway_mod.Gateway, users: []const config_mod.UserEntry, alloc: std.mem.Allocator) !void {
-        assert(fd >= 0);
-        var conn = Conn.init(fd, gw, users, alloc);
+    pub fn run(io: std.Io, stream: net.Stream, gw: *gateway_mod.Gateway, users: []const config_mod.UserEntry, alloc: std.mem.Allocator) !void {
+        var conn = Conn.init(io, stream, gw, users, alloc);
+        conn.reader = stream.reader(io, &conn.read_buf);
+        conn.writer = stream.writer(io, &conn.write_buf);
         defer conn.deinit();
-        defer _ = std.os.linux.close(@intCast(fd));
+        defer conn.stream.close(conn.io);
         conn.handleTlsNegotiation() catch {};
         conn.sendHello() catch return;
         conn.receiveAuth() catch return;
@@ -222,19 +235,16 @@ pub const Conn = struct {
             // here on the I/O thread means schema/registry are never mutated from
             // a background thread concurrently with connection reads — no lock needed.
             self.gw.applyNewEntries() catch {};
-            const hdr = frame.readHeader(self.fd) catch |e| switch (e) {
-                error.ConnectionClosed => return,
-                else => return e,
-            };
+            const hdr = frame.readHeader(&self.reader.interface) catch return;
             if (hdr.payload_len > self.cap()) {
                 self.sendFatalError(.frame_too_large, "frame exceeds cap");
                 return;
             }
             const flags: Flags = @bitCast(hdr.flags);
             if (flags.trace) {
-                _ = try frame.readTraceExt(self.fd); // consume but not yet echoed
+                _ = try frame.readTraceExt(&self.reader.interface); // consume but not yet echoed
             }
-            const payload = try frame.readPayload(self.fd, hdr.payload_len, self.alloc);
+            const payload = try frame.readPayload(&self.reader.interface, hdr.payload_len, self.alloc);
             defer self.alloc.free(payload);
             const kind: Kind = @enumFromInt(hdr.kind);
             self.dispatch(hdr.stream_id, kind, payload) catch |e| switch (e) {
@@ -280,7 +290,7 @@ pub const Conn = struct {
             self.sendFatalError(.protocol_error, "Goodbye must be on stream 0");
             return error.ConnectionClosed;
         }
-        try frame.sendFrame(self.fd, 0, .goodbye, .none, null, &.{});
+        try frame.sendFrame(&self.writer.interface, 0, .goodbye, .none, null, &.{});
         return error.Goodbye;
     }
 
@@ -334,7 +344,7 @@ pub const Conn = struct {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(self.alloc);
         try msg.encodeRegistered(&out, self.alloc, .{ .query_hash = result.hash, .param_tags = &.{}, .columns = &.{} });
-        try frame.sendFrame(self.fd, stream_id, .registered, .final_only, null, out.items);
+        try frame.sendFrame(&self.writer.interface, stream_id, .registered, .final_only, null, out.items);
     }
 
     fn handleRegisterDdl(self: *Conn, stream_id: u64, sql: []const u8) !void {
@@ -359,7 +369,7 @@ pub const Conn = struct {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(self.alloc);
         try msg.encodeRegistered(&out, self.alloc, .{ .query_hash = hash, .param_tags = &.{}, .columns = &.{} });
-        try frame.sendFrame(self.fd, stream_id, .registered, .final_only, null, out.items);
+        try frame.sendFrame(&self.writer.interface, stream_id, .registered, .final_only, null, out.items);
     }
 
     // ---- Execute ----
@@ -374,7 +384,7 @@ pub const Conn = struct {
             var out: std.ArrayListUnmanaged(u8) = .empty;
             defer out.deinit(self.alloc);
             try msg.encodeExecOk(&out, self.alloc, .{ .rows_affected = 0, .committed_seq = self.gw.currentSeq() });
-            try frame.sendFrame(self.fd, stream_id, .exec_ok, .final_only, null, out.items);
+            try frame.sendFrame(&self.writer.interface, stream_id, .exec_ok, .final_only, null, out.items);
             return;
         }
         const params = try self.typedValuesToColumnValues(ex.params);
@@ -402,7 +412,7 @@ pub const Conn = struct {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(self.alloc);
         try msg.encodeExecOk(&out, self.alloc, .{ .rows_affected = exec_result.rows_affected, .committed_seq = self.gw.currentSeq() });
-        try frame.sendFrame(self.fd, stream_id, .exec_ok, .final_only, null, out.items);
+        try frame.sendFrame(&self.writer.interface, stream_id, .exec_ok, .final_only, null, out.items);
     }
 
     // ---- ReadAt ----
@@ -467,7 +477,7 @@ pub const Conn = struct {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(self.alloc);
         try msg.encodeSubscribeAck(&out, self.alloc, resolved.items);
-        try frame.sendFrame(self.fd, stream_id, .subscribe_ack, .more_only, null, out.items);
+        try frame.sendFrame(&self.writer.interface, stream_id, .subscribe_ack, .more_only, null, out.items);
         try self.drainSubscription(stream_id, sub);
     }
 
@@ -476,36 +486,45 @@ pub const Conn = struct {
         assert(state.kind == .subscription);
         var buf: [16]gateway_mod.CdcEvent = undefined;
         // Non-terminating loop: exits on unsubscribe, cancel, goodbye, or I/O error.
-        // Progress guaranteed: each iteration either flushes CDC events or performs
-        // one blocking or non-blocking socket read, or sleeps 1 ms before retrying.
         while (true) {
             try self.flushCdcCredits(stream_id, sub, state, &buf);
             if (state.canceled) return;
-            var hdr_buf: [@sizeOf(FrameHeader)]u8 = undefined;
-            const recv_n = std.os.linux.recvfrom(@intCast(self.fd), &hdr_buf, hdr_buf.len, MSG_DONTWAIT, null, null);
-            const recv_ni: isize = @bitCast(recv_n);
-            if (recv_ni < 0) {
-                const errno = std.os.linux.errno(recv_n);
-                if (errno == .AGAIN) {
-                    // Apply committed log entries before sleeping so CDC events
-                    // produced by new writes become visible on this iteration.
-                    self.gw.applyNewEntries() catch {};
-                    var ts = std.os.linux.timespec{ .sec = 0, .nsec = @intCast(DRAIN_POLL_SLEEP_NS) };
-                    _ = std.os.linux.nanosleep(&ts, null);
-                    continue;
+
+            var hdr_buf: [frame.FRAME_HEADER_SIZE]u8 = undefined;
+
+            if (self.reader.interface.bufferedLen() > 0) {
+                // Reader has pre-buffered bytes from a previous read: use reader
+                // directly to avoid bypassing its internal buffer.
+                self.reader.interface.readSliceAll(&hdr_buf) catch return;
+            } else {
+                // No buffered data: poll socket with a 1ms timeout so other fibers
+                // can run and CDC events stay timely. On timeout, apply committed
+                // entries so new events become visible, then loop.
+                const recv_msg = self.stream.socket.receiveTimeout(
+                    self.io,
+                    &hdr_buf,
+                    .{ .duration = .{ .raw = .{ .nanoseconds = DRAIN_POLL_SLEEP_NS }, .clock = .awake } },
+                ) catch |e| switch (e) {
+                    error.Timeout => { self.gw.applyNewEntries() catch {}; continue; },
+                    error.Canceled => return,
+                    else => return,
+                };
+                const recv_n = recv_msg.data.len;
+                if (recv_n == 0) return;
+                if (recv_n < frame.FRAME_HEADER_SIZE) {
+                    // Partial header: read the remaining bytes through the reader.
+                    // The reader buffer was empty when we entered this branch, so
+                    // it reads the next bytes in stream order correctly.
+                    self.reader.interface.readSliceAll(hdr_buf[recv_n..]) catch return;
                 }
-                return;
             }
-            if (recv_ni == 0) return;
-            if (recv_ni < @sizeOf(FrameHeader)) {
-                try frame.readExact(self.fd, hdr_buf[@intCast(recv_ni)..]);
-            }
+
             const client_hdr: FrameHeader = @bitCast(hdr_buf);
             if (client_hdr.payload_len > self.cap()) {
                 self.sendFatalError(.frame_too_large, "frame exceeds cap");
                 return;
             }
-            const client_payload = try frame.readPayload(self.fd, client_hdr.payload_len, self.alloc);
+            const client_payload = frame.readPayload(&self.reader.interface, client_hdr.payload_len, self.alloc) catch return;
             defer self.alloc.free(client_payload);
             const client_kind: Kind = @enumFromInt(client_hdr.kind);
             const should_exit = try self.handleSubscriptionClientFrame(stream_id, state, sub, client_kind, client_payload);
@@ -560,7 +579,7 @@ pub const Conn = struct {
                 var out: std.ArrayListUnmanaged(u8) = .empty;
                 defer out.deinit(self.alloc);
                 try msg.encodeExecOk(&out, self.alloc, .{ .rows_affected = 0, .committed_seq = frame.NO_COMMIT_SEQ });
-                try frame.sendFrame(self.fd, stream_id, .exec_ok, .final_only, null, out.items);
+                try frame.sendFrame(&self.writer.interface, stream_id, .exec_ok, .final_only, null, out.items);
                 return true;
             },
             .cancel => {
@@ -611,7 +630,7 @@ pub const Conn = struct {
             try wire_effects.append(self.alloc, .{ .table_id = effect.table_id, .key = effect.key, .op = op, .before = before, .after = after });
         }
         try msg.encodeCdcEvent(&out, self.alloc, ev.seq, ev.epoch, wire_effects.items);
-        try frame.sendFrame(self.fd, stream_id, .cdc_event, .none, null, out.items);
+        try frame.sendFrame(&self.writer.interface, stream_id, .cdc_event, .none, null, out.items);
     }
 
     // ---- AckCdc (outside subscription drain) ----
@@ -638,7 +657,7 @@ pub const Conn = struct {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(self.alloc);
         try msg.encodeExecOk(&out, self.alloc, .{ .rows_affected = 0, .committed_seq = frame.NO_COMMIT_SEQ });
-        try frame.sendFrame(self.fd, stream_id, .exec_ok, .final_only, null, out.items);
+        try frame.sendFrame(&self.writer.interface, stream_id, .exec_ok, .final_only, null, out.items);
     }
 
     // ---- result encoding ----
@@ -651,7 +670,7 @@ pub const Conn = struct {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(self.alloc);
         try msg.encodeExecOk(&out, self.alloc, .{ .rows_affected = @intCast(rs.rows.len), .committed_seq = frame.NO_COMMIT_SEQ });
-        try frame.sendFrame(self.fd, stream_id, .exec_ok, .final_only, null, out.items);
+        try frame.sendFrame(&self.writer.interface, stream_id, .exec_ok, .final_only, null, out.items);
     }
 
     fn sendRowsBeginFrame(self: *Conn, stream_id: u64, rs: *gateway_mod.ResultSet) !void {
@@ -674,7 +693,7 @@ pub const Conn = struct {
             cd.* = .{ .name = name, .type_tag = 0x00, .nullable = true };
         }
         try msg.encodeRowsBegin(&out, self.alloc, .{ .columns = cds });
-        try frame.sendFrame(self.fd, stream_id, .rows_begin, .more_only, null, out.items);
+        try frame.sendFrame(&self.writer.interface, stream_id, .rows_begin, .more_only, null, out.items);
     }
 
     fn sendRowsBatchFrame(self: *Conn, stream_id: u64, rs: gateway_mod.ResultSet) !void {
@@ -698,7 +717,7 @@ pub const Conn = struct {
         defer self.alloc.free(const_rows);
         for (wire_rows.items, 0..) |row, i| const_rows[i] = row;
         try msg.encodeRowsBatch(&out, self.alloc, const_rows);
-        try frame.sendFrame(self.fd, stream_id, .rows_batch, .more_only, null, out.items);
+        try frame.sendFrame(&self.writer.interface, stream_id, .rows_batch, .more_only, null, out.items);
     }
 
     // ---- type conversion helpers ----
