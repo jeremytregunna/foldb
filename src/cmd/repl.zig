@@ -133,6 +133,40 @@ fn printTable(rs: *client_mod.ResultSet, out: *Out) !void {
     try out.print("({d} row(s))\n", .{rs.rows.len});
 }
 
+fn printDecimal(d: anytype, out: *Out) !void {
+    if (d.scale == 0) {
+        try out.print("{d}", .{d.coefficient});
+        return;
+    }
+    const neg = d.coefficient < 0;
+    const abs_c: u128 = if (neg) @intCast(-d.coefficient) else @intCast(d.coefficient);
+    var pow: u128 = 1;
+    var s: u8 = 0;
+    while (s < d.scale) : (s += 1) pow *= 10;
+    const int_part = abs_c / pow;
+    const frac_part = abs_c % pow;
+
+    // Build fractional digits with leading zeros to fill exactly scale positions.
+    var tmp: [40]u8 = undefined;
+    const frac_str = std.fmt.bufPrint(&tmp, "{d}", .{frac_part}) catch unreachable;
+    const leading: usize = d.scale - frac_str.len;
+    var frac_buf: [40]u8 = undefined;
+    @memset(frac_buf[0..leading], '0');
+    @memcpy(frac_buf[leading .. leading + frac_str.len], frac_str);
+    const full_frac = frac_buf[0 .. leading + frac_str.len];
+
+    // Trim trailing zeros.
+    var trim = full_frac.len;
+    while (trim > 0 and full_frac[trim - 1] == '0') trim -= 1;
+
+    if (neg) try out.print("-", .{});
+    if (trim == 0) {
+        try out.print("{d}", .{int_part});
+    } else {
+        try out.print("{d}.{s}", .{ int_part, full_frac[0..trim] });
+    }
+}
+
 fn printValue(v: messages.TypedValue, out: *Out) !void {
     switch (v) {
         .null_val => try out.print("NULL", .{}),
@@ -147,6 +181,7 @@ fn printValue(v: messages.TypedValue, out: *Out) !void {
         .uint64 => |n| try out.print("{d}", .{n}),
         .float32 => |f| try out.print("{d}", .{f}),
         .float64 => |f| try out.print("{d}", .{f}),
+        .decimal => |d| try printDecimal(d, out),
         .string => |s| try out.print("{s}", .{s}),
         .bytes => |b| try out.print("<bytes:{d}>", .{b.len}),
         .timestamp => |t| try out.print("{d}", .{t}),
