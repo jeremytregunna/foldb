@@ -1037,6 +1037,16 @@ pub fn build(b: *std.Build) void {
     const seq_follower_submit_tests = b.addTest(.{ .root_module = seq_follower_submit_test_module });
     const run_seq_follower_submit_tests = b.addRunArtifact(seq_follower_submit_tests);
 
+    // Sequencer seq monotonicity DST (Fix 2: counter ordering)
+    const seq_mono_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sequencer/seq_monotonicity_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    seq_mono_test_module.addImport("sequencer.zig", sequencer_module);
+    const seq_mono_tests = b.addTest(.{ .root_module = seq_mono_test_module });
+    const run_seq_mono_tests = b.addRunArtifact(seq_mono_tests);
+
     // CDC unit tests
     const cdc_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/cdc/cdc_test.zig"),
@@ -1347,6 +1357,7 @@ pub fn build(b: *std.Build) void {
     dst_step.dependOn(&run_raft_sweep_tests.step);
     dst_step.dependOn(&run_sim_snapshot_dst_tests.step);
     dst_step.dependOn(&run_sim_kill9_tests.step);
+    dst_step.dependOn(&run_seq_mono_tests.step);
     dst_step.dependOn(&run_sim_sweep_dst_tests.step);
 
     // S3 snapshot integration test — requires test-s3.json in the project root.
