@@ -237,16 +237,14 @@ fn classify(sql: []const u8) SqlKind {
 
 // ---- Result display ----
 
-fn printDecimal(d: anytype, out: *Out) !void {
-    if (d.scale == 0) {
-        try out.print("{d}", .{d.coefficient});
-        return;
-    }
+
+fn renderDecimal(d: anytype, alloc: std.mem.Allocator) ![]u8 {
+    if (d.scale == 0) return std.fmt.allocPrint(alloc, "{d}", .{d.coefficient});
     const neg = d.coefficient < 0;
     const abs_c: u128 = if (neg) @intCast(-d.coefficient) else @intCast(d.coefficient);
     var pow: u128 = 1;
-    var s: u8 = 0;
-    while (s < d.scale) : (s += 1) pow *= 10;
+    var sc: u8 = 0;
+    while (sc < d.scale) : (sc += 1) pow *= 10;
     const int_part = abs_c / pow;
     const frac_part = abs_c % pow;
     var tmp: [40]u8 = undefined;
@@ -258,61 +256,87 @@ fn printDecimal(d: anytype, out: *Out) !void {
     const full_frac = frac_buf[0 .. leading + frac_str.len];
     var trim = full_frac.len;
     while (trim > 0 and full_frac[trim - 1] == '0') trim -= 1;
-    if (neg) try out.print("-", .{});
-    if (trim == 0) {
-        try out.print("{d}", .{int_part});
-    } else {
-        try out.print("{d}.{s}", .{ int_part, full_frac[0..trim] });
-    }
+    const sign: []const u8 = if (neg) "-" else "";
+    if (trim == 0) return std.fmt.allocPrint(alloc, "{s}{d}", .{ sign, int_part });
+    return std.fmt.allocPrint(alloc, "{s}{d}.{s}", .{ sign, int_part, full_frac[0..trim] });
 }
 
-fn printValue(v: messages.TypedValue, out: *Out) !void {
-    switch (v) {
-        .null_val => try out.print("NULL", .{}),
-        .bool_val => |b| try out.print("{}", .{b}),
-        .int8 => |n| try out.print("{d}", .{n}),
-        .int16 => |n| try out.print("{d}", .{n}),
-        .int32 => |n| try out.print("{d}", .{n}),
-        .int64 => |n| try out.print("{d}", .{n}),
-        .uint8 => |n| try out.print("{d}", .{n}),
-        .uint16 => |n| try out.print("{d}", .{n}),
-        .uint32 => |n| try out.print("{d}", .{n}),
-        .uint64 => |n| try out.print("{d}", .{n}),
-        .float32 => |f| try out.print("{d}", .{f}),
-        .float64 => |f| try out.print("{d}", .{f}),
-        .decimal => |d| try printDecimal(d, out),
-        .string => |s| try out.print("{s}", .{s}),
-        .bytes => |b| try out.print("<bytes:{d}>", .{b.len}),
-        .timestamp => |t| try out.print("{d}", .{t}),
-        .json => |j| try out.print("{s}", .{j}),
-        else => try out.print("?", .{}),
-    }
+fn renderValue(v: messages.TypedValue, alloc: std.mem.Allocator) ![]u8 {
+    return switch (v) {
+        .null_val => alloc.dupe(u8, "NULL"),
+        .bool_val => |b| std.fmt.allocPrint(alloc, "{}", .{b}),
+        .int8 => |n| std.fmt.allocPrint(alloc, "{d}", .{n}),
+        .int16 => |n| std.fmt.allocPrint(alloc, "{d}", .{n}),
+        .int32 => |n| std.fmt.allocPrint(alloc, "{d}", .{n}),
+        .int64 => |n| std.fmt.allocPrint(alloc, "{d}", .{n}),
+        .uint8 => |n| std.fmt.allocPrint(alloc, "{d}", .{n}),
+        .uint16 => |n| std.fmt.allocPrint(alloc, "{d}", .{n}),
+        .uint32 => |n| std.fmt.allocPrint(alloc, "{d}", .{n}),
+        .uint64 => |n| std.fmt.allocPrint(alloc, "{d}", .{n}),
+        .float32 => |f| std.fmt.allocPrint(alloc, "{d}", .{f}),
+        .float64 => |f| std.fmt.allocPrint(alloc, "{d}", .{f}),
+        .decimal => |d| renderDecimal(d, alloc),
+        .string => |s| alloc.dupe(u8, s),
+        .bytes => |b| std.fmt.allocPrint(alloc, "<bytes:{d}>", .{b.len}),
+        .timestamp => |t| std.fmt.allocPrint(alloc, "{d}", .{t}),
+        .json => |j| alloc.dupe(u8, j),
+        else => alloc.dupe(u8, "?"),
+    };
 }
 
-fn printTable(rs: *client_mod.ResultSet, out: *Out) !void {
+fn printTable(rs: *client_mod.ResultSet, alloc: std.mem.Allocator, out: *Out) !void {
+    const ncols = rs.columns.len;
+    const nrows = rs.rows.len;
+
+    // Render all cell strings and compute column widths.
+    const widths = try alloc.alloc(usize, ncols);
+    defer alloc.free(widths);
+    for (rs.columns, 0..) |col, i| widths[i] = col.name.len;
+
+    const cells = try alloc.alloc([]u8, nrows * ncols);
+    defer {
+        for (cells) |c| alloc.free(c);
+        alloc.free(cells);
+    }
+    for (rs.rows, 0..) |row, r| {
+        for (row, 0..) |val, c| {
+            const s = try renderValue(val, alloc);
+            cells[r * ncols + c] = s;
+            if (s.len > widths[c]) widths[c] = s.len;
+        }
+    }
+
+    // Header row.
     for (rs.columns, 0..) |col, i| {
         if (i > 0) try out.print(" | ", .{});
         try out.print("{s}", .{col.name});
+        for (0..widths[i] - col.name.len) |_| try out.print(" ", .{});
     }
     try out.print("\n", .{});
-    for (rs.columns, 0..) |col, i| {
+
+    // Separator.
+    for (widths, 0..) |w, i| {
         if (i > 0) try out.print("-+-", .{});
-        for (0..col.name.len) |_| try out.print("-", .{});
+        for (0..w) |_| try out.print("-", .{});
     }
     try out.print("\n", .{});
-    for (rs.rows) |row| {
-        for (row, 0..) |val, i| {
-            if (i > 0) try out.print(" | ", .{});
-            try printValue(val, out);
+
+    // Data rows.
+    for (0..nrows) |r| {
+        for (0..ncols) |c| {
+            if (c > 0) try out.print(" | ", .{});
+            const s = cells[r * ncols + c];
+            try out.print("{s}", .{s});
+            for (0..widths[c] - s.len) |_| try out.print(" ", .{});
         }
         try out.print("\n", .{});
     }
-    try out.print("({d} row(s))\n", .{rs.rows.len});
+    try out.print("({d} row(s))\n", .{nrows});
 }
 
 // ---- Dispatch ----
 
-fn dispatch(c: *client_mod.Client, sql_with_semi: []const u8, out: *Out) !void {
+fn dispatch(c: *client_mod.Client, sql_with_semi: []const u8, alloc: std.mem.Allocator, out: *Out) !void {
     assert(sql_with_semi.len > 0);
     const sql = std.mem.trimEnd(u8, std.mem.trimEnd(u8, sql_with_semi, " \t\r\n"), ";");
     const kind = classify(sql);
@@ -351,7 +375,7 @@ fn dispatch(c: *client_mod.Client, sql_with_semi: []const u8, out: *Out) !void {
                 return;
             };
             defer rs.deinit();
-            printTable(&rs, out) catch {};
+            printTable(&rs, alloc, out) catch {};
         },
     }
 }
@@ -454,7 +478,7 @@ pub fn main(init: std.process.Init) !void {
                 const sql = try std.fmt.allocPrint(alloc, "describe {s};", .{tname});
                 defer alloc.free(sql);
                 historyPush(&history, sql, alloc) catch {};
-                dispatch(&c, sql, &out) catch |e| try out.print("error: {}\n", .{e});
+                dispatch(&c, sql, alloc, &out) catch |e| try out.print("error: {}\n", .{e});
                 continue;
             }
         }
@@ -466,7 +490,7 @@ pub fn main(init: std.process.Init) !void {
             if (buf.items.len > 1) historyPush(&history, buf.items, alloc) catch {};
 
             var disconnected = false;
-            dispatch(&c, buf.items, &out) catch |e| {
+            dispatch(&c, buf.items, alloc, &out) catch |e| {
                 if (!isConnError(e)) {
                     try out.print("error: {}\n", .{e});
                 } else {
@@ -474,7 +498,7 @@ pub fn main(init: std.process.Init) !void {
                     c.deinit();
                     if (tryReconnect(host, port, alloc, &out)) |new_c| {
                         c = new_c;
-                        dispatch(&c, buf.items, &out) catch {};
+                        dispatch(&c, buf.items, alloc, &out) catch {};
                     } else {
                         disconnected = true;
                     }
