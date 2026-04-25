@@ -133,6 +133,9 @@ pub const Gateway = struct {
         snapshot_interval_entries: u64 = 10_000_000,
         /// Optional object store for snapshot uploads (bypasses S3; useful in tests).
         snapshot_store: ?storage_mod.ObjectStore = null,
+        /// When true, the caller is responsible for calling gw.sequencer.start()
+        /// after configuring peer addresses. Used in multinode test setup.
+        defer_sequencer_start: bool = false,
     };
 
     /// Initialize and heap-allocate a Gateway. Caller owns the pointer; call `deinit` to free.
@@ -231,7 +234,7 @@ pub const Gateway = struct {
         };
         gw.sequencer = try sequencer_mod.Sequencer.init(storage_dir, seq_cfg, alloc);
         errdefer gw.sequencer.deinit();
-        try gw.sequencer.start();
+        if (!opts.defer_sequencer_start) try gw.sequencer.start();
 
         gw.cdc = try cdc_mod.CdcManager.init(alloc);
         gw.sql_exec.initCdc(&gw.cdc);

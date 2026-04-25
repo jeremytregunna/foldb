@@ -133,3 +133,42 @@ test "Config: fromFile reads and parses JSON file" {
     try std.testing.expectEqualStrings("/data/test", pc.value.storage_dir);
     try std.testing.expectEqual(@as(u32, 2), pc.value.partition_count);
 }
+
+test "Config: old string peer format is rejected" {
+    // After Fix 4, peers must be {"id": N, "addr": "..."} objects.
+    // Plain string peers must return an error.
+    const json =
+        \\{"node_id": 1, "peers": ["10.0.0.1:7432"]}
+    ;
+    const result = config_mod.from_slice(json, std.testing.allocator);
+    try std.testing.expectError(error.InvalidConfig, result);
+}
+
+test "Config: peer missing id field is rejected" {
+    const json =
+        \\{"node_id": 1, "peers": [{"addr": "10.0.0.1:7432"}]}
+    ;
+    const result = config_mod.from_slice(json, std.testing.allocator);
+    try std.testing.expectError(error.InvalidConfig, result);
+}
+
+test "Config: peer missing addr field is rejected" {
+    const json =
+        \\{"node_id": 1, "peers": [{"id": 2}]}
+    ;
+    const result = config_mod.from_slice(json, std.testing.allocator);
+    try std.testing.expectError(error.InvalidConfig, result);
+}
+
+test "Config: peer id and addr are present and correct" {
+    const json =
+        \\{"node_id": 1, "peers": [{"id": 2, "addr": "10.0.0.2:7432"}, {"id": 3, "addr": "10.0.0.3:7432"}]}
+    ;
+    var pc = try config_mod.from_slice(json, std.testing.allocator);
+    defer pc.deinit();
+    try std.testing.expectEqual(@as(usize, 2), pc.value.peers.len);
+    try std.testing.expectEqual(@as(u64, 2), pc.value.peers[0].id);
+    try std.testing.expectEqualStrings("10.0.0.2:7432", pc.value.peers[0].addr);
+    try std.testing.expectEqual(@as(u64, 3), pc.value.peers[1].id);
+    try std.testing.expectEqualStrings("10.0.0.3:7432", pc.value.peers[1].addr);
+}

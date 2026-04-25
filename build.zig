@@ -1027,6 +1027,16 @@ pub fn build(b: *std.Build) void {
     const seq_reconfig_tests = b.addTest(.{ .root_module = seq_reconfig_test_module });
     const run_seq_reconfig_tests = b.addRunArtifact(seq_reconfig_tests);
 
+    // Sequencer follower submission tests (Fix 2: commitInner error return)
+    const seq_follower_submit_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sequencer/follower_submit_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    seq_follower_submit_test_module.addImport("sequencer.zig", sequencer_module);
+    const seq_follower_submit_tests = b.addTest(.{ .root_module = seq_follower_submit_test_module });
+    const run_seq_follower_submit_tests = b.addRunArtifact(seq_follower_submit_tests);
+
     // CDC unit tests
     const cdc_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/cdc/cdc_test.zig"),
@@ -1066,6 +1076,17 @@ pub fn build(b: *std.Build) void {
     gateway_test_module.addImport("sequencer.zig", sequencer_module);
     const gateway_tests = b.addTest(.{ .root_module = gateway_test_module });
     const run_gateway_tests = b.addRunArtifact(gateway_tests);
+
+    // Multinode Gateway tests (Fixes 1, 2: DDL replication via Raft, follower error return)
+    const gw_multinode_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/gateway/multinode_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gw_multinode_test_module.addImport("gateway.zig", gateway_module);
+    gw_multinode_test_module.addImport("sequencer.zig", sequencer_module);
+    const gw_multinode_tests = b.addTest(.{ .root_module = gw_multinode_test_module });
+    const run_gw_multinode_tests = b.addRunArtifact(gw_multinode_tests);
 
     // Gateway snapshot tests
     const gateway_snapshot_test_module = b.createModule(.{
@@ -1303,6 +1324,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_seq_tcp_cluster_tests.step);
     test_step.dependOn(&run_seq_tcp_actor_tests.step);
     test_step.dependOn(&run_seq_reconfig_tests.step);
+    test_step.dependOn(&run_seq_follower_submit_tests.step);
+    test_step.dependOn(&run_gw_multinode_tests.step);
 
     // Deterministic simulation tests
     const dst_step = b.step("dst-test", "Run deterministic simulation tests");
