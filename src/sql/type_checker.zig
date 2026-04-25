@@ -281,7 +281,7 @@ pub const TypeChecker = struct {
     pub fn inferExpr(self: *TypeChecker, e: *ast.Expr, ctx: CheckContext) TypeCheckError!ast.SqlType {
         return switch (e.*) {
             .lit_int => .{ .int64 = .error_on_overflow }, // widest compatible
-            .lit_float => .float64,
+            .lit_float => .{ .decimal = .{ .precision = 38, .scale = 10 } },
             .lit_string => .string,
             .lit_bytes => .bytes,
             .lit_bool => .bool,
@@ -623,7 +623,7 @@ fn inferBuiltinReturn(name: []const u8, arg_count: usize, star: bool) TypeCheckE
     _ = arg_count;
     if (star or std.ascii.eqlIgnoreCase(name, "count")) return .{ .int64 = .error_on_overflow };
     if (std.ascii.eqlIgnoreCase(name, "sum")) return .{ .int64 = .error_on_overflow };
-    if (std.ascii.eqlIgnoreCase(name, "avg")) return .float64;
+    if (std.ascii.eqlIgnoreCase(name, "avg")) return .{ .decimal = .{ .precision = 38, .scale = 10 } };
     if (std.ascii.eqlIgnoreCase(name, "min") or std.ascii.eqlIgnoreCase(name, "max")) return .null_type; // depends on arg
     if (std.ascii.eqlIgnoreCase(name, "coalesce")) return .null_type;
     if (std.ascii.eqlIgnoreCase(name, "nullif")) return .null_type;

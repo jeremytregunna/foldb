@@ -1,7 +1,10 @@
 /// SQL AST types. All nodes are arena-allocated; call arena.deinit() to free.
 const std = @import("std");
 const token_mod = @import("token.zig");
+const storage_mod = @import("storage.zig");
 pub const Span = token_mod.Span;
+
+pub const Decimal = storage_mod.Decimal;
 
 // ─── Type expressions ────────────────────────────────────────────────────────
 
@@ -155,7 +158,7 @@ pub const CaseWhen = struct {
 
 pub const Expr = union(enum) {
     lit_int: i128,
-    lit_float: f64,
+    lit_float: Decimal,
     lit_string: []const u8,
     lit_bytes: []const u8,
     lit_bool: bool,

@@ -50,6 +50,7 @@ pub const SnapshotPolicy = struct {
 // Core types
 pub const TableId = types.TableId;
 pub const Seq = types.Seq;
+pub const Decimal = types.Decimal;
 pub const ColumnType = types.ColumnType;
 pub const ColumnSchema = types.ColumnSchema;
 pub const TableSchema = types.TableSchema;

@@ -906,7 +906,8 @@ fn sqlTypeToColumnType(t: sql_mod.ast.SqlType) storage_mod.ColumnType {
         .uuid => .bytes,
         .timestamp => .int64,
         .interval_months, .interval_micros => .int64,
-        .decimal, .json, .vector, .array, .struct_type => .bytes,
+        .decimal => .decimal,
+        .json, .vector, .array, .struct_type => .bytes,
         .null_type => .bytes,
     };
 }

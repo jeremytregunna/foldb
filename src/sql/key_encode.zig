@@ -102,6 +102,12 @@ pub fn encodeKeyComponent(buf: *std.ArrayList(u8), v: ColumnValue, alloc: std.me
             try buf.appendSlice(alloc, &len_buf);
             try buf.appendSlice(alloc, b);
         },
+        .decimal => |d| {
+            var b: [17]u8 = undefined;
+            b[0] = d.scale;
+            std.mem.writeInt(i128, b[1..17], d.coefficient, .big);
+            try buf.appendSlice(alloc, &b);
+        },
     }
 }
 
@@ -189,6 +195,12 @@ pub fn serializeRowKey(row: []const ?ColumnValue, alloc: std.mem.Allocator) ![]c
                     std.mem.writeInt(u32, &tmp, @intCast(b.len), .little);
                     try buf.appendSlice(alloc, &tmp);
                     try buf.appendSlice(alloc, b);
+                },
+                .decimal => |d| {
+                    var tmp: [17]u8 = undefined;
+                    tmp[0] = d.scale;
+                    std.mem.writeInt(i128, tmp[1..17], d.coefficient, .little);
+                    try buf.appendSlice(alloc, &tmp);
                 },
             }
         } else {

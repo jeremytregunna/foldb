@@ -234,7 +234,8 @@ pub const CanonWriter = struct {
             },
             .lit_float => |v| {
                 try self.writeByte(0x02);
-                try self.writeF64(v);
+                try self.writeByte(v.scale);
+                try self.writeI128(v.coefficient);
             },
             .lit_string => |v| {
                 try self.writeByte(0x03);

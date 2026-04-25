@@ -21,6 +21,7 @@ pub fn columnValueToPlanValue(cv: ColumnValue) plan_mod.Value {
         .float64 => |v| .{ .float_val = v },
         .string => |v| .{ .string_val = v },
         .bytes => |v| .{ .bytes_val = v },
+        .decimal => |v| .{ .decimal_val = v },
     };
 }
 
@@ -31,6 +32,7 @@ pub fn planValueToColumnValue(v: plan_mod.Value, alloc: std.mem.Allocator) !Colu
         .int_val => |n| .{ .int64 = n },
         .uint_val => |n| .{ .uint64 = n },
         .float_val => |f| .{ .float64 = f },
+        .decimal_val => |d| .{ .decimal = d },
         .string_val => |s| .{ .string = try alloc.dupe(u8, s) },
         .bytes_val => |b| .{ .bytes = try alloc.dupe(u8, b) },
         .opaque_val => |b| .{ .bytes = try alloc.dupe(u8, b) },
@@ -80,6 +82,11 @@ pub fn planValueToTypedColumnValue(v: plan_mod.Value, typ: ast.SqlType, alloc: s
             .float_val => |f| .{ .float64 = f },
             else => error.TypeMismatch,
         },
+        .decimal => switch (v) {
+            .decimal_val => |d| .{ .decimal = d },
+            .int_val => |n| .{ .decimal = .{ .coefficient = n, .scale = 0 } },
+            else => error.TypeMismatch,
+        },
         .string => switch (v) {
             .string_val => |s| .{ .string = try alloc.dupe(u8, s) },
             else => error.TypeMismatch,
@@ -106,6 +113,12 @@ pub fn castValue(v: plan_mod.Value, to: ast.SqlType) !plan_mod.Value {
             .uint_val => |n| .{ .float_val = @floatFromInt(n) },
             else => error.TypeMismatch,
         },
+        .decimal => switch (v) {
+            .decimal_val => v,
+            .int_val => |n| .{ .decimal_val = .{ .coefficient = n, .scale = 0 } },
+            .uint_val => |n| .{ .decimal_val = .{ .coefficient = @intCast(n), .scale = 0 } },
+            else => error.TypeMismatch,
+        },
         .string => switch (v) {
             .string_val => v,
             else => error.TypeMismatch,
@@ -127,6 +140,7 @@ pub fn defaultValue(typ: ast.SqlType) ColumnValue {
         .uint64 => .{ .uint64 = 0 },
         .float32 => .{ .float32 = 0.0 },
         .float64 => .{ .float64 = 0.0 },
+        .decimal => .{ .decimal = .{ .coefficient = 0, .scale = 0 } },
         .string => .{ .string = "" },
         .bytes => .{ .bytes = "" },
         else => .{ .bytes = "" },

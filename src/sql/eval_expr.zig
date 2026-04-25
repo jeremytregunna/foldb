@@ -17,6 +17,62 @@ const columnValueToPlanValue = type_conv.columnValueToPlanValue;
 const planValueToColumnValue = type_conv.planValueToColumnValue;
 const castValue = type_conv.castValue;
 
+const Decimal = ast.Decimal;
+
+fn decimalPow10(n: u8) i128 {
+    assert(n <= 38);
+    var result: i128 = 1;
+    var i: u8 = 0;
+    while (i < n) : (i += 1) result *= 10;
+    return result;
+}
+
+fn decimalAdd(a: Decimal, b: Decimal) Decimal {
+    if (a.scale == b.scale) return .{ .coefficient = a.coefficient +| b.coefficient, .scale = a.scale };
+    const s = @max(a.scale, b.scale);
+    const ac = if (a.scale < s) a.coefficient *| decimalPow10(s - a.scale) else a.coefficient;
+    const bc = if (b.scale < s) b.coefficient *| decimalPow10(s - b.scale) else b.coefficient;
+    return .{ .coefficient = ac +| bc, .scale = s };
+}
+
+fn decimalSub(a: Decimal, b: Decimal) Decimal {
+    if (a.scale == b.scale) return .{ .coefficient = a.coefficient -| b.coefficient, .scale = a.scale };
+    const s = @max(a.scale, b.scale);
+    const ac = if (a.scale < s) a.coefficient *| decimalPow10(s - a.scale) else a.coefficient;
+    const bc = if (b.scale < s) b.coefficient *| decimalPow10(s - b.scale) else b.coefficient;
+    return .{ .coefficient = ac -| bc, .scale = s };
+}
+
+fn decimalMul(a: Decimal, b: Decimal) Decimal {
+    const new_scale = @min(a.scale + b.scale, 38);
+    const scale_drop = (a.scale + b.scale) - new_scale;
+    var coeff = a.coefficient *| b.coefficient;
+    // Drop excess scale by dividing (truncating toward zero)
+    if (scale_drop > 0) coeff = @divTrunc(coeff, decimalPow10(@intCast(scale_drop)));
+    return .{ .coefficient = coeff, .scale = new_scale };
+}
+
+fn decimalDiv(a: Decimal, b: Decimal) SqlExecError!Decimal {
+    if (b.coefficient == 0) return error.DivisionByZero;
+    // Bring both to the same scale, then multiply numerator by 10^result_scale.
+    const result_scale: u8 = @max(a.scale, 10);
+    const extra: u8 = result_scale + b.scale -| a.scale;
+    const scaled_a = a.coefficient *| decimalPow10(extra);
+    return .{ .coefficient = @divTrunc(scaled_a, b.coefficient), .scale = result_scale };
+}
+
+fn decimalMod(a: Decimal, b: Decimal) SqlExecError!Decimal {
+    if (b.coefficient == 0) return error.DivisionByZero;
+    const s = @max(a.scale, b.scale);
+    const ac = if (a.scale < s) a.coefficient *| decimalPow10(s - a.scale) else a.coefficient;
+    const bc = if (b.scale < s) b.coefficient *| decimalPow10(s - b.scale) else b.coefficient;
+    return .{ .coefficient = @rem(ac, bc), .scale = s };
+}
+
+fn intToDecimal(n: i64) Decimal {
+    return .{ .coefficient = n, .scale = 0 };
+}
+
 pub const SqlExecError = error{
     ConstraintViolation,
     ForeignKeyViolation,
@@ -62,6 +118,7 @@ pub fn evalExpr(e: *plan_mod.PlanExpr, ctx: EvalCtx) SqlExecError!plan_mod.Value
         .int_literal => |v| .{ .int_val = v },
         .uint_literal => |v| .{ .uint_val = v },
         .float_literal => |v| .{ .float_val = v },
+        .decimal_literal => |v| .{ .decimal_val = v },
         .string_literal => |v| .{ .string_val = v },
         .bytes_literal => |v| .{ .bytes_val = v },
 
@@ -96,6 +153,7 @@ pub fn evalExpr(e: *plan_mod.PlanExpr, ctx: EvalCtx) SqlExecError!plan_mod.Value
                 return switch (v) {
                     .int_val => |n| .{ .int_val = -n },
                     .float_val => |n| .{ .float_val = -n },
+                    .decimal_val => |d| .{ .decimal_val = .{ .coefficient = -d.coefficient, .scale = d.scale } },
                     else => error.TypeMismatch,
                 };
             },
@@ -259,35 +317,81 @@ pub fn evalBinary(
     };
 }
 
+fn toDecimal(v: plan_mod.Value) ?Decimal {
+    return switch (v) {
+        .decimal_val => |d| d,
+        .int_val => |n| intToDecimal(n),
+        else => null,
+    };
+}
+
 fn evalBinaryArith(op: ast.BinOp, lv: plan_mod.Value, rv: plan_mod.Value) SqlExecError!plan_mod.Value {
     assert(op == .add or op == .sub or op == .mul or op == .div or op == .mod);
     return switch (op) {
         .add => switch (lv) {
-            .int_val => |a| switch (rv) { .int_val => |b| .{ .int_val = a + b }, else => error.TypeMismatch },
+            .int_val => |a| switch (rv) { .int_val => |b| .{ .int_val = a + b }, else => decimalArith: {
+                const ld = toDecimal(lv) orelse break :decimalArith error.TypeMismatch;
+                const rd = toDecimal(rv) orelse break :decimalArith error.TypeMismatch;
+                break :decimalArith .{ .decimal_val = decimalAdd(ld, rd) };
+            }},
             .float_val => |a| switch (rv) { .float_val => |b| .{ .float_val = a + b }, else => error.TypeMismatch },
+            .decimal_val => |a| switch (rv) {
+                .decimal_val => |b| .{ .decimal_val = decimalAdd(a, b) },
+                .int_val => |b| .{ .decimal_val = decimalAdd(a, intToDecimal(b)) },
+                else => error.TypeMismatch,
+            },
             else => error.TypeMismatch,
         },
         .sub => switch (lv) {
-            .int_val => |a| switch (rv) { .int_val => |b| .{ .int_val = a - b }, else => error.TypeMismatch },
+            .int_val => |a| switch (rv) { .int_val => |b| .{ .int_val = a - b }, else => decimalArith: {
+                const ld = toDecimal(lv) orelse break :decimalArith error.TypeMismatch;
+                const rd = toDecimal(rv) orelse break :decimalArith error.TypeMismatch;
+                break :decimalArith .{ .decimal_val = decimalSub(ld, rd) };
+            }},
             .float_val => |a| switch (rv) { .float_val => |b| .{ .float_val = a - b }, else => error.TypeMismatch },
+            .decimal_val => |a| switch (rv) {
+                .decimal_val => |b| .{ .decimal_val = decimalSub(a, b) },
+                .int_val => |b| .{ .decimal_val = decimalSub(a, intToDecimal(b)) },
+                else => error.TypeMismatch,
+            },
             else => error.TypeMismatch,
         },
         .mul => switch (lv) {
-            .int_val => |a| switch (rv) { .int_val => |b| .{ .int_val = a * b }, else => error.TypeMismatch },
+            .int_val => |a| switch (rv) { .int_val => |b| .{ .int_val = a * b }, else => decimalArith: {
+                const ld = toDecimal(lv) orelse break :decimalArith error.TypeMismatch;
+                const rd = toDecimal(rv) orelse break :decimalArith error.TypeMismatch;
+                break :decimalArith .{ .decimal_val = decimalMul(ld, rd) };
+            }},
             .float_val => |a| switch (rv) { .float_val => |b| .{ .float_val = a * b }, else => error.TypeMismatch },
+            .decimal_val => |a| switch (rv) {
+                .decimal_val => |b| .{ .decimal_val = decimalMul(a, b) },
+                .int_val => |b| .{ .decimal_val = decimalMul(a, intToDecimal(b)) },
+                else => error.TypeMismatch,
+            },
             else => error.TypeMismatch,
         },
         .div => switch (lv) {
             .int_val => |a| switch (rv) {
                 .int_val => |b| if (b == 0) error.DivisionByZero else .{ .int_val = @divTrunc(a, b) },
+                .decimal_val => .{ .decimal_val = try decimalDiv(intToDecimal(a), rv.decimal_val) },
                 else => error.TypeMismatch,
             },
             .float_val => |a| switch (rv) { .float_val => |b| .{ .float_val = a / b }, else => error.TypeMismatch },
+            .decimal_val => |a| switch (rv) {
+                .decimal_val => |b| .{ .decimal_val = try decimalDiv(a, b) },
+                .int_val => |b| .{ .decimal_val = try decimalDiv(a, intToDecimal(b)) },
+                else => error.TypeMismatch,
+            },
             else => error.TypeMismatch,
         },
         .mod => switch (lv) {
             .int_val => |a| switch (rv) {
                 .int_val => |b| if (b == 0) error.DivisionByZero else .{ .int_val = @rem(a, b) },
+                else => error.TypeMismatch,
+            },
+            .decimal_val => |a| switch (rv) {
+                .decimal_val => |b| .{ .decimal_val = try decimalMod(a, b) },
+                .int_val => |b| .{ .decimal_val = try decimalMod(a, intToDecimal(b)) },
                 else => error.TypeMismatch,
             },
             else => error.TypeMismatch,

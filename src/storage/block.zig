@@ -399,5 +399,6 @@ fn zeroValue(col_type: ColumnType) ColumnValue {
         .float64 => .{ .float64 = 0.0 },
         .bytes => .{ .bytes = "" },
         .string => .{ .string = "" },
+        .decimal => .{ .decimal = .{ .coefficient = 0, .scale = 0 } },
     };
 }

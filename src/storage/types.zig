@@ -3,6 +3,13 @@ const std = @import("std");
 pub const TableId = u32;
 pub const Seq = u64;
 
+/// Exact decimal value: value = coefficient × 10^(-scale).
+/// Stored as 1-byte scale + 16-byte little-endian i128 coefficient (17 bytes total).
+pub const Decimal = struct {
+    coefficient: i128,
+    scale: u8,
+};
+
 pub const ColumnType = enum(u8) {
     bool_t = 0,
     int8 = 1,
@@ -17,6 +24,7 @@ pub const ColumnType = enum(u8) {
     float64 = 10,
     bytes = 11,
     string = 12,
+    decimal = 13,
 
     pub fn isFixedWidth(self: ColumnType) bool {
         return switch (self) {
@@ -32,6 +40,7 @@ pub const ColumnType = enum(u8) {
             .int16, .uint16 => 2,
             .int32, .uint32, .float32 => 4,
             .int64, .uint64, .float64 => 8,
+            .decimal => 17,
             .bytes, .string => 0,
         };
     }
@@ -61,6 +70,7 @@ pub const ColumnValue = union(ColumnType) {
     float64: f64,
     bytes: []const u8,
     string: []const u8,
+    decimal: Decimal,
 
     pub fn eql(self: ColumnValue, other: ColumnValue) bool {
         if (std.meta.activeTag(self) != std.meta.activeTag(other)) return false;
@@ -78,6 +88,7 @@ pub const ColumnValue = union(ColumnType) {
             .float64 => |v| v == other.float64,
             .bytes => |v| std.mem.eql(u8, v, other.bytes),
             .string => |v| std.mem.eql(u8, v, other.string),
+            .decimal => |v| v.coefficient == other.decimal.coefficient and v.scale == other.decimal.scale,
         };
     }
 

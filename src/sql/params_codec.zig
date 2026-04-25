@@ -78,6 +78,12 @@ fn encodeParamValue(buf: *std.ArrayList(u8), v: ColumnValue, alloc: std.mem.Allo
             try buf.appendSlice(alloc, &lb);
             try buf.appendSlice(alloc, s);
         },
+        .decimal => |d| {
+            try buf.append(alloc, d.scale);
+            var b: [16]u8 = undefined;
+            std.mem.writeInt(i128, &b, d.coefficient, .little);
+            try buf.appendSlice(alloc, &b);
+        },
     }
 }
 
@@ -267,6 +273,13 @@ fn decodeParamValueByTag(data: []const u8, pos: *u32, tag: u8, alloc: std.mem.Al
             const b = try alloc.dupe(u8, data[pos.* .. pos.* + len]);
             pos.* += len;
             break :blk .{ .bytes = b };
+        },
+        .decimal => blk: {
+            const scale = data[pos.*];
+            pos.* += 1;
+            const coeff = std.mem.readInt(i128, data[pos.*..][0..16], .little);
+            pos.* += 16;
+            break :blk .{ .decimal = .{ .coefficient = coeff, .scale = scale } };
         },
     };
 }

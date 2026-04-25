@@ -21,6 +21,7 @@ pub const Value = union(enum) {
     int_val: i64,
     uint_val: u64,
     float_val: f64,
+    decimal_val: ast.Decimal,
     string_val: []const u8,
     bytes_val: []const u8,
     // Complex types stored as opaque bytes
@@ -56,6 +57,10 @@ pub const Value = union(enum) {
                 .float_val => |ov| v == ov,
                 else => false,
             },
+            .decimal_val => |v| switch (other) {
+                .decimal_val => |ov| decimalEql(v, ov),
+                else => false,
+            },
             .string_val => |v| switch (other) {
                 .string_val => |ov| std.mem.eql(u8, v, ov),
                 else => false,
@@ -85,6 +90,10 @@ pub const Value = union(enum) {
                 .float_val => |ov| v < ov,
                 else => false,
             },
+            .decimal_val => |v| switch (other) {
+                .decimal_val => |ov| decimalCmp(v, ov) == .lt,
+                else => false,
+            },
             .string_val => |v| switch (other) {
                 .string_val => |ov| std.mem.lessThan(u8, v, ov),
                 else => false,
@@ -93,6 +102,30 @@ pub const Value = union(enum) {
         };
     }
 };
+
+// ─── Decimal helpers ─────────────────────────────────────────────────────────
+
+fn decimalPow10(n: u8) i128 {
+    assert(n <= 38);
+    var result: i128 = 1;
+    var i: u8 = 0;
+    while (i < n) : (i += 1) result *= 10;
+    return result;
+}
+
+pub fn decimalCmp(a: ast.Decimal, b: ast.Decimal) std.math.Order {
+    if (a.scale == b.scale) return std.math.order(a.coefficient, b.coefficient);
+    if (a.scale < b.scale) {
+        const scaled = a.coefficient *| decimalPow10(b.scale - a.scale);
+        return std.math.order(scaled, b.coefficient);
+    }
+    const scaled = b.coefficient *| decimalPow10(a.scale - b.scale);
+    return std.math.order(a.coefficient, scaled);
+}
+
+fn decimalEql(a: ast.Decimal, b: ast.Decimal) bool {
+    return decimalCmp(a, b) == .eq;
+}
 
 // ─── Planner scope tracking ───────────────────────────────────────────────────
 
@@ -320,6 +353,7 @@ pub const PlanExpr = union(enum) {
     int_literal: i64,
     uint_literal: u64,
     float_literal: f64,
+    decimal_literal: ast.Decimal,
     string_literal: []const u8,
     bytes_literal: []const u8,
 
@@ -1132,7 +1166,7 @@ pub const Planner = struct {
         const pe = try self.arena.create(PlanExpr);
         switch (e.*) {
             .lit_int => |v| pe.* = .{ .int_literal = @intCast(v) },
-            .lit_float => |v| pe.* = .{ .float_literal = v },
+            .lit_float => |v| pe.* = .{ .decimal_literal = v },
             .lit_string => |v| pe.* = .{ .string_literal = v },
             .lit_bytes => |v| pe.* = .{ .bytes_literal = v },
             .lit_bool => |v| pe.* = .{ .bool_literal = v },

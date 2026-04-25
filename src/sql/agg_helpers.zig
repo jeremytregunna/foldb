@@ -58,6 +58,11 @@ pub fn serializeArrayAgg(items: []const plan_mod.Value, alloc: std.mem.Allocator
                 }
                 try buf.append(alloc, '"');
             },
+            .decimal_val => |d| {
+                const s = try std.fmt.allocPrint(alloc, "{d}", .{@as(f64, @floatFromInt(d.coefficient)) / std.math.pow(f64, 10, @floatFromInt(d.scale))});
+                defer alloc.free(s);
+                try buf.appendSlice(alloc, s);
+            },
             .bytes_val => |b| try buf.appendSlice(alloc, b),
             .opaque_val => |o| try buf.appendSlice(alloc, o),
         }

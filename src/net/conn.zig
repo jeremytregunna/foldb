@@ -725,6 +725,7 @@ fn typedValueToColumnValue(v: TypedValue) !gateway_mod.ColumnValue {
         .uint64 => |n| .{ .uint64 = n },
         .float32 => |f| .{ .float32 = f },
         .float64 => |f| .{ .float64 = f },
+        .decimal => |d| .{ .decimal = .{ .coefficient = d.coefficient, .scale = d.scale } },
         .string => |s| .{ .string = s },
         .bytes => |b| .{ .bytes = b },
         else => return error.UnsupportedType,
@@ -744,6 +745,7 @@ fn columnValueToTypedValue(v: gateway_mod.ColumnValue) TypedValue {
         .uint64 => |n| .{ .uint64 = n },
         .float32 => |f| .{ .float32 = f },
         .float64 => |f| .{ .float64 = f },
+        .decimal => |d| .{ .decimal = .{ .coefficient = d.coefficient, .scale = d.scale } },
         .string => |s| .{ .string = s },
         .bytes => |b| .{ .bytes = b },
     };

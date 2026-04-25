@@ -340,6 +340,12 @@ fn writeValue(col_type: ColumnType, v: ColumnValue, out: *std.ArrayList(u8), all
             try out.appendSlice(alloc, &len_buf);
             try out.appendSlice(alloc, s);
         },
+        .decimal => {
+            try out.append(alloc, v.decimal.scale);
+            var b: [16]u8 = undefined;
+            std.mem.writeInt(i128, &b, v.decimal.coefficient, .little);
+            try out.appendSlice(alloc, &b);
+        },
     }
 }
 
@@ -396,6 +402,13 @@ fn readValue(col_type: ColumnType, data: []const u8, alloc: std.mem.Allocator) !
             const s = try alloc.dupe(u8, data[4 .. 4 + len]);
             const value: ColumnValue = if (col_type == .bytes) .{ .bytes = s } else .{ .string = s };
             return .{ .value = value, .bytes_read = 4 + len };
+        },
+        .decimal => {
+            if (data.len < 17) return error.EndOfData;
+            return .{ .value = .{ .decimal = .{
+                .scale = data[0],
+                .coefficient = std.mem.readInt(i128, data[1..17], .little),
+            } }, .bytes_read = 17 };
         },
     }
 }

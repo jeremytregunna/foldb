@@ -942,8 +942,7 @@ pub const Parser = struct {
             .kw_uint16 => .{ .uint16 = overflow },
             .kw_uint32 => .{ .uint32 = overflow },
             .kw_uint64 => .{ .uint64 = overflow },
-            .kw_float32, .kw_real => .float32,
-            .kw_float64, .kw_float, .kw_double => .float64,
+            .kw_float32, .kw_real, .kw_float64, .kw_float, .kw_double => .{ .decimal = .{ .precision = 38, .scale = 10 } },
             .kw_decimal => blk: {
                 _ = try self.expect(.sym_lparen);
                 const p = try self.parseInt();
@@ -1341,7 +1340,7 @@ pub const Parser = struct {
             },
             .lit_float => {
                 _ = try self.advance();
-                const v = std.fmt.parseFloat(f64, t.text(self.src)) catch return error.UnexpectedToken;
+                const v = parseLiteralDecimal(t.text(self.src)) catch return error.UnexpectedToken;
                 e.* = .{ .lit_float = v };
             },
             .lit_string => {
@@ -1631,6 +1630,35 @@ fn isBuiltinFn(k: TokenKind) bool {
         => true,
         else => false,
     };
+}
+
+/// Parse a float literal string (e.g. "3.14") into an exact Decimal.
+/// Handles optional leading '-' and at most one '.'. No allocation needed.
+fn parseLiteralDecimal(text: []const u8) ParseError!ast.Decimal {
+    if (text.len == 0) return error.UnexpectedToken;
+    const is_neg = text[0] == '-';
+    const digits = if (is_neg) text[1..] else text;
+
+    var scale: u8 = 0;
+    var dot_seen = false;
+    for (digits) |c| {
+        if (c == '.') {
+            if (dot_seen) return error.UnexpectedToken;
+            dot_seen = true;
+        } else if (c >= '0' and c <= '9') {
+            if (dot_seen) scale += 1;
+        } else {
+            return error.UnexpectedToken;
+        }
+    }
+
+    var coeff: i128 = 0;
+    for (digits) |c| {
+        if (c == '.') continue;
+        coeff = coeff * 10 + (c - '0');
+    }
+    if (is_neg) coeff = -coeff;
+    return .{ .coefficient = coeff, .scale = scale };
 }
 
 // Public API
