@@ -26,6 +26,8 @@ const SOL_SOCKET: u32 = 1;
 const SO_REUSEADDR: u32 = 2;
 const LISTEN_BACKLOG: u32 = 32;
 const EAGAIN: isize = -11;
+const MSG_PEEK: u32 = 0x02;
+const MSG_DONTWAIT: u32 = 0x40;
 
 /// Maximum payload for a single incoming message (1 MiB).
 /// Frames larger than this are rejected in pollOnce without allocation.
@@ -135,6 +137,9 @@ pub const SendFaultHook = struct {
 
 pub const TcpTransport = struct {
     peers: std.AutoHashMap(NodeId, PeerConn),
+    /// Accepted inbound connections. Each persists until the remote closes or
+    /// a read error occurs, avoiding per-message connect/accept overhead.
+    inbound: std.ArrayList(std.posix.fd_t),
     inbox: std.ArrayList(Envelope),
     listen_fd: std.posix.fd_t,
     self_id: NodeId,
@@ -145,6 +150,7 @@ pub const TcpTransport = struct {
         assert(self_id > 0);
         return .{
             .peers = std.AutoHashMap(NodeId, PeerConn).init(alloc),
+            .inbound = .empty,
             .inbox = .empty,
             .listen_fd = -1,
             .self_id = self_id,
@@ -158,6 +164,8 @@ pub const TcpTransport = struct {
             if (entry.value_ptr.fd >= 0) _ = std.os.linux.close(@intCast(entry.value_ptr.fd));
         }
         self.peers.deinit();
+        for (self.inbound.items) |fd| _ = std.os.linux.close(@intCast(fd));
+        self.inbound.deinit(self.alloc);
         self.inbox.deinit(self.alloc);
         if (self.listen_fd >= 0) _ = std.os.linux.close(@intCast(self.listen_fd));
     }
@@ -181,7 +189,9 @@ pub const TcpTransport = struct {
         }
     }
 
-    /// Send a message to a peer. Connects lazily; silently drops on failure.
+    /// Send a message to a peer. Connects lazily and keeps the connection open.
+    /// On write failure the connection is closed and will be re-established on
+    /// the next send, so Raft retransmission handles the lost message.
     pub fn send(self: *TcpTransport, to: NodeId, msg: Message) void {
         if (self.fault_hook.shouldDrop(to)) return;
         const entry = self.peers.getPtr(to) orelse return;
@@ -195,11 +205,10 @@ pub const TcpTransport = struct {
             entry.fd = -1;
             return;
         };
-        // Write then close — each message is a short-lived connection so
-        // pollOnce's accept-one-read-one design sees one message per accept.
-        writeAll(entry.fd, buf.items) catch {};
-        _ = std.os.linux.close(@intCast(entry.fd));
-        entry.fd = -1;
+        writeAll(entry.fd, buf.items) catch {
+            _ = std.os.linux.close(@intCast(entry.fd));
+            entry.fd = -1;
+        };
     }
 
     /// Return the actual port the listen socket is bound to (useful when port=0).
@@ -237,34 +246,40 @@ pub const TcpTransport = struct {
         self.listen_fd = fd;
     }
 
-    /// Accept one pending connection and read one message. Non-blocking.
-    /// Returns true if a message was appended to inbox.
+    /// Accept all pending inbound connections, then attempt a non-blocking read
+    /// from each tracked connection. Returns true if at least one message was
+    /// appended to inbox. Dead connections are closed and removed.
+    ///
+    /// Accepted fds are blocking — the listen fd's SOCK_NONBLOCK makes accept4
+    /// return EAGAIN when no connection is pending, but accepted connections use
+    /// blocking reads so readExact can drain a complete message without looping.
     pub fn pollOnce(self: *TcpTransport, alloc: std.mem.Allocator) !bool {
         if (self.listen_fd < 0) return false;
-        const raw = std.os.linux.accept4(@intCast(self.listen_fd), null, null, SOCK_NONBLOCK | SOCK_CLOEXEC);
-        const ri: isize = @bitCast(raw);
-        if (ri == EAGAIN) return false;
-        if (ri < 0) return false;
-        const client_fd: std.posix.fd_t = @intCast(ri);
-        defer _ = std.os.linux.close(@intCast(client_fd));
 
-        // Read 4-byte length prefix (blocking on the already-connected fd).
-        var len_buf: [4]u8 = undefined;
-        readExact(client_fd, &len_buf) catch return false;
-        const total_len = std.mem.readInt(u32, &len_buf, .little);
-        if (total_len == 0 or total_len > MAX_MESSAGE_SIZE_BYTES) return false;
+        // Drain the accept queue.
+        while (true) {
+            const raw = std.os.linux.accept4(@intCast(self.listen_fd), null, null, SOCK_CLOEXEC);
+            const ri: isize = @bitCast(raw);
+            if (ri < 0) break; // EAGAIN or error — no more connections pending
+            try self.inbound.append(alloc, @intCast(ri));
+        }
 
-        // Read payload.
-        const data = alloc.alloc(u8, total_len) catch return false;
-        defer alloc.free(data);
-        readExact(client_fd, data) catch return false;
-
-        // Decode; caller fills in env.to.
-        var env = rpc.decodeMessage(data, alloc) catch return false;
-        env.to = self.self_id;
-        assert(self.inbox.items.len < MAX_QUEUE_SIZE);
-        try self.inbox.append(alloc, env);
-        return true;
+        // Probe each inbound connection and read a message if one is waiting.
+        var got_any = false;
+        var i: usize = 0;
+        while (i < self.inbound.items.len) {
+            const result = tryReadMessage(self.inbound.items[i], self.self_id, &self.inbox, alloc);
+            if (result) |got| {
+                if (got) got_any = true;
+                i += 1;
+            } else |_| {
+                // Read error or remote close — retire this connection.
+                _ = std.os.linux.close(@intCast(self.inbound.items[i]));
+                _ = self.inbound.swapRemove(i);
+                // swapRemove moves the last element into slot i; re-visit it.
+            }
+        }
+        return got_any;
     }
 
     /// Move all inbox items into `out`. Caller takes ownership.
@@ -277,6 +292,43 @@ pub const TcpTransport = struct {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Non-blocking probe + blocking read of one length-prefixed Raft message.
+/// Returns false (no error) when no data is available yet (EAGAIN).
+/// Returns an error when the connection is dead and should be closed.
+fn tryReadMessage(
+    fd: std.posix.fd_t,
+    self_id: NodeId,
+    inbox: *std.ArrayList(Envelope),
+    alloc: std.mem.Allocator,
+) !bool {
+    // MSG_PEEK | MSG_DONTWAIT: peek non-blocking at the first available byte.
+    // Returns EAGAIN when no data is available, 0 on remote close.
+    var probe: [1]u8 = undefined;
+    const pn = std.os.linux.recvfrom(@intCast(fd), &probe, 1, MSG_PEEK | MSG_DONTWAIT, null, null);
+    const pni: isize = @bitCast(pn);
+    if (pni < 0) {
+        if (pni == EAGAIN) return false;
+        return error.RecvError;
+    }
+    if (pni == 0) return error.ConnectionClosed;
+
+    // Data is present — read the complete length-prefixed message (blocking).
+    var len_buf: [4]u8 = undefined;
+    readExact(fd, &len_buf) catch return error.ReadError;
+    const total_len = std.mem.readInt(u32, &len_buf, .little);
+    if (total_len == 0 or total_len > MAX_MESSAGE_SIZE_BYTES) return error.InvalidMessage;
+
+    const data = alloc.alloc(u8, total_len) catch return error.OutOfMemory;
+    defer alloc.free(data);
+    readExact(fd, data) catch return error.ReadError;
+
+    var env = rpc.decodeMessage(data, alloc) catch return error.DecodeError;
+    env.to = self_id;
+    assert(inbox.items.len < MAX_QUEUE_SIZE);
+    try inbox.append(alloc, env);
+    return true;
+}
 
 fn parseIpv4(host: []const u8) !u32 {
     var octets: [4]u8 = undefined;
