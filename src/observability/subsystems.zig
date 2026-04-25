@@ -85,6 +85,22 @@ pub const StorageMetrics = struct {
     get_latency: Histogram = .{},
     /// apply() latency in nanoseconds (per batch).
     apply_latency: Histogram = .{},
+
+    pub fn reset(self: *StorageMetrics) void {
+        self.gets.reset();
+        self.get_misses.reset();
+        self.applies.reset();
+        self.mutations_applied.reset();
+        self.compactions.reset();
+        self.block_cache_hits.reset();
+        self.block_cache_misses.reset();
+        self.snapshots_taken.reset();
+        self.scans.reset();
+        self.scan_rows_returned.reset();
+        self.get_latency.reset();
+        self.apply_latency.reset();
+        // Gauges are not reset — they reflect current state.
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -108,6 +124,16 @@ pub const ExecutorMetrics = struct {
     lag: Gauge = .{},
     /// Per-transaction execution latency (from run() call to return), nanoseconds.
     exec_latency: Histogram = .{},
+
+    pub fn reset(self: *ExecutorMetrics) void {
+        self.txns_ok.reset();
+        self.txns_aborted.reset();
+        self.rows_affected.reset();
+        self.noops_processed.reset();
+        self.txns_missing_query.reset();
+        self.exec_latency.reset();
+        // Gauges are not reset — they reflect current state.
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -127,6 +153,14 @@ pub const SequencerMetrics = struct {
     current_seq: Gauge = .{},
     /// Average batch size of the last epoch (updated at each epoch close).
     last_epoch_size: Gauge = .{},
+
+    pub fn reset(self: *SequencerMetrics) void {
+        self.intents_submitted.reset();
+        self.epochs_closed.reset();
+        self.dedup_hits.reset();
+        self.not_leader_errors.reset();
+        // Gauges are not reset — they reflect current state.
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -146,6 +180,16 @@ pub const GatewayMetrics = struct {
     recon_retries: Counter = .{},
     /// End-to-end execute() latency (from client call to result), nanoseconds.
     exec_latency: Histogram = .{},
+
+    pub fn reset(self: *GatewayMetrics) void {
+        self.queries_registered.reset();
+        self.queries_executed.reset();
+        self.queries_aborted.reset();
+        self.nondet_resolved.reset();
+        self.recon_retries.reset();
+        self.exec_latency.reset();
+        // Gauges are not reset — they reflect current state.
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -167,6 +211,15 @@ pub const RaftMetrics = struct {
     current_term: Gauge = .{},
     /// 1 if this node is currently leader, 0 otherwise.
     is_leader: Gauge = .{},
+
+    pub fn reset(self: *RaftMetrics) void {
+        self.elections_started.reset();
+        self.leadership_won.reset();
+        self.leadership_lost.reset();
+        self.entries_replicated.reset();
+        self.heartbeats_sent.reset();
+        // Gauges are not reset — they reflect current state.
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -182,4 +235,11 @@ pub const CdcMetrics = struct {
     before_images_captured: Counter = .{},
     /// Current number of active subscriptions.
     subscriptions_active: Gauge = .{},
+
+    pub fn reset(self: *CdcMetrics) void {
+        self.events_emitted.reset();
+        self.effects_total.reset();
+        self.before_images_captured.reset();
+        // Gauges are not reset — they reflect current state.
+    }
 };

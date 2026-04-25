@@ -106,8 +106,8 @@ test "Tracer: new trace ids are unique" {
 
 test "Tracer: record and snapshot latest-first" {
     var t: obs.DefaultTracer = .{};
-    t.record(.{ .trace_id = 1, .kind = .gateway, .start_tick = 0, .end_tick = 5, .seq = 1, .status = 0 });
-    t.record(.{ .trace_id = 1, .kind = .executor, .start_tick = 4, .end_tick = 8, .seq = 1, .status = 0 });
+    t.record(.{ .trace_id = 1, .kind = .gateway, .start_tick = 0, .end_tick = 5, .seq = 1, .status = .ok });
+    t.record(.{ .trace_id = 1, .kind = .executor, .start_tick = 4, .end_tick = 8, .seq = 1, .status = .ok });
 
     var buf: [4096]obs.Span = undefined;
     const n = t.snapshot(&buf);

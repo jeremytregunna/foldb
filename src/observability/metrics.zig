@@ -6,6 +6,8 @@
 /// For cross-thread reads, wrap the whole metrics struct in a mutex.
 const std = @import("std");
 
+const assert = std.debug.assert;
+
 // ---------------------------------------------------------------------------
 // Counter — monotonically increasing u64, saturates at max.
 // ---------------------------------------------------------------------------
@@ -70,9 +72,12 @@ pub const Gauge = struct {
 //   [5]  32 µs      [13]   8 ms
 //   [6]  64 µs      [14]  16 ms
 //   [7] 128 µs      [15]     ∞
+//
+// The last bucket uses maxInt(u64) so every sample is always caught by the
+// loop in record(), guaranteeing count == sum of all bucket values.
 // ---------------------------------------------------------------------------
 
-pub const BUCKET_COUNT: usize = 16;
+pub const BUCKET_COUNT: u32 = 16;
 
 pub const BUCKET_UPPER_NS: [BUCKET_COUNT]u64 = .{
     1_000,     2_000,     4_000,      8_000,
@@ -80,6 +85,18 @@ pub const BUCKET_UPPER_NS: [BUCKET_COUNT]u64 = .{
     256_000,   512_000,   1_000_000,  2_000_000,
     4_000_000, 8_000_000, 16_000_000, std.math.maxInt(u64),
 };
+
+comptime {
+    assert(BUCKET_UPPER_NS.len == BUCKET_COUNT);
+    // Buckets must be strictly monotonically increasing so record()'s
+    // first-match scan assigns each sample to exactly one bucket.
+    var prev: u64 = 0;
+    for (BUCKET_UPPER_NS) |b| {
+        assert(b > prev);
+        prev = b;
+    }
+    assert(BUCKET_UPPER_NS[BUCKET_COUNT - 1] == std.math.maxInt(u64));
+}
 
 pub const Histogram = struct {
     buckets: [BUCKET_COUNT]u64 = [_]u64{0} ** BUCKET_COUNT,
@@ -95,13 +112,16 @@ pub const Histogram = struct {
         if (ns < self.min_ns) self.min_ns = ns;
         if (ns > self.max_ns) self.max_ns = ns;
 
+        // The last bucket's upper bound is maxInt(u64), so every sample is
+        // guaranteed to match before the loop exits. No post-loop fallback
+        // is needed or reachable.
         for (BUCKET_UPPER_NS, 0..) |upper, i| {
             if (ns <= upper) {
                 self.buckets[i] +|= 1;
                 return;
             }
         }
-        self.buckets[BUCKET_COUNT - 1] +|= 1;
+        unreachable; // last bucket upper == maxInt(u64) catches everything
     }
 
     pub fn mean_ns(self: *const Histogram) u64 {
@@ -109,11 +129,13 @@ pub const Histogram = struct {
         return self.sum_ns / self.count;
     }
 
-    /// Approximate percentile via linear interpolation within bucket.
+    /// Approximate percentile via first-match bucket scan.
     /// p is 0–100 (e.g. 99 for p99).
     pub fn percentile(self: *const Histogram, p: u8) u64 {
+        assert(p <= 100);
         if (self.count == 0) return 0;
-        const target: u64 = (@as(u64, p) * self.count + 99) / 100;
+        // Ceiling division: smallest rank ≥ the p-th percentile position.
+        const target: u64 = @divFloor(@as(u64, p) * self.count + 99, 100);
         var cumulative: u64 = 0;
         for (self.buckets, 0..) |b, i| {
             cumulative += b;
@@ -179,6 +201,13 @@ test "Histogram: bucket distribution" {
     try std.testing.expectEqual(@as(u64, 1), h.buckets[1]); // ≤2µs
     try std.testing.expectEqual(@as(u64, 1), h.buckets[6]); // ≤64µs
     try std.testing.expectEqual(@as(u64, 1), h.buckets[15]); // ∞
+}
+
+test "Histogram: last bucket via maxInt" {
+    var h: Histogram = .{};
+    h.record(std.math.maxInt(u64));
+    try std.testing.expectEqual(@as(u64, 1), h.count);
+    try std.testing.expectEqual(@as(u64, 1), h.buckets[BUCKET_COUNT - 1]);
 }
 
 test "Histogram: mean" {

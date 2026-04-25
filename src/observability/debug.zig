@@ -12,6 +12,8 @@
 /// path is wired in the Executor itself.
 const std = @import("std");
 
+const assert = std.debug.assert;
+
 /// Decoded description of a single log entry at a given seq.
 pub const SeqDescription = struct {
     seq: u64,
@@ -29,6 +31,10 @@ pub const SeqDescription = struct {
     }
 };
 
+/// Non-exhaustive: values 7–254 and any future kinds are held as raw integer
+/// values in the enum. Use @intFromEnum / @enumFromInt at boundaries.
+/// Value 255 is intentionally unassigned to avoid a common "catch-all" sentinel
+/// that would silently swallow unrecognised tags.
 pub const EntryKindTag = enum(u8) {
     txn_intent = 1,
     schema_change = 2,
@@ -36,17 +42,17 @@ pub const EntryKindTag = enum(u8) {
     noop = 4,
     snapshot_marker = 5,
     epoch_decision = 6,
-    unknown = 255,
+    _, // non-exhaustive: future kinds are valid without an enum update
 };
 
 pub const TxnSummary = struct {
     query_hash: [32]u8,
     client_id: u64,
     client_seq: u64,
-    params_len: usize,
-    read_partition_count: usize,
-    write_partition_count: usize,
-    nondet_count: usize,
+    params_len: u32,
+    read_partition_count: u32,
+    write_partition_count: u32,
+    nondet_count: u32,
 
     pub fn deinit(self: *TxnSummary) void {
         _ = self;
@@ -76,9 +82,11 @@ pub const TxnSummary = struct {
 };
 
 /// Log interface needed by describeSeq — avoids a hard import of the log module.
+/// readFn must return entries in ascending seq order and only return an entry
+/// whose seq matches the requested seq exactly.
 pub const LogReader = struct {
     ptr: *anyopaque,
-    readFn: *const fn (*anyopaque, seq: u64, max: usize, alloc: std.mem.Allocator) anyerror![]LogEntryOpaque,
+    readFn: *const fn (*anyopaque, seq: u64, max: u32, alloc: std.mem.Allocator) anyerror![]LogEntryOpaque,
 };
 
 /// Opaque log entry representation passed from the log module.
@@ -99,6 +107,8 @@ pub fn describeSeq(
     seq: u64,
     allocator: std.mem.Allocator,
 ) !?SeqDescription {
+    assert(seq > 0); // seq 0 is not a valid log position
+
     const entries = try log.readFn(log.ptr, seq, 1, allocator);
     defer {
         for (entries) |*e| {
@@ -108,21 +118,15 @@ pub fn describeSeq(
         allocator.free(entries);
     }
 
-    if (entries.len == 0 or entries[0].seq != seq) return null;
+    if (entries.len == 0) return null;
+    // readFn contract: when it returns an entry it must match the requested seq.
+    assert(entries[0].seq == seq);
 
     const entry = entries[0];
     const raw_payload = try allocator.dupe(u8, entry.payload);
     errdefer allocator.free(raw_payload);
 
-    const kind_tag: EntryKindTag = switch (entry.kind_byte) {
-        1 => .txn_intent,
-        2 => .schema_change,
-        3 => .config_change,
-        4 => .noop,
-        5 => .snapshot_marker,
-        6 => .epoch_decision,
-        else => .unknown,
-    };
+    const kind_tag: EntryKindTag = @enumFromInt(entry.kind_byte);
 
     const txn: ?TxnSummary = if (kind_tag == .txn_intent)
         decodeTxnSummary(entry.payload)
@@ -141,10 +145,16 @@ pub fn describeSeq(
 
 /// Decode just the header fields of a TxnIntent payload without full deserialization.
 fn decodeTxnSummary(payload: []const u8) ?TxnSummary {
-    // TxnIntent header: query_hash(32) client_id(8) client_seq(8)
-    //                   read_count(4) write_count(4) params_len(4) nondet_count(4) = 64 bytes
-    const HEADER: usize = 64;
+    // TxnIntent header layout (little-endian):
+    //   query_hash(32) + client_id(8) + client_seq(8) +
+    //   read_count(4) + write_count(4) + params_len(4) + nondet_count(4) = 64 bytes.
+    const HEADER: u32 = 64;
+    comptime {
+        assert(HEADER == 32 + 8 + 8 + 4 + 4 + 4 + 4);
+    }
+
     if (payload.len < HEADER) return null;
+    assert(payload.len >= HEADER); // paired: guaranteed by the early return above
 
     var query_hash: [32]u8 = undefined;
     @memcpy(&query_hash, payload[0..32]);
@@ -182,7 +192,7 @@ test "decodeTxnSummary: valid header" {
     const summary = decodeTxnSummary(&payload) orelse return error.NullSummary;
     try std.testing.expectEqual(@as(u64, 7), summary.client_id);
     try std.testing.expectEqual(@as(u64, 42), summary.client_seq);
-    try std.testing.expectEqual(@as(usize, 100), summary.params_len);
+    try std.testing.expectEqual(@as(u32, 100), summary.params_len);
 }
 
 test "decodeTxnSummary: too short returns null" {
