@@ -723,8 +723,8 @@ fn typedValueToColumnValue(v: TypedValue) !gateway_mod.ColumnValue {
         .uint16 => |n| .{ .uint16 = n },
         .uint32 => |n| .{ .uint32 = n },
         .uint64 => |n| .{ .uint64 = n },
-        .float32 => |f| .{ .float32 = f },
-        .float64 => |f| .{ .float64 = f },
+        .float32 => |f| .{ .decimal = decimalFromF64(@as(f64, f)) },
+        .float64 => |f| .{ .decimal = decimalFromF64(f) },
         .decimal => |d| .{ .decimal = .{ .coefficient = d.coefficient, .scale = d.scale } },
         .string => |s| .{ .string = s },
         .bytes => |b| .{ .bytes = b },
@@ -743,12 +743,17 @@ fn columnValueToTypedValue(v: gateway_mod.ColumnValue) TypedValue {
         .uint16 => |n| .{ .uint16 = n },
         .uint32 => |n| .{ .uint32 = n },
         .uint64 => |n| .{ .uint64 = n },
-        .float32 => |f| .{ .float32 = f },
-        .float64 => |f| .{ .float64 = f },
         .decimal => |d| .{ .decimal = .{ .coefficient = d.coefficient, .scale = d.scale } },
         .string => |s| .{ .string = s },
         .bytes => |b| .{ .bytes = b },
     };
+}
+
+fn decimalFromF64(f: f64) @TypeOf(@as(gateway_mod.ColumnValue, undefined).decimal) {
+    const scale: u8 = 10;
+    const factor: f64 = 1e10;
+    const coeff: i128 = @intFromFloat(@trunc(f * factor));
+    return .{ .coefficient = coeff, .scale = scale };
 }
 
 fn gatewayErrToCode(e: anyerror) msg.ErrorCode {

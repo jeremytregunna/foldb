@@ -582,6 +582,17 @@ pub fn build(b: *std.Build) void {
     const sql_executor_expr_tests = b.addTest(.{ .root_module = sql_executor_expr_test_module });
     const run_sql_executor_expr_tests = b.addRunArtifact(sql_executor_expr_tests);
 
+    // Decimal type tests
+    const sql_decimal_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sql/decimal_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sql_decimal_test_module.addImport("sql.zig", sql_module);
+    sql_decimal_test_module.addImport("storage.zig", storage_module);
+    const sql_decimal_tests = b.addTest(.{ .root_module = sql_decimal_test_module });
+    const run_sql_decimal_tests = b.addRunArtifact(sql_decimal_tests);
+
     // SQL replay (DST) tests
     const sql_replay_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/sql/replay_test.zig"),
@@ -1262,6 +1273,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_sql_schema_tests.step);
     test_step.dependOn(&run_sql_planner_tests.step);
     test_step.dependOn(&run_sql_executor_expr_tests.step);
+    test_step.dependOn(&run_sql_decimal_tests.step);
     test_step.dependOn(&run_sql_fk_tests.step);
     test_step.dependOn(&run_cdc_tests.step);
     test_step.dependOn(&run_cdc_concurrent_tests.step);

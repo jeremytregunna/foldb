@@ -319,16 +319,6 @@ fn writeValue(col_type: ColumnType, v: ColumnValue, out: *std.ArrayList(u8), all
             std.mem.writeInt(u64, &b, v.uint64, .little);
             try out.appendSlice(alloc, &b);
         },
-        .float32 => {
-            var b: [4]u8 = undefined;
-            std.mem.writeInt(u32, &b, @bitCast(v.float32), .little);
-            try out.appendSlice(alloc, &b);
-        },
-        .float64 => {
-            var b: [8]u8 = undefined;
-            std.mem.writeInt(u64, &b, @bitCast(v.float64), .little);
-            try out.appendSlice(alloc, &b);
-        },
         .bytes, .string => {
             const s = switch (v) {
                 .bytes => |x| x,
@@ -386,14 +376,6 @@ fn readValue(col_type: ColumnType, data: []const u8, alloc: std.mem.Allocator) !
         .uint64 => {
             if (data.len < 8) return error.EndOfData;
             return .{ .value = .{ .uint64 = std.mem.readInt(u64, data[0..8], .little) }, .bytes_read = 8 };
-        },
-        .float32 => {
-            if (data.len < 4) return error.EndOfData;
-            return .{ .value = .{ .float32 = @bitCast(std.mem.readInt(u32, data[0..4], .little)) }, .bytes_read = 4 };
-        },
-        .float64 => {
-            if (data.len < 8) return error.EndOfData;
-            return .{ .value = .{ .float64 = @bitCast(std.mem.readInt(u64, data[0..8], .little)) }, .bytes_read = 8 };
         },
         .bytes, .string => {
             if (data.len < 4) return error.EndOfData;

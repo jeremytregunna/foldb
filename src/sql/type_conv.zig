@@ -17,8 +17,6 @@ pub fn columnValueToPlanValue(cv: ColumnValue) plan_mod.Value {
         .uint16 => |v| .{ .uint_val = v },
         .uint32 => |v| .{ .uint_val = v },
         .uint64 => |v| .{ .uint_val = v },
-        .float32 => |v| .{ .float_val = v },
-        .float64 => |v| .{ .float_val = v },
         .string => |v| .{ .string_val = v },
         .bytes => |v| .{ .bytes_val = v },
         .decimal => |v| .{ .decimal_val = v },
@@ -31,7 +29,6 @@ pub fn planValueToColumnValue(v: plan_mod.Value, alloc: std.mem.Allocator) !Colu
         .bool_val => |b| .{ .bool_t = b },
         .int_val => |n| .{ .int64 = n },
         .uint_val => |n| .{ .uint64 = n },
-        .float_val => |f| .{ .float64 = f },
         .decimal_val => |d| .{ .decimal = d },
         .string_val => |s| .{ .string = try alloc.dupe(u8, s) },
         .bytes_val => |b| .{ .bytes = try alloc.dupe(u8, b) },
@@ -74,14 +71,6 @@ pub fn planValueToTypedColumnValue(v: plan_mod.Value, typ: ast.SqlType, alloc: s
             .uint_val => |n| .{ .uint64 = n },
             else => error.TypeMismatch,
         },
-        .float32 => switch (v) {
-            .float_val => |f| .{ .float32 = @floatCast(f) },
-            else => error.TypeMismatch,
-        },
-        .float64 => switch (v) {
-            .float_val => |f| .{ .float64 = f },
-            else => error.TypeMismatch,
-        },
         .decimal => switch (v) {
             .decimal_val => |d| .{ .decimal = d },
             .int_val => |n| .{ .decimal = .{ .coefficient = n, .scale = 0 } },
@@ -104,13 +93,6 @@ pub fn castValue(v: plan_mod.Value, to: ast.SqlType) !plan_mod.Value {
         .int64 => switch (v) {
             .int_val => v,
             .uint_val => |n| .{ .int_val = @intCast(n) },
-            .float_val => |f| .{ .int_val = @as(i64, @intFromFloat(f)) },
-            else => error.TypeMismatch,
-        },
-        .float64 => switch (v) {
-            .float_val => v,
-            .int_val => |n| .{ .float_val = @floatFromInt(n) },
-            .uint_val => |n| .{ .float_val = @floatFromInt(n) },
             else => error.TypeMismatch,
         },
         .decimal => switch (v) {
@@ -138,8 +120,6 @@ pub fn defaultValue(typ: ast.SqlType) ColumnValue {
         .uint16 => .{ .uint16 = 0 },
         .uint32 => .{ .uint32 = 0 },
         .uint64 => .{ .uint64 = 0 },
-        .float32 => .{ .float32 = 0.0 },
-        .float64 => .{ .float64 = 0.0 },
         .decimal => .{ .decimal = .{ .coefficient = 0, .scale = 0 } },
         .string => .{ .string = "" },
         .bytes => .{ .bytes = "" },

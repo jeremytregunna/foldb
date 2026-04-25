@@ -18,7 +18,7 @@ fn makeSchema(alloc: std.mem.Allocator) !schema_mod.SchemaRegistry {
         .columns = &[_]ast_mod.ColumnDef{
             .{ .name = "id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
             .{ .name = "name", .typ = .string, .nullable = .not_null, .span = zero_span },
-            .{ .name = "score", .typ = .float64, .nullable = .nullable, .span = zero_span },
+            .{ .name = "score", .typ = .{ .decimal = .{ .precision = 38, .scale = 10 } }, .nullable = .nullable, .span = zero_span },
         },
         .primary_key = .{ .columns = &.{"id"} },
     });
@@ -28,7 +28,7 @@ fn makeSchema(alloc: std.mem.Allocator) !schema_mod.SchemaRegistry {
         .columns = &[_]ast_mod.ColumnDef{
             .{ .name = "id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
             .{ .name = "user_id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
-            .{ .name = "amount", .typ = .float64, .nullable = .not_null, .span = zero_span },
+            .{ .name = "amount", .typ = .{ .decimal = .{ .precision = 38, .scale = 10 } }, .nullable = .not_null, .span = zero_span },
         },
         .primary_key = .{ .columns = &.{"id"} },
     });

@@ -192,8 +192,6 @@ pub const CanonWriter = struct {
                 try self.writeByte(0x08);
                 try self.writeByte(@intFromEnum(ov));
             },
-            .float32 => try self.writeByte(0x09),
-            .float64 => try self.writeByte(0x0A),
             .decimal => |d| {
                 try self.writeByte(0x0B);
                 try self.writeByte(d.precision);

@@ -117,7 +117,6 @@ pub fn evalExpr(e: *plan_mod.PlanExpr, ctx: EvalCtx) SqlExecError!plan_mod.Value
         .bool_literal => |v| .{ .bool_val = v },
         .int_literal => |v| .{ .int_val = v },
         .uint_literal => |v| .{ .uint_val = v },
-        .float_literal => |v| .{ .float_val = v },
         .decimal_literal => |v| .{ .decimal_val = v },
         .string_literal => |v| .{ .string_val = v },
         .bytes_literal => |v| .{ .bytes_val = v },
@@ -152,7 +151,6 @@ pub fn evalExpr(e: *plan_mod.PlanExpr, ctx: EvalCtx) SqlExecError!plan_mod.Value
                 const v = try evalExpr(u.expr, ctx);
                 return switch (v) {
                     .int_val => |n| .{ .int_val = -n },
-                    .float_val => |n| .{ .float_val = -n },
                     .decimal_val => |d| .{ .decimal_val = .{ .coefficient = -d.coefficient, .scale = d.scale } },
                     else => error.TypeMismatch,
                 };
@@ -334,7 +332,6 @@ fn evalBinaryArith(op: ast.BinOp, lv: plan_mod.Value, rv: plan_mod.Value) SqlExe
                 const rd = toDecimal(rv) orelse break :decimalArith error.TypeMismatch;
                 break :decimalArith .{ .decimal_val = decimalAdd(ld, rd) };
             }},
-            .float_val => |a| switch (rv) { .float_val => |b| .{ .float_val = a + b }, else => error.TypeMismatch },
             .decimal_val => |a| switch (rv) {
                 .decimal_val => |b| .{ .decimal_val = decimalAdd(a, b) },
                 .int_val => |b| .{ .decimal_val = decimalAdd(a, intToDecimal(b)) },
@@ -348,7 +345,6 @@ fn evalBinaryArith(op: ast.BinOp, lv: plan_mod.Value, rv: plan_mod.Value) SqlExe
                 const rd = toDecimal(rv) orelse break :decimalArith error.TypeMismatch;
                 break :decimalArith .{ .decimal_val = decimalSub(ld, rd) };
             }},
-            .float_val => |a| switch (rv) { .float_val => |b| .{ .float_val = a - b }, else => error.TypeMismatch },
             .decimal_val => |a| switch (rv) {
                 .decimal_val => |b| .{ .decimal_val = decimalSub(a, b) },
                 .int_val => |b| .{ .decimal_val = decimalSub(a, intToDecimal(b)) },
@@ -362,7 +358,6 @@ fn evalBinaryArith(op: ast.BinOp, lv: plan_mod.Value, rv: plan_mod.Value) SqlExe
                 const rd = toDecimal(rv) orelse break :decimalArith error.TypeMismatch;
                 break :decimalArith .{ .decimal_val = decimalMul(ld, rd) };
             }},
-            .float_val => |a| switch (rv) { .float_val => |b| .{ .float_val = a * b }, else => error.TypeMismatch },
             .decimal_val => |a| switch (rv) {
                 .decimal_val => |b| .{ .decimal_val = decimalMul(a, b) },
                 .int_val => |b| .{ .decimal_val = decimalMul(a, intToDecimal(b)) },
@@ -376,7 +371,6 @@ fn evalBinaryArith(op: ast.BinOp, lv: plan_mod.Value, rv: plan_mod.Value) SqlExe
                 .decimal_val => .{ .decimal_val = try decimalDiv(intToDecimal(a), rv.decimal_val) },
                 else => error.TypeMismatch,
             },
-            .float_val => |a| switch (rv) { .float_val => |b| .{ .float_val = a / b }, else => error.TypeMismatch },
             .decimal_val => |a| switch (rv) {
                 .decimal_val => |b| .{ .decimal_val = try decimalDiv(a, b) },
                 .int_val => |b| .{ .decimal_val = try decimalDiv(a, intToDecimal(b)) },
@@ -694,11 +688,6 @@ fn evalBuiltinString(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx)
                     defer ctx.alloc.free(s);
                     try result.appendSlice(ctx.alloc, s);
                 },
-                .float_val => |f| {
-                    const s = try std.fmt.allocPrint(ctx.alloc, "{d}", .{f});
-                    defer ctx.alloc.free(s);
-                    try result.appendSlice(ctx.alloc, s);
-                },
                 else => {},
             }
         }
@@ -730,14 +719,12 @@ fn evalBuiltinMath(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) S
         if (args.len != 1) return error.TypeMismatch;
         return switch (try evalExpr(args[0], ctx)) {
             .int_val => |n| .{ .int_val = if (n < 0) -n else n },
-            .float_val => |f| .{ .float_val = @abs(f) },
             else => error.TypeMismatch,
         };
     }
     if (std.ascii.eqlIgnoreCase(name, "floor")) {
         if (args.len != 1) return error.TypeMismatch;
         return switch (try evalExpr(args[0], ctx)) {
-            .float_val => |f| .{ .float_val = @floor(f) },
             .int_val => |v| .{ .int_val = v },
             else => error.TypeMismatch,
         };
@@ -745,7 +732,6 @@ fn evalBuiltinMath(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) S
     if (std.ascii.eqlIgnoreCase(name, "ceil") or std.ascii.eqlIgnoreCase(name, "ceiling")) {
         if (args.len != 1) return error.TypeMismatch;
         return switch (try evalExpr(args[0], ctx)) {
-            .float_val => |f| .{ .float_val = @ceil(f) },
             .int_val => |v| .{ .int_val = v },
             else => error.TypeMismatch,
         };
@@ -753,7 +739,6 @@ fn evalBuiltinMath(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) S
     if (std.ascii.eqlIgnoreCase(name, "round")) {
         if (args.len < 1) return error.TypeMismatch;
         return switch (try evalExpr(args[0], ctx)) {
-            .float_val => |f| .{ .float_val = @round(f) },
             .int_val => |v| .{ .int_val = v },
             else => error.TypeMismatch,
         };

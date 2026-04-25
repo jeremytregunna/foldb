@@ -20,7 +20,6 @@ pub const Value = union(enum) {
     bool_val: bool,
     int_val: i64,
     uint_val: u64,
-    float_val: f64,
     decimal_val: ast.Decimal,
     string_val: []const u8,
     bytes_val: []const u8,
@@ -53,10 +52,6 @@ pub const Value = union(enum) {
                 .uint_val => |ov| v == ov,
                 else => false,
             },
-            .float_val => |v| switch (other) {
-                .float_val => |ov| v == ov,
-                else => false,
-            },
             .decimal_val => |v| switch (other) {
                 .decimal_val => |ov| decimalEql(v, ov),
                 else => false,
@@ -84,10 +79,6 @@ pub const Value = union(enum) {
             },
             .uint_val => |v| switch (other) {
                 .uint_val => |ov| v < ov,
-                else => false,
-            },
-            .float_val => |v| switch (other) {
-                .float_val => |ov| v < ov,
                 else => false,
             },
             .decimal_val => |v| switch (other) {
@@ -352,7 +343,6 @@ pub const PlanExpr = union(enum) {
     bool_literal: bool,
     int_literal: i64,
     uint_literal: u64,
-    float_literal: f64,
     decimal_literal: ast.Decimal,
     string_literal: []const u8,
     bytes_literal: []const u8,

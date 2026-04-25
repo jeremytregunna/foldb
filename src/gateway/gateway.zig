@@ -899,8 +899,6 @@ fn sqlTypeToColumnType(t: sql_mod.ast.SqlType) storage_mod.ColumnType {
         .uint16 => .uint16,
         .uint32 => .uint32,
         .uint64 => .uint64,
-        .float32 => .float32,
-        .float64 => .float64,
         .string => .string,
         .bytes => .bytes,
         .uuid => .bytes,

@@ -137,13 +137,17 @@ test "Dict: bool values" {
     try roundTrip(.bool_t, &vals, .dict);
 }
 
-test "Dict: float32 values" {
+test "Dict: decimal values" {
     const vals = [_]ColumnValue{
-        .{ .float32 = 1.0 },  .{ .float32 = 2.5 }, .{ .float32 = 1.0 },
-        .{ .float32 = 3.14 }, .{ .float32 = 2.5 }, .{ .float32 = 1.0 },
+        .{ .decimal = .{ .coefficient = 100, .scale = 2 } },
+        .{ .decimal = .{ .coefficient = 250, .scale = 2 } },
+        .{ .decimal = .{ .coefficient = 100, .scale = 2 } },
+        .{ .decimal = .{ .coefficient = 314, .scale = 2 } },
+        .{ .decimal = .{ .coefficient = 250, .scale = 2 } },
+        .{ .decimal = .{ .coefficient = 100, .scale = 2 } },
     };
     // 2/5 adjacent equal = 40% < 50% → not RLE; not integer → not FOR; 3 distinct ≤ 256 → dict
-    try roundTrip(.float32, &vals, .dict);
+    try roundTrip(.decimal, &vals, .dict);
 }
 
 test "RLE: bool all same" {

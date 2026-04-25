@@ -3,6 +3,7 @@ const std = @import("std");
 const plan_mod = @import("plan.zig");
 const eval_expr_mod = @import("eval_expr.zig");
 const agg_helpers = @import("agg_helpers.zig");
+const ast = @import("ast.zig");
 
 const EvalCtx = eval_expr_mod.EvalCtx;
 const SqlExecError = eval_expr_mod.SqlExecError;
@@ -15,8 +16,8 @@ const buildStringAgg = agg_helpers.buildStringAgg;
 pub const AggAccum = struct {
     count: i64 = 0,
     sum_int: i64 = 0,
-    sum_float: f64 = 0.0,
-    is_float: bool = false,
+    sum_decimal: ast.Decimal = .{ .coefficient = 0, .scale = 0 },
+    is_decimal: bool = false,
     min: ?plan_mod.Value = null,
     max: ?plan_mod.Value = null,
     collected: std.ArrayListUnmanaged(plan_mod.Value) = .empty,
@@ -50,9 +51,9 @@ pub const AggAccum = struct {
                 self.count += 1;
                 switch (val) {
                     .int_val => |n| self.sum_int += n,
-                    .float_val => |f| {
-                        self.sum_float += f;
-                        self.is_float = true;
+                    .decimal_val => |d| {
+                        self.sum_decimal = decimalAdd(self.sum_decimal, d);
+                        self.is_decimal = true;
                     },
                     else => {},
                 }
@@ -91,12 +92,17 @@ pub const AggAccum = struct {
         if (std.ascii.eqlIgnoreCase(fn_name, "count")) {
             return .{ .int_val = self.count };
         } else if (std.ascii.eqlIgnoreCase(fn_name, "sum")) {
-            if (self.is_float) return .{ .float_val = self.sum_float };
+            if (self.is_decimal) return .{ .decimal_val = self.sum_decimal };
             return .{ .int_val = self.sum_int };
         } else if (std.ascii.eqlIgnoreCase(fn_name, "avg")) {
             if (self.count == 0) return .null_val;
-            const total: f64 = if (self.is_float) self.sum_float else @floatFromInt(self.sum_int);
-            return .{ .float_val = total / @as(f64, @floatFromInt(self.count)) };
+            if (self.is_decimal) {
+                const divisor = ast.Decimal{ .coefficient = self.count, .scale = 0 };
+                return .{ .decimal_val = decimalDiv(self.sum_decimal, divisor) catch .{ .coefficient = 0, .scale = 0 } };
+            }
+            const sum_dec = ast.Decimal{ .coefficient = self.sum_int, .scale = 0 };
+            const divisor = ast.Decimal{ .coefficient = self.count, .scale = 0 };
+            return .{ .decimal_val = decimalDiv(sum_dec, divisor) catch .{ .coefficient = 0, .scale = 0 } };
         } else if (std.ascii.eqlIgnoreCase(fn_name, "min")) {
             return self.min orelse .null_val;
         } else if (std.ascii.eqlIgnoreCase(fn_name, "max")) {
@@ -109,3 +115,26 @@ pub const AggAccum = struct {
         return .null_val;
     }
 };
+
+fn decimalPow10(n: u8) i128 {
+    var result: i128 = 1;
+    var i: u8 = 0;
+    while (i < n) : (i += 1) result *= 10;
+    return result;
+}
+
+fn decimalAdd(a: ast.Decimal, b: ast.Decimal) ast.Decimal {
+    if (a.scale == b.scale) return .{ .coefficient = a.coefficient +| b.coefficient, .scale = a.scale };
+    const s = @max(a.scale, b.scale);
+    const ac = if (a.scale < s) a.coefficient *| decimalPow10(s - a.scale) else a.coefficient;
+    const bc = if (b.scale < s) b.coefficient *| decimalPow10(s - b.scale) else b.coefficient;
+    return .{ .coefficient = ac +| bc, .scale = s };
+}
+
+fn decimalDiv(a: ast.Decimal, b: ast.Decimal) !ast.Decimal {
+    if (b.coefficient == 0) return error.DivisionByZero;
+    const result_scale: u8 = @max(a.scale, 10);
+    const extra: u8 = result_scale + b.scale -| a.scale;
+    const scaled_a = a.coefficient *| decimalPow10(extra);
+    return .{ .coefficient = @divTrunc(scaled_a, b.coefficient), .scale = result_scale };
+}

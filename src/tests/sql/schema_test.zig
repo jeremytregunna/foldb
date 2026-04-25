@@ -41,7 +41,7 @@ test "createTable multiple columns" {
         .columns = &[_]ast_mod.ColumnDef{
             singleIntCol("id"),
             .{ .name = "name", .typ = .string, .nullable = .not_null, .span = zero_span },
-            .{ .name = "score", .typ = .float64, .nullable = .nullable, .span = zero_span },
+            .{ .name = "score", .typ = .{ .decimal = .{ .precision = 38, .scale = 10 } }, .nullable = .nullable, .span = zero_span },
         },
         .primary_key = .{ .columns = &.{"id"} },
     });

@@ -28,7 +28,7 @@ fn makeSchemaRegistry(alloc: std.mem.Allocator) !schema_mod.SchemaRegistry {
         .columns = &[_]sql.ast.ColumnDef{
             .{ .name = "id", .typ = .{ .int64 = .error_on_overflow }, .nullable = .not_null, .span = zero_span },
             .{ .name = "name", .typ = .string, .nullable = .not_null, .span = zero_span },
-            .{ .name = "score", .typ = .float64, .nullable = .nullable, .span = zero_span },
+            .{ .name = "score", .typ = .{ .decimal = .{ .precision = 38, .scale = 10 } }, .nullable = .nullable, .span = zero_span },
         },
         .primary_key = .{ .columns = &.{"id"} },
     });
@@ -41,7 +41,7 @@ fn registerStorage(storage: *Storage) !void {
         .columns = &.{
             .{ .col_type = .int64, .nullable = false },
             .{ .col_type = .string, .nullable = false },
-            .{ .col_type = .float64, .nullable = true },
+            .{ .col_type = .decimal, .nullable = true },
         },
     });
 }
@@ -274,7 +274,7 @@ test "SQL Replay: INSERT UPDATE DELETE produces byte-equal SSTables" {
         const params_raw = try eb.encodeParams(&.{
             .{ .int64 = i },
             .{ .string = name },
-            .{ .float64 = @as(f64, @floatFromInt(i)) * 1.5 },
+            .{ .decimal = .{ .coefficient = @as(i128, i) * 15, .scale = 1 } },
         }, alloc);
         defer alloc.free(params_raw);
 
@@ -290,7 +290,7 @@ test "SQL Replay: INSERT UPDATE DELETE produces byte-equal SSTables" {
     while (i <= 5) : (i += 1) {
         const params_raw = try eb.encodeParams(&.{
             .{ .int64 = i },
-            .{ .float64 = 99.9 },
+            .{ .decimal = .{ .coefficient = 999, .scale = 1 } },
         }, alloc);
         defer alloc.free(params_raw);
 
@@ -356,7 +356,7 @@ test "SQL Replay: constraint-abort aborts do not corrupt state determinism" {
         const params_raw = try eb.encodeParams(&.{
             .{ .int64 = i },
             .{ .string = name },
-            .{ .float64 = 0.0 },
+            .{ .decimal = .{ .coefficient = 0, .scale = 0 } },
         }, alloc);
         defer alloc.free(params_raw);
         var e = try makeEntry(alloc, seq, &insert_hash, params_raw);
@@ -369,7 +369,7 @@ test "SQL Replay: constraint-abort aborts do not corrupt state determinism" {
     // 3 unknown-hash aborts
     var j: u64 = 0;
     while (j < 3) : (j += 1) {
-        const params_raw = try eb.encodeParams(&.{ .{ .int64 = 999 }, .{ .string = "x" }, .{ .float64 = 0.0 } }, alloc);
+        const params_raw = try eb.encodeParams(&.{ .{ .int64 = 999 }, .{ .string = "x" }, .{ .decimal = .{ .coefficient = 0, .scale = 0 } } }, alloc);
         defer alloc.free(params_raw);
         var e = try makeEntry(alloc, seq, &unknown_hash, params_raw);
         defer e.deinit(alloc);
@@ -381,7 +381,7 @@ test "SQL Replay: constraint-abort aborts do not corrupt state determinism" {
     // 2 CRC-corrupted aborts
     j = 0;
     while (j < 2) : (j += 1) {
-        const params_raw = try eb.encodeParams(&.{ .{ .int64 = 1 }, .{ .string = "bad" }, .{ .float64 = 0.0 } }, alloc);
+        const params_raw = try eb.encodeParams(&.{ .{ .int64 = 1 }, .{ .string = "bad" }, .{ .decimal = .{ .coefficient = 0, .scale = 0 } } }, alloc);
         defer alloc.free(params_raw);
         var e = try makeEntry(alloc, seq, &insert_hash, params_raw);
         defer e.deinit(alloc);
@@ -399,7 +399,7 @@ test "SQL Replay: constraint-abort aborts do not corrupt state determinism" {
         const params_raw = try eb.encodeParams(&.{
             .{ .int64 = i },
             .{ .string = name },
-            .{ .float64 = 1.0 },
+            .{ .decimal = .{ .coefficient = 1, .scale = 0 } },
         }, alloc);
         defer alloc.free(params_raw);
         var e = try makeEntry(alloc, seq, &insert_hash, params_raw);
@@ -440,7 +440,7 @@ test "SQL Replay: scan returns rows written via INSERT" {
         const params_raw = try eb.encodeParams(&.{
             .{ .int64 = i },
             .{ .string = name },
-            .{ .float64 = @as(f64, @floatFromInt(i)) * 10.0 },
+            .{ .decimal = .{ .coefficient = @as(i128, i) * 10, .scale = 0 } },
         }, alloc);
         defer alloc.free(params_raw);
         var e = try makeEntry(alloc, seq, &insert_hash, params_raw);

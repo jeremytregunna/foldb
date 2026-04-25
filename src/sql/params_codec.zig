@@ -56,16 +56,6 @@ fn encodeParamValue(buf: *std.ArrayList(u8), v: ColumnValue, alloc: std.mem.Allo
             std.mem.writeInt(u64, &b, n, .little);
             try buf.appendSlice(alloc, &b);
         },
-        .float32 => |n| {
-            var b: [4]u8 = undefined;
-            std.mem.writeInt(u32, &b, @bitCast(n), .little);
-            try buf.appendSlice(alloc, &b);
-        },
-        .float64 => |n| {
-            var b: [8]u8 = undefined;
-            std.mem.writeInt(u64, &b, @bitCast(n), .little);
-            try buf.appendSlice(alloc, &b);
-        },
         .string => |s| {
             var lb: [4]u8 = undefined;
             std.mem.writeInt(u32, &lb, @intCast(s.len), .little);
@@ -159,16 +149,6 @@ fn decodeParamValue(data: []const u8, pos: *u32, typ: ast.SqlType, alloc: std.me
             pos.* += 8;
             break :blk .{ .uint64 = n };
         },
-        .float32 => blk: {
-            const bits = std.mem.readInt(u32, data[pos.*..][0..4], .little);
-            pos.* += 4;
-            break :blk .{ .float32 = @bitCast(bits) };
-        },
-        .float64 => blk: {
-            const bits = std.mem.readInt(u64, data[pos.*..][0..8], .little);
-            pos.* += 8;
-            break :blk .{ .float64 = @bitCast(bits) };
-        },
         .string => blk: {
             const len = std.mem.readInt(u32, data[pos.*..][0..4], .little);
             pos.* += 4;
@@ -176,12 +156,19 @@ fn decodeParamValue(data: []const u8, pos: *u32, typ: ast.SqlType, alloc: std.me
             pos.* += len;
             break :blk .{ .string = s };
         },
-        .bytes, .uuid, .timestamp, .interval_months, .interval_micros, .json, .vector, .decimal => blk: {
+        .bytes, .uuid, .timestamp, .interval_months, .interval_micros, .json, .vector => blk: {
             const len = std.mem.readInt(u32, data[pos.*..][0..4], .little);
             pos.* += 4;
             const b = try alloc.dupe(u8, data[pos.* .. pos.* + len]);
             pos.* += len;
             break :blk .{ .bytes = b };
+        },
+        .decimal => blk: {
+            const scale = data[pos.*];
+            pos.* += 1;
+            const coeff = std.mem.readInt(i128, data[pos.*..][0..16], .little);
+            pos.* += 16;
+            break :blk .{ .decimal = .{ .coefficient = coeff, .scale = scale } };
         },
         else => error.TypeMismatch,
     };
@@ -198,10 +185,9 @@ fn decodeParamValueByTag(data: []const u8, pos: *u32, tag: u8, alloc: std.mem.Al
         6 => .uint16,
         7 => .uint32,
         8 => .uint64,
-        9 => .float32,
-        10 => .float64,
         11 => .bytes,
         12 => .string,
+        13 => .decimal,
         else => return error.TypeMismatch,
     };
     return switch (col_type) {
@@ -249,16 +235,6 @@ fn decodeParamValueByTag(data: []const u8, pos: *u32, tag: u8, alloc: std.mem.Al
             const n = std.mem.readInt(u64, data[pos.*..][0..8], .little);
             pos.* += 8;
             break :blk .{ .uint64 = n };
-        },
-        .float32 => blk: {
-            const b = std.mem.readInt(u32, data[pos.*..][0..4], .little);
-            pos.* += 4;
-            break :blk .{ .float32 = @bitCast(b) };
-        },
-        .float64 => blk: {
-            const b = std.mem.readInt(u64, data[pos.*..][0..8], .little);
-            pos.* += 8;
-            break :blk .{ .float64 = @bitCast(b) };
         },
         .string => blk: {
             const len = std.mem.readInt(u32, data[pos.*..][0..4], .little);

@@ -78,18 +78,6 @@ pub fn encodeKeyComponent(buf: *std.ArrayList(u8), v: ColumnValue, alloc: std.me
             std.mem.writeInt(u64, &b, n, .big);
             try buf.appendSlice(alloc, &b);
         },
-        .float32 => |n| {
-            const bits = @as(u32, @bitCast(n));
-            var b: [4]u8 = undefined;
-            std.mem.writeInt(u32, &b, bits, .big);
-            try buf.appendSlice(alloc, &b);
-        },
-        .float64 => |n| {
-            const bits = @as(u64, @bitCast(n));
-            var b: [8]u8 = undefined;
-            std.mem.writeInt(u64, &b, bits, .big);
-            try buf.appendSlice(alloc, &b);
-        },
         .string => |s| {
             var len_buf: [4]u8 = undefined;
             std.mem.writeInt(u32, &len_buf, @intCast(s.len), .big);
@@ -172,16 +160,6 @@ pub fn serializeRowKey(row: []const ?ColumnValue, alloc: std.mem.Allocator) ![]c
                 .uint64 => |v| {
                     var tmp: [8]u8 = undefined;
                     std.mem.writeInt(u64, &tmp, v, .little);
-                    try buf.appendSlice(alloc, &tmp);
-                },
-                .float32 => |v| {
-                    var tmp: [4]u8 = undefined;
-                    std.mem.writeInt(u32, &tmp, @bitCast(v), .little);
-                    try buf.appendSlice(alloc, &tmp);
-                },
-                .float64 => |v| {
-                    var tmp: [8]u8 = undefined;
-                    std.mem.writeInt(u64, &tmp, @bitCast(v), .little);
                     try buf.appendSlice(alloc, &tmp);
                 },
                 .string => |s| {

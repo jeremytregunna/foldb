@@ -20,8 +20,6 @@ pub const SqlType = union(enum) {
     uint16: IntOverflow,
     uint32: IntOverflow,
     uint64: IntOverflow,
-    float32,
-    float64,
     decimal: struct { precision: u8, scale: u8 },
     string,
     bytes,
@@ -38,7 +36,7 @@ pub const SqlType = union(enum) {
 
     pub fn isNumeric(self: SqlType) bool {
         return switch (self) {
-            .int8, .int16, .int32, .int64, .uint8, .uint16, .uint32, .uint64, .float32, .float64, .decimal => true,
+            .int8, .int16, .int32, .int64, .uint8, .uint16, .uint32, .uint64, .decimal => true,
             else => false,
         };
     }
@@ -61,8 +59,6 @@ pub const SqlType = union(enum) {
             .uint16 => other == .uint16,
             .uint32 => other == .uint32,
             .uint64 => other == .uint64,
-            .float32 => other == .float32,
-            .float64 => other == .float64,
             .string => other == .string,
             .bytes => other == .bytes,
             .uuid => other == .uuid,
