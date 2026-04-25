@@ -5,6 +5,32 @@ const conn_mod = @import("conn.zig");
 const gateway_mod = @import("gateway.zig");
 const config_mod = @import("config.zig");
 
+const assert = std.debug.assert;
+
+// ---- socket / syscall constants ----
+
+const AF_INET: u32 = 2;
+const SOCK_STREAM: u32 = 1;
+const SOCK_CLOEXEC: u32 = 0o2000000;
+const SOL_SOCKET: u32 = 1;
+const SO_REUSEADDR: u32 = 2;
+const SHUT_RDWR: i32 = 2;
+const LISTEN_BACKLOG: u32 = 128;
+
+// ---- server constants ----
+
+/// Maximum number of concurrently tracked client connections.
+const MAX_CONNECTIONS: u32 = 4096;
+
+/// Follower apply-loop poll interval in nanoseconds (5 ms).
+const APPLY_LOOP_SLEEP_NS: u64 = 5_000_000;
+
+comptime {
+    assert(MAX_CONNECTIONS > 0);
+    assert(APPLY_LOOP_SLEEP_NS > 0);
+    assert(LISTEN_BACKLOG > 0);
+}
+
 /// Set by SIGINT/SIGTERM/SIGHUP handlers; polled in the accept loop to trigger clean shutdown.
 var shutdown_requested = std.atomic.Value(bool).init(false);
 
@@ -45,11 +71,7 @@ fn installSignalHandlers() void {
 
 /// Bind + listen on port. Returns the server fd.
 pub fn bindListen(port: u16) !std.posix.fd_t {
-    const AF_INET: u32 = 2;
-    const SOCK_STREAM: u32 = 1;
-    const SOCK_CLOEXEC: u32 = 0o2000000;
-    const SOL_SOCKET: u32 = 1;
-    const SO_REUSEADDR: u32 = 2;
+    assert(port > 0);
 
     const raw_fd = std.os.linux.socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     const fd_i: isize = @bitCast(raw_fd);
@@ -57,7 +79,6 @@ pub fn bindListen(port: u16) !std.posix.fd_t {
     const fd: std.posix.fd_t = @intCast(fd_i);
     errdefer _ = std.os.linux.close(@intCast(fd));
 
-    // SO_REUSEADDR
     const opt: u32 = 1;
     _ = std.os.linux.setsockopt(
         @intCast(fd),
@@ -67,26 +88,27 @@ pub fn bindListen(port: u16) !std.posix.fd_t {
         @sizeOf(u32),
     );
 
-    // sockaddr_in: family(2) + port BE(2) + addr(4) + padding(8) = 16 bytes
+    // sockaddr_in: family(2) + port BE(2) + addr(4) + padding(8) = 16 bytes.
     var addr_buf: [16]u8 align(2) = std.mem.zeroes([16]u8);
     std.mem.writeInt(u16, addr_buf[0..2], AF_INET, .little);
     std.mem.writeInt(u16, addr_buf[2..4], port, .big); // port is always BE in sockaddr
-    // addr = INADDR_ANY (0.0.0.0) — already zeroed
+    // addr = INADDR_ANY (0.0.0.0) — already zeroed.
 
     const bind_rc = std.os.linux.bind(fd, @ptrCast(@alignCast(&addr_buf)), 16);
     const bind_i: isize = @bitCast(bind_rc);
     if (bind_i < 0) return error.BindError;
 
-    const listen_rc = std.os.linux.listen(@intCast(fd), 128);
+    const listen_rc = std.os.linux.listen(@intCast(fd), LISTEN_BACKLOG);
     const listen_i: isize = @bitCast(listen_rc);
     if (listen_i < 0) return error.ListenError;
 
+    assert(fd >= 0);
     return fd;
 }
 
 /// Accept one connection. Returns the client fd.
 fn acceptOne(server_fd: std.posix.fd_t) !std.posix.fd_t {
-    const SOCK_CLOEXEC: u32 = 0o2000000;
+    assert(server_fd >= 0);
     const n = std.os.linux.accept4(@intCast(server_fd), null, null, SOCK_CLOEXEC);
     const ni: isize = @bitCast(n);
     if (ni < 0) return error.AcceptError;
@@ -94,16 +116,17 @@ fn acceptOne(server_fd: std.posix.fd_t) !std.posix.fd_t {
 }
 
 /// Spinlock-protected registry of active client fds.
-/// On shutdown we close them all to unblock any blocking reads, which lets the
-/// connection tasks return errors and exit — allowing group.cancel(io) to complete.
+/// On shutdown we shut them all down to unblock any blocking reads, which lets the
+/// connection tasks return errors and exit — allowing the accept loop to drain.
 const ConnRegistry = struct {
-    fds: [4096]std.posix.fd_t = undefined,
+    fds: [MAX_CONNECTIONS]std.posix.fd_t = undefined,
     len: u32 = 0,
     lock: std.atomic.Value(bool) = .init(false),
 
     fn acquire(self: *ConnRegistry) void {
         while (self.lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {}
     }
+
     fn release(self: *ConnRegistry) void {
         self.lock.store(false, .release);
     }
@@ -111,10 +134,9 @@ const ConnRegistry = struct {
     fn add(self: *ConnRegistry, fd: std.posix.fd_t) void {
         self.acquire();
         defer self.release();
-        if (self.len < self.fds.len) {
-            self.fds[self.len] = fd;
-            self.len += 1;
-        }
+        assert(self.len < MAX_CONNECTIONS); // capacity exhausted — increase MAX_CONNECTIONS
+        self.fds[self.len] = fd;
+        self.len += 1;
     }
 
     fn remove(self: *ConnRegistry, fd: std.posix.fd_t) void {
@@ -137,7 +159,6 @@ const ConnRegistry = struct {
     fn closeAll(self: *ConnRegistry) void {
         self.acquire();
         defer self.release();
-        const SHUT_RDWR: i32 = 2;
         for (0..self.len) |i| {
             _ = std.os.linux.shutdown(@intCast(self.fds[i]), SHUT_RDWR);
         }
@@ -163,6 +184,7 @@ fn handleConn(
     registry: *ConnRegistry,
 ) !void {
     _ = io;
+    assert(client_fd >= 0);
     registry.add(client_fd);
     defer registry.remove(client_fd);
     try conn_mod.Conn.run(client_fd, gw, users, alloc);
@@ -173,7 +195,7 @@ fn handleConn(
 /// apply inline via runValidated(). On followers, connections return NotLeader so this
 /// is the only apply path.
 fn applyLoop(gw: *gateway_mod.Gateway) void {
-    const sleep_ts = std.os.linux.timespec{ .sec = 0, .nsec = 5_000_000 }; // 5ms
+    const sleep_ts = std.os.linux.timespec{ .sec = 0, .nsec = @intCast(APPLY_LOOP_SLEEP_NS) };
     while (!gw.apply_shutdown.load(.acquire)) {
         if (!gw.sequencer.isLeader()) {
             gw.applyNewEntries() catch {};
@@ -191,6 +213,8 @@ pub fn serve(
     users: []const config_mod.UserEntry,
     alloc: std.mem.Allocator,
 ) !void {
+    assert(port > 0);
+
     installSignalHandlers();
 
     gw.apply_thread = try std.Thread.spawn(.{}, applyLoop, .{gw});
@@ -227,5 +251,5 @@ pub fn serve(
         _ = std.os.linux.sched_yield();
     }
 
-    std.debug.print("foldb: shutting down cleanly\n", .{});
+    std.log.info("foldb: shutting down cleanly", .{});
 }

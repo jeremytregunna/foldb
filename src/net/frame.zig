@@ -1,8 +1,8 @@
 /// Wire protocol frame layer — header types, flags, kind enum, raw read/write.
 const std = @import("std");
 
-pub const FRAME_HEADER_SIZE: usize = 16;
-pub const TRACE_EXT_SIZE: usize = 16;
+pub const FRAME_HEADER_SIZE: u32 = 16;
+pub const TRACE_EXT_SIZE: u32 = 16;
 pub const PRE_HELLO_CAP: u32 = 4 * 1024;
 pub const DEFAULT_MAX_PAYLOAD: u32 = 16 * 1024 * 1024;
 pub const HARD_CAP_PAYLOAD: u32 = 64 * 1024 * 1024;
@@ -72,6 +72,7 @@ pub const Kind = enum(u8) {
 // ---- low-level I/O helpers (raw Linux syscalls, consistent with codebase pattern) ----
 
 pub fn readExact(fd: std.posix.fd_t, buf: []u8) !void {
+    assert(buf.len > 0);
     var total: usize = 0;
     while (total < buf.len) {
         const n = std.os.linux.read(@intCast(fd), buf.ptr + total, buf.len - total);
@@ -80,9 +81,11 @@ pub fn readExact(fd: std.posix.fd_t, buf: []u8) !void {
         if (ni == 0) return error.ConnectionClosed;
         total += @intCast(ni);
     }
+    assert(total == buf.len);
 }
 
 pub fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
+    assert(data.len > 0);
     var sent: usize = 0;
     while (sent < data.len) {
         const n = std.os.linux.write(@intCast(fd), data.ptr + sent, data.len - sent);
@@ -90,6 +93,7 @@ pub fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
         if (ni <= 0) return error.WriteError;
         sent += @intCast(ni);
     }
+    assert(sent == data.len);
 }
 
 // ---- frame-level helpers ----
@@ -108,12 +112,12 @@ pub fn readTraceExt(fd: std.posix.fd_t) ![TRACE_EXT_SIZE]u8 {
     return trace;
 }
 
-/// Read exactly payload_len bytes into a caller-supplied or freshly allocated buffer.
-/// Caller owns the returned slice.
+/// Read exactly payload_len bytes into a freshly allocated buffer. Caller owns the slice.
 pub fn readPayload(fd: std.posix.fd_t, len: u32, alloc: std.mem.Allocator) ![]u8 {
+    assert(len <= HARD_CAP_PAYLOAD);
     const buf = try alloc.alloc(u8, len);
     errdefer alloc.free(buf);
-    try readExact(fd, buf);
+    if (len > 0) try readExact(fd, buf);
     return buf;
 }
 
@@ -126,6 +130,7 @@ pub fn sendFrame(
     trace_id: ?*const [TRACE_EXT_SIZE]u8,
     payload: []const u8,
 ) !void {
+    assert(payload.len <= HARD_CAP_PAYLOAD);
     var f = flags;
     f.trace = trace_id != null;
     const hdr = FrameHeader{
@@ -151,3 +156,15 @@ pub fn sendFrameList(
 ) !void {
     return sendFrame(fd, stream_id, kind, flags, trace_id, payload_list.items);
 }
+
+// ---- compile-time invariant checks ----
+
+comptime {
+    std.debug.assert(PRE_HELLO_CAP < DEFAULT_MAX_PAYLOAD);
+    std.debug.assert(DEFAULT_MAX_PAYLOAD <= HARD_CAP_PAYLOAD);
+    std.debug.assert(FRAME_HEADER_SIZE == @sizeOf(FrameHeader));
+    std.debug.assert(TRACE_EXT_SIZE == 16);
+    std.debug.assert(NO_COMMIT_SEQ == std.math.maxInt(u64));
+}
+
+const assert = std.debug.assert;

@@ -3,9 +3,17 @@ const std = @import("std");
 const codec = @import("codec.zig");
 const frame = @import("frame.zig");
 
+const assert = std.debug.assert;
+
 pub const TypedValue = codec.TypedValue;
 pub const ColumnDesc = codec.ColumnDesc;
 pub const Cursor = codec.Cursor;
+
+// Encode helpers shared with codec (made pub there to avoid duplication).
+const appendU8 = codec.appendU8;
+const appendU16Le = codec.appendU16Le;
+const appendU32Le = codec.appendU32Le;
+const appendU64Le = codec.appendU64Le;
 
 // ---- Auth methods ----
 
@@ -24,6 +32,8 @@ pub const Hello = struct {
 };
 
 pub fn encodeHello(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, h: Hello) !void {
+    assert(h.server_version.len <= 255);
+    assert(h.auth_methods.len <= 255);
     try appendU8(out, alloc, @intCast(h.server_version.len));
     try out.appendSlice(alloc, h.server_version);
     try appendU8(out, alloc, @intCast(h.auth_methods.len));
@@ -70,6 +80,7 @@ pub fn encodeAuth(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, a:
     switch (a.payload) {
         .none => {},
         .token => |t| {
+            assert(t.token.len <= std.math.maxInt(u16));
             try appendU16Le(out, alloc, @intCast(t.token.len));
             try out.appendSlice(alloc, t.token);
         },
@@ -140,6 +151,7 @@ pub fn decodePong(cur: *Cursor) !Pong {
 pub const RegisterQuery = struct { sql: []const u8 };
 
 pub fn encodeRegisterQuery(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, r: RegisterQuery) !void {
+    assert(r.sql.len <= std.math.maxInt(u32));
     try appendU32Le(out, alloc, @intCast(r.sql.len));
     try out.appendSlice(alloc, r.sql);
 }
@@ -157,6 +169,8 @@ pub const Registered = struct {
 };
 
 pub fn encodeRegistered(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, r: Registered) !void {
+    assert(r.param_tags.len <= 255);
+    assert(r.columns.len <= std.math.maxInt(u16));
     try out.appendSlice(alloc, &r.query_hash);
     try appendU8(out, alloc, @intCast(r.param_tags.len));
     try out.appendSlice(alloc, r.param_tags);
@@ -199,6 +213,7 @@ pub const Execute = struct {
 };
 
 pub fn encodeExecute(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, e: Execute) !void {
+    assert(e.params.len <= std.math.maxInt(u16));
     try out.appendSlice(alloc, &e.query_hash);
     try appendU16Le(out, alloc, @intCast(e.params.len));
     for (e.params) |p| try codec.encode(out, alloc, p);
@@ -234,6 +249,7 @@ pub const ReadAt = struct {
 };
 
 pub fn encodeReadAt(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, r: ReadAt) !void {
+    assert(r.params.len <= std.math.maxInt(u16));
     try out.appendSlice(alloc, &r.query_hash);
     try appendU64Le(out, alloc, r.at_seq);
     try appendU16Le(out, alloc, @intCast(r.params.len));
@@ -267,6 +283,7 @@ pub fn freeReadAt(r: ReadAt, alloc: std.mem.Allocator) void {
 pub const RowsBegin = struct { columns: []const ColumnDesc };
 
 pub fn encodeRowsBegin(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, r: RowsBegin) !void {
+    assert(r.columns.len <= std.math.maxInt(u16));
     try appendU16Le(out, alloc, @intCast(r.columns.len));
     for (r.columns) |cd| try codec.encodeColumnDesc(out, alloc, cd);
 }
@@ -280,6 +297,7 @@ pub fn encodeRowsBatch(
     alloc: std.mem.Allocator,
     rows: []const []const TypedValue,
 ) !void {
+    assert(rows.len <= std.math.maxInt(u32));
     try appendU32Le(out, alloc, @intCast(rows.len));
     for (rows) |row| {
         for (row) |v| try codec.encode(out, alloc, v);
@@ -331,6 +349,7 @@ pub const Subscribe = struct {
 };
 
 pub fn encodeSubscribe(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, s: Subscribe) !void {
+    assert(s.filters.len <= std.math.maxInt(u16));
     try appendU64Le(out, alloc, s.from_seq);
     try appendU32Le(out, alloc, s.initial_credits);
     try appendU8(out, alloc, @intFromEnum(s.scope));
@@ -343,6 +362,7 @@ pub fn encodeSubscribe(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocato
                     try appendU32Le(out, alloc, id);
                 },
                 .by_name => |name| {
+                    assert(name.len <= 255);
                     try appendU8(out, alloc, 0x01);
                     try appendU8(out, alloc, @intCast(name.len));
                     try out.appendSlice(alloc, name);
@@ -404,8 +424,10 @@ pub fn encodeSubscribeAck(
     alloc: std.mem.Allocator,
     resolved: []const ResolvedName,
 ) !void {
+    assert(resolved.len <= std.math.maxInt(u16));
     try appendU16Le(out, alloc, @intCast(resolved.len));
     for (resolved) |r| {
+        assert(r.name.len <= 255);
         try appendU8(out, alloc, @intCast(r.name.len));
         try out.appendSlice(alloc, r.name);
         try appendU32Le(out, alloc, r.table_id);
@@ -429,6 +451,9 @@ pub const WireCdcEffect = struct {
 };
 
 pub fn encodeCdcEffect(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, e: WireCdcEffect) !void {
+    assert(e.key.len <= std.math.maxInt(u32));
+    assert(e.before.len <= std.math.maxInt(u16));
+    assert(e.after.len <= std.math.maxInt(u16));
     try appendU32Le(out, alloc, e.table_id);
     try appendU32Le(out, alloc, @intCast(e.key.len));
     try out.appendSlice(alloc, e.key);
@@ -446,6 +471,7 @@ pub fn encodeCdcEvent(
     epoch: u64,
     effects: []const WireCdcEffect,
 ) !void {
+    assert(effects.len <= std.math.maxInt(u32));
     try appendU64Le(out, alloc, seq);
     try appendU64Le(out, alloc, epoch);
     try appendU32Le(out, alloc, @intCast(effects.len));
@@ -513,37 +539,15 @@ pub fn encodeError(
     alloc: std.mem.Allocator,
     code: ErrorCode,
     severity: Severity,
-    msg: []const u8,
+    message: []const u8,
     detail: []const u8,
 ) !void {
+    assert(message.len <= std.math.maxInt(u32));
+    assert(detail.len <= std.math.maxInt(u32));
     try appendU16Le(out, alloc, @intFromEnum(code));
     try appendU8(out, alloc, @intFromEnum(severity));
-    try appendU32Le(out, alloc, @intCast(msg.len));
-    try out.appendSlice(alloc, msg);
+    try appendU32Le(out, alloc, @intCast(message.len));
+    try out.appendSlice(alloc, message);
     try appendU32Le(out, alloc, @intCast(detail.len));
     try out.appendSlice(alloc, detail);
-}
-
-// ---- helpers (module-local) ----
-
-fn appendU8(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, v: u8) !void {
-    try out.append(alloc, v);
-}
-
-fn appendU16Le(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, v: u16) !void {
-    var buf: [2]u8 = undefined;
-    std.mem.writeInt(u16, &buf, v, .little);
-    try out.appendSlice(alloc, &buf);
-}
-
-fn appendU32Le(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, v: u32) !void {
-    var buf: [4]u8 = undefined;
-    std.mem.writeInt(u32, &buf, v, .little);
-    try out.appendSlice(alloc, &buf);
-}
-
-fn appendU64Le(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, v: u64) !void {
-    var buf: [8]u8 = undefined;
-    std.mem.writeInt(u64, &buf, v, .little);
-    try out.appendSlice(alloc, &buf);
 }
