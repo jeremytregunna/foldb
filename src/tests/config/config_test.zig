@@ -18,7 +18,10 @@ test "Config: round-trip JSON" {
         \\  "partition_count": 4,
         \\  "listen_addr": "127.0.0.1",
         \\  "listen_port": 9000,
-        \\  "peers": ["10.0.0.1:7432", "10.0.0.2:7432"],
+        \\  "peers": [
+        \\    {"id": 1, "addr": "10.0.0.1:7432"},
+        \\    {"id": 2, "addr": "10.0.0.2:7432"}
+        \\  ],
         \\  "max_epoch_size": 5000,
         \\  "election_timeout_min_ms": 200,
         \\  "election_timeout_max_ms": 400,
@@ -45,8 +48,10 @@ test "Config: round-trip JSON" {
     try std.testing.expectEqualStrings("127.0.0.1", cfg.listen_addr);
     try std.testing.expectEqual(@as(u16, 9000), cfg.listen_port);
     try std.testing.expectEqual(@as(usize, 2), cfg.peers.len);
-    try std.testing.expectEqualStrings("10.0.0.1:7432", cfg.peers[0]);
-    try std.testing.expectEqualStrings("10.0.0.2:7432", cfg.peers[1]);
+    try std.testing.expectEqual(@as(u64, 1), cfg.peers[0].id);
+    try std.testing.expectEqualStrings("10.0.0.1:7432", cfg.peers[0].addr);
+    try std.testing.expectEqual(@as(u64, 2), cfg.peers[1].id);
+    try std.testing.expectEqualStrings("10.0.0.2:7432", cfg.peers[1].addr);
     try std.testing.expectEqual(@as(u32, 5000), cfg.max_epoch_size);
     try std.testing.expectEqual(@as(u32, 200), cfg.election_timeout_min_ms);
     try std.testing.expectEqual(@as(u32, 400), cfg.election_timeout_max_ms);

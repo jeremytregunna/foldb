@@ -275,15 +275,16 @@ fn cmdServe(io: std.Io, alloc: std.mem.Allocator, it: *std.process.Args.Iterator
     else
         .{ .host = "", .port = 0 };
 
-    // Build PeerAddr slice from config peer strings.
-    // Peer NodeIds are assigned sequentially starting from 1, skipping self.
+    // Build PeerAddr slice from config. Each peer carries an explicit node ID so
+    // all nodes agree on the Raft member identity regardless of config ordering.
     const peer_addrs = try alloc.alloc(sequencer_mod.PeerAddr, cfg.peers.len);
     defer alloc.free(peer_addrs);
-    var next_id: u64 = 1;
-    for (cfg.peers, 0..) |addr, i| {
-        while (next_id == cfg.node_id) next_id += 1;
-        peer_addrs[i] = .{ .id = next_id, .addr = addr };
-        next_id += 1;
+    for (cfg.peers, 0..) |p, i| {
+        if (p.id == cfg.node_id) {
+            std.log.err("peer id {d} matches node_id — a node cannot list itself as a peer", .{p.id});
+            return error.InvalidConfig;
+        }
+        peer_addrs[i] = .{ .id = p.id, .addr = p.addr };
     }
 
     std.log.info("foldb starting: storage={s} port={d} node_id={d} partitions={d} peers={d} auth={s} s3={s}", .{

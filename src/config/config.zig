@@ -52,13 +52,21 @@ pub const UserEntry = struct {
     token: []const u8,
 };
 
+/// A peer node in the Raft group: its explicit node ID and listener address.
+/// The node ID must be unique across the cluster and match the node_id that
+/// peer was started with — IDs are stable identifiers for Raft term/vote state.
+pub const PeerConfig = struct {
+    id: u64,
+    addr: []const u8, // "host:port"
+};
+
 pub const Config = struct {
     node_id: u64 = 1,
     storage_dir: []const u8 = "/var/lib/foldb",
     partition_count: u32 = 1,
     listen_addr: []const u8 = "0.0.0.0",
     listen_port: u16 = 7432,
-    peers: []const []const u8 = &.{},
+    peers: []const PeerConfig = &.{},
     max_epoch_size: u32 = 10_000,
     election_timeout_min_ms: u32 = 150,
     election_timeout_max_ms: u32 = 300,
@@ -204,23 +212,32 @@ fn parse_u16_field(root_object: std.json.ObjectMap, key: []const u8) !?u16 {
 fn parse_peers(
     root_object: std.json.ObjectMap,
     alloc: std.mem.Allocator,
-) !?[]const []const u8 {
+) !?[]const PeerConfig {
     const json_value = root_object.get("peers") orelse return null;
     const array = switch (json_value) {
         .array => |array| array,
         else => return error.InvalidConfig,
     };
-    const peers = try alloc.alloc([]const u8, array.items.len);
+    const peers = try alloc.alloc(PeerConfig, array.items.len);
     var committed: usize = 0;
     errdefer {
-        for (peers[0..committed]) |peer| alloc.free(peer);
+        for (peers[0..committed]) |peer| alloc.free(peer.addr);
         alloc.free(peers);
     }
     while (committed < array.items.len) : (committed += 1) {
-        peers[committed] = switch (array.items[committed]) {
-            .string => |string| try alloc.dupe(u8, string),
+        const peer_obj = switch (array.items[committed]) {
+            .object => |obj| obj,
             else => return error.InvalidConfig,
         };
+        const id = switch (peer_obj.get("id") orelse return error.InvalidConfig) {
+            .integer => |n| @as(u64, @intCast(n)),
+            else => return error.InvalidConfig,
+        };
+        const addr = switch (peer_obj.get("addr") orelse return error.InvalidConfig) {
+            .string => |s| try alloc.dupe(u8, s),
+            else => return error.InvalidConfig,
+        };
+        peers[committed] = .{ .id = id, .addr = addr };
     }
     assert(committed == array.items.len);
     return peers;

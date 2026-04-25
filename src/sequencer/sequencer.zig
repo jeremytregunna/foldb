@@ -528,7 +528,9 @@ fn processCommit(self: *Sequencer, pending: *types_mod.PendingSubmit) void {
 
 /// Core commit logic, called only from the Sequencer owner thread.
 fn commitInner(self: *Sequencer, submit: ValidatedSubmit) !SubmitResult {
-    assert(self.raft.role == .leader);
+    // Return NotLeader rather than asserting: a stepdown between processCommit's
+    // caller check and here must produce a recoverable error, not a crash.
+    if (self.raft.role != .leader) return SequencerError.NotLeader;
     self.metrics.intents_submitted.inc();
 
     const client_id = submit.client_id;
@@ -555,11 +557,6 @@ fn commitInner(self: *Sequencer, submit: ValidatedSubmit) !SubmitResult {
     decision.entry_kind = submit.entry_kind;
     decision.payload = submit.intent_payload;
 
-    self.next_epoch += 1;
-    self.next_seq += @intCast(decision.entries.len);
-    self.metrics.epochs_closed.inc();
-    self.metrics.last_epoch_size.set(@intCast(decision.entries.len));
-
     var payload_buf: std.ArrayList(u8) = .empty;
     defer payload_buf.deinit(self.alloc);
     try types_mod.serializeEpochDecision(decision, &payload_buf, self.alloc);
@@ -576,6 +573,14 @@ fn commitInner(self: *Sequencer, submit: ValidatedSubmit) !SubmitResult {
         self.metrics.not_leader_errors.inc();
         return SequencerError.NotLeader;
     };
+
+    // Advance counters only after a successful Raft proposal. Advancing before the
+    // propose call corrupts next_seq if leadership steps down between closeEpoch and
+    // propose, causing permanent seq gaps that break the partition log invariant.
+    self.next_epoch += 1;
+    self.next_seq += @intCast(decision.entries.len);
+    self.metrics.epochs_closed.inc();
+    self.metrics.last_epoch_size.set(@intCast(decision.entries.len));
 
     try self.flushOutputs(outputs.items, self.alloc);
 

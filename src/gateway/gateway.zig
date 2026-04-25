@@ -761,15 +761,22 @@ pub const Gateway = struct {
         return self.error_detail[0..self.error_detail_len];
     }
 
-    /// Apply a DDL statement to the schema, propagate to storage, and persist to log.
+    /// Apply a DDL statement to the schema and replicate it via Raft.
+    /// Applies locally first so the originating connection sees the new schema
+    /// immediately; followers receive it through applyNewEntries when the Raft
+    /// entry commits, where replayDdl handles the idempotent re-application.
     pub fn applyDdl(self: *Gateway, sql: []const u8) !void {
         self.error_detail_len = 0;
         try self.applyDdlToSchema(sql);
-        // Persist to partition log 0 so schema survives restart.
-        const seq = self.sequencer.next_seq;
-        self.sequencer.next_seq += 1;
-        const entry = log_mod.LogEntry.create(seq, 0, .schema_change, sql);
-        try self.sequencer.partition_logs[0].append_entry_at(entry);
+        self.client_seq += 1;
+        var pending: sequencer_mod.PendingSubmit = undefined;
+        _ = try self.sequencer.submitBytes(
+            &pending,
+            sql,
+            self.client_id,
+            self.client_seq,
+            .schema_change,
+        ).awaitCommit();
     }
 
     /// Apply DDL during log replay (does not write to log).

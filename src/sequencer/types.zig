@@ -57,7 +57,8 @@ pub const PendingSubmit = struct {
     next: std.atomic.Value(?*PendingSubmit) = .init(null),
 };
 
-/// Maximum spins before asserting in awaitCommit. Guards against a dead sequencer thread.
+/// Maximum spins before returning CommitTimeout. Covers quorum loss after a proposal:
+/// rather than asserting (crashing the process), the caller gets a recoverable error.
 const AWAIT_MAX_SPINS: u32 = 100_000_000;
 
 /// Handle returned by Sequencer.submitBytes(). Spins on the done flag until the Sequencer
@@ -68,7 +69,7 @@ pub const SubmitHandle = struct {
     pub fn awaitCommit(self: *const SubmitHandle) !SubmitResult {
         var spins: u32 = 0;
         while (!self.pending.done.load(.acquire)) {
-            assert(spins < AWAIT_MAX_SPINS);
+            if (spins >= AWAIT_MAX_SPINS) return error.CommitTimeout;
             spins += 1;
             _ = std.os.linux.sched_yield();
         }
