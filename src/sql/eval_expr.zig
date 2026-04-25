@@ -7,6 +7,8 @@ const storage_mod = @import("storage.zig");
 const executor_mod = @import("executor.zig");
 const type_conv = @import("type_conv.zig");
 
+const assert = std.debug.assert;
+
 pub const ColumnValue = storage_mod.ColumnValue;
 pub const ResolvedValue = executor_mod.ResolvedValue;
 pub const Seq = executor_mod.Seq;
@@ -26,6 +28,7 @@ pub const SqlExecError = error{
     NullViolation,
     AssertionFailed,
     OutOfMemory,
+    StorageReadError,
 };
 
 /// Context passed to expression evaluator during plan execution.
@@ -218,7 +221,7 @@ pub fn evalBinary(
 ) SqlExecError!plan_mod.Value {
     const lv = try evalExpr(left, ctx);
     const rv = try evalExpr(right, ctx);
-
+    // SQL NULL propagation: most ops return NULL when either operand is NULL.
     if (lv == .null_val or rv == .null_val) {
         return switch (op) {
             .eq, .neq, .lt, .gt, .lte, .gte => .null_val,
@@ -227,59 +230,9 @@ pub fn evalBinary(
             else => .null_val,
         };
     }
-
     return switch (op) {
-        .add => switch (lv) {
-            .int_val => |a| switch (rv) {
-                .int_val => |b| .{ .int_val = a + b },
-                else => error.TypeMismatch,
-            },
-            .float_val => |a| switch (rv) {
-                .float_val => |b| .{ .float_val = a + b },
-                else => error.TypeMismatch,
-            },
-            else => error.TypeMismatch,
-        },
-        .sub => switch (lv) {
-            .int_val => |a| switch (rv) {
-                .int_val => |b| .{ .int_val = a - b },
-                else => error.TypeMismatch,
-            },
-            .float_val => |a| switch (rv) {
-                .float_val => |b| .{ .float_val = a - b },
-                else => error.TypeMismatch,
-            },
-            else => error.TypeMismatch,
-        },
-        .mul => switch (lv) {
-            .int_val => |a| switch (rv) {
-                .int_val => |b| .{ .int_val = a * b },
-                else => error.TypeMismatch,
-            },
-            .float_val => |a| switch (rv) {
-                .float_val => |b| .{ .float_val = a * b },
-                else => error.TypeMismatch,
-            },
-            else => error.TypeMismatch,
-        },
-        .div => switch (lv) {
-            .int_val => |a| switch (rv) {
-                .int_val => |b| if (b == 0) error.DivisionByZero else .{ .int_val = @divTrunc(a, b) },
-                else => error.TypeMismatch,
-            },
-            .float_val => |a| switch (rv) {
-                .float_val => |b| .{ .float_val = a / b },
-                else => error.TypeMismatch,
-            },
-            else => error.TypeMismatch,
-        },
-        .mod => switch (lv) {
-            .int_val => |a| switch (rv) {
-                .int_val => |b| if (b == 0) error.DivisionByZero else .{ .int_val = @rem(a, b) },
-                else => error.TypeMismatch,
-            },
-            else => error.TypeMismatch,
-        },
+        .add, .sub, .mul, .div, .mod => evalBinaryArith(op, lv, rv),
+        .bit_and, .bit_or, .bit_xor, .shl, .shr => evalBinaryBitwise(op, lv, rv),
         .eq => .{ .bool_val = lv.eql(rv) },
         .neq => .{ .bool_val = !lv.eql(rv) },
         .lt => .{ .bool_val = lv.lessThan(rv) },
@@ -300,67 +253,62 @@ pub fn evalBinary(
             },
             else => error.TypeMismatch,
         },
-        .contains => blk: {
-            const ls = switch (lv) {
-                .bytes_val => |b| b,
-                .string_val => |s| s,
-                else => break :blk plan_mod.Value.null_val,
-            };
-            const rs = switch (rv) {
-                .bytes_val => |b| b,
-                .string_val => |s| s,
-                else => break :blk plan_mod.Value.null_val,
-            };
-            break :blk .{ .bool_val = jsonContains(ls, rs, ctx.alloc) };
+        .contains, .contained => evalBinaryJson(op, lv, rv, ctx.alloc),
+        .arrow => evalBinaryJsonAccess(lv, rv, false, ctx.alloc),
+        .darrow => evalBinaryJsonAccess(lv, rv, true, ctx.alloc),
+    };
+}
+
+fn evalBinaryArith(op: ast.BinOp, lv: plan_mod.Value, rv: plan_mod.Value) SqlExecError!plan_mod.Value {
+    assert(op == .add or op == .sub or op == .mul or op == .div or op == .mod);
+    return switch (op) {
+        .add => switch (lv) {
+            .int_val => |a| switch (rv) { .int_val => |b| .{ .int_val = a + b }, else => error.TypeMismatch },
+            .float_val => |a| switch (rv) { .float_val => |b| .{ .float_val = a + b }, else => error.TypeMismatch },
+            else => error.TypeMismatch,
         },
-        .contained => blk: {
-            const ls = switch (lv) {
-                .bytes_val => |b| b,
-                .string_val => |s| s,
-                else => break :blk plan_mod.Value.null_val,
-            };
-            const rs = switch (rv) {
-                .bytes_val => |b| b,
-                .string_val => |s| s,
-                else => break :blk plan_mod.Value.null_val,
-            };
-            break :blk .{ .bool_val = jsonContains(rs, ls, ctx.alloc) };
+        .sub => switch (lv) {
+            .int_val => |a| switch (rv) { .int_val => |b| .{ .int_val = a - b }, else => error.TypeMismatch },
+            .float_val => |a| switch (rv) { .float_val => |b| .{ .float_val = a - b }, else => error.TypeMismatch },
+            else => error.TypeMismatch,
         },
-        .arrow => blk: {
-            const json = switch (lv) {
-                .bytes_val => |b| b,
-                .string_val => |s| s,
-                else => break :blk plan_mod.Value.null_val,
-            };
-            break :blk jsonFieldAccess(json, rv, false, ctx.alloc);
+        .mul => switch (lv) {
+            .int_val => |a| switch (rv) { .int_val => |b| .{ .int_val = a * b }, else => error.TypeMismatch },
+            .float_val => |a| switch (rv) { .float_val => |b| .{ .float_val = a * b }, else => error.TypeMismatch },
+            else => error.TypeMismatch,
         },
-        .darrow => blk: {
-            const json = switch (lv) {
-                .bytes_val => |b| b,
-                .string_val => |s| s,
-                else => break :blk plan_mod.Value.null_val,
-            };
-            break :blk jsonFieldAccess(json, rv, true, ctx.alloc);
-        },
-        .bit_and => switch (lv) {
+        .div => switch (lv) {
             .int_val => |a| switch (rv) {
-                .int_val => |b| .{ .int_val = a & b },
+                .int_val => |b| if (b == 0) error.DivisionByZero else .{ .int_val = @divTrunc(a, b) },
                 else => error.TypeMismatch,
             },
+            .float_val => |a| switch (rv) { .float_val => |b| .{ .float_val = a / b }, else => error.TypeMismatch },
+            else => error.TypeMismatch,
+        },
+        .mod => switch (lv) {
+            .int_val => |a| switch (rv) {
+                .int_val => |b| if (b == 0) error.DivisionByZero else .{ .int_val = @rem(a, b) },
+                else => error.TypeMismatch,
+            },
+            else => error.TypeMismatch,
+        },
+        else => unreachable,
+    };
+}
+
+fn evalBinaryBitwise(op: ast.BinOp, lv: plan_mod.Value, rv: plan_mod.Value) SqlExecError!plan_mod.Value {
+    assert(op == .bit_and or op == .bit_or or op == .bit_xor or op == .shl or op == .shr);
+    return switch (op) {
+        .bit_and => switch (lv) {
+            .int_val => |a| switch (rv) { .int_val => |b| .{ .int_val = a & b }, else => error.TypeMismatch },
             else => error.TypeMismatch,
         },
         .bit_or => switch (lv) {
-            .int_val => |a| switch (rv) {
-                .int_val => |b| .{ .int_val = a | b },
-                else => error.TypeMismatch,
-            },
+            .int_val => |a| switch (rv) { .int_val => |b| .{ .int_val = a | b }, else => error.TypeMismatch },
             else => error.TypeMismatch,
         },
         .bit_xor => switch (lv) {
-            .int_val => |a| switch (rv) {
-                .int_val => |b| .{ .int_val = a ^ b },
-                else => error.TypeMismatch,
-            },
+            .int_val => |a| switch (rv) { .int_val => |b| .{ .int_val = a ^ b }, else => error.TypeMismatch },
             else => error.TypeMismatch,
         },
         .shl => switch (lv) {
@@ -377,7 +325,36 @@ pub fn evalBinary(
             },
             else => error.TypeMismatch,
         },
+        else => unreachable,
     };
+}
+
+fn evalBinaryJson(op: ast.BinOp, lv: plan_mod.Value, rv: plan_mod.Value, alloc: std.mem.Allocator) plan_mod.Value {
+    assert(op == .contains or op == .contained);
+    const ls = switch (lv) {
+        .bytes_val => |b| b,
+        .string_val => |s| s,
+        else => return .null_val,
+    };
+    const rs = switch (rv) {
+        .bytes_val => |b| b,
+        .string_val => |s| s,
+        else => return .null_val,
+    };
+    return switch (op) {
+        .contains => .{ .bool_val = jsonContains(ls, rs, alloc) },
+        .contained => .{ .bool_val = jsonContains(rs, ls, alloc) },
+        else => unreachable,
+    };
+}
+
+fn evalBinaryJsonAccess(lv: plan_mod.Value, rv: plan_mod.Value, as_text: bool, alloc: std.mem.Allocator) plan_mod.Value {
+    const json = switch (lv) {
+        .bytes_val => |b| b,
+        .string_val => |s| s,
+        else => return .null_val,
+    };
+    return jsonFieldAccess(json, rv, as_text, alloc);
 }
 
 fn jsonFieldAccess(json_bytes: []const u8, key: plan_mod.Value, as_text: bool, alloc: std.mem.Allocator) plan_mod.Value {
@@ -482,12 +459,20 @@ fn jsonValueContains(left: std.json.Value, right: std.json.Value) bool {
 }
 
 pub fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) SqlExecError!plan_mod.Value {
+    assert(name.len > 0);
+    if (try evalBuiltinPredicate(name, args, ctx)) |v| return v;
+    if (try evalBuiltinString(name, args, ctx)) |v| return v;
+    if (try evalBuiltinMath(name, args, ctx)) |v| return v;
+    // Unknown functions return null (user WASM functions handled separately).
+    return .null_val;
+}
+
+fn evalBuiltinPredicate(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) SqlExecError!?plan_mod.Value {
     if (std.ascii.eqlIgnoreCase(name, "in_list")) {
         if (args.len < 1) return .{ .bool_val = false };
         const needle = try evalExpr(args[0], ctx);
         for (args[1..]) |a| {
-            const v = try evalExpr(a, ctx);
-            if (needle.eql(v)) return .{ .bool_val = true };
+            if (needle.eql(try evalExpr(a, ctx))) return .{ .bool_val = true };
         }
         return .{ .bool_val = false };
     }
@@ -495,8 +480,7 @@ pub fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) S
         if (args.len < 1) return .{ .bool_val = true };
         const needle = try evalExpr(args[0], ctx);
         for (args[1..]) |a| {
-            const v = try evalExpr(a, ctx);
-            if (needle.eql(v)) return .{ .bool_val = false };
+            if (needle.eql(try evalExpr(a, ctx))) return .{ .bool_val = false };
         }
         return .{ .bool_val = true };
     }
@@ -513,10 +497,19 @@ pub fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) S
         }
         return .null_val;
     }
+    if (std.ascii.eqlIgnoreCase(name, "nullif")) {
+        if (args.len != 2) return error.TypeMismatch;
+        const a = try evalExpr(args[0], ctx);
+        const b = try evalExpr(args[1], ctx);
+        return if (a.eql(b)) .null_val else a;
+    }
+    return null;
+}
+
+fn evalBuiltinString(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) SqlExecError!?plan_mod.Value {
     if (std.ascii.eqlIgnoreCase(name, "length") or std.ascii.eqlIgnoreCase(name, "char_length")) {
         if (args.len != 1) return error.TypeMismatch;
-        const v = try evalExpr(args[0], ctx);
-        return switch (v) {
+        return switch (try evalExpr(args[0], ctx)) {
             .string_val => |s| .{ .int_val = @intCast(s.len) },
             .bytes_val => |b| .{ .int_val = @intCast(b.len) },
             else => error.TypeMismatch,
@@ -538,8 +531,7 @@ pub fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) S
     }
     if (std.ascii.eqlIgnoreCase(name, "trim")) {
         if (args.len != 1) return error.TypeMismatch;
-        const s = (try evalExpr(args[0], ctx)).string_val;
-        return .{ .string_val = std.mem.trim(u8, s, " \t\n\r") };
+        return .{ .string_val = std.mem.trim(u8, (try evalExpr(args[0], ctx)).string_val, " \t\n\r") };
     }
     if (std.ascii.eqlIgnoreCase(name, "ltrim")) {
         if (args.len != 1) return error.TypeMismatch;
@@ -563,9 +555,8 @@ pub fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) S
         if (args.len >= 3) {
             const len_v = try evalExpr(args[2], ctx);
             const len: usize = if (len_v == .int_val) @intCast(@max(0, len_v.int_val)) else 0;
-            const end = @min(start + len, s.len);
             if (start >= s.len) return .{ .string_val = "" };
-            return .{ .string_val = s[start..end] };
+            return .{ .string_val = s[start..@min(start + len, s.len)] };
         }
         if (start >= s.len) return .{ .string_val = "" };
         return .{ .string_val = s[start..] };
@@ -592,8 +583,7 @@ pub fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) S
     if (std.ascii.eqlIgnoreCase(name, "concat")) {
         var result: std.ArrayList(u8) = .empty;
         for (args) |a| {
-            const v = try evalExpr(a, ctx);
-            switch (v) {
+            switch (try evalExpr(a, ctx)) {
                 .string_val => |s| try result.appendSlice(ctx.alloc, s),
                 .int_val => |n| {
                     const s = try std.fmt.allocPrint(ctx.alloc, "{d}", .{n});
@@ -610,12 +600,10 @@ pub fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) S
         }
         return .{ .string_val = try result.toOwnedSlice(ctx.alloc) };
     }
-    if (std.ascii.eqlIgnoreCase(name, "nullif")) {
-        if (args.len != 2) return error.TypeMismatch;
-        const a = try evalExpr(args[0], ctx);
-        const b = try evalExpr(args[1], ctx);
-        return if (a.eql(b)) .null_val else a;
-    }
+    return null;
+}
+
+fn evalBuiltinMath(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) SqlExecError!?plan_mod.Value {
     if (std.ascii.eqlIgnoreCase(name, "greatest")) {
         if (args.len == 0) return .null_val;
         var best = try evalExpr(args[0], ctx);
@@ -636,8 +624,7 @@ pub fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) S
     }
     if (std.ascii.eqlIgnoreCase(name, "abs")) {
         if (args.len != 1) return error.TypeMismatch;
-        const v = try evalExpr(args[0], ctx);
-        return switch (v) {
+        return switch (try evalExpr(args[0], ctx)) {
             .int_val => |n| .{ .int_val = if (n < 0) -n else n },
             .float_val => |f| .{ .float_val = @abs(f) },
             else => error.TypeMismatch,
@@ -645,33 +632,29 @@ pub fn evalBuiltin(name: []const u8, args: []*plan_mod.PlanExpr, ctx: EvalCtx) S
     }
     if (std.ascii.eqlIgnoreCase(name, "floor")) {
         if (args.len != 1) return error.TypeMismatch;
-        const v = try evalExpr(args[0], ctx);
-        return switch (v) {
+        return switch (try evalExpr(args[0], ctx)) {
             .float_val => |f| .{ .float_val = @floor(f) },
-            .int_val => v,
+            .int_val => |v| .{ .int_val = v },
             else => error.TypeMismatch,
         };
     }
     if (std.ascii.eqlIgnoreCase(name, "ceil") or std.ascii.eqlIgnoreCase(name, "ceiling")) {
         if (args.len != 1) return error.TypeMismatch;
-        const v = try evalExpr(args[0], ctx);
-        return switch (v) {
+        return switch (try evalExpr(args[0], ctx)) {
             .float_val => |f| .{ .float_val = @ceil(f) },
-            .int_val => v,
+            .int_val => |v| .{ .int_val = v },
             else => error.TypeMismatch,
         };
     }
     if (std.ascii.eqlIgnoreCase(name, "round")) {
         if (args.len < 1) return error.TypeMismatch;
-        const v = try evalExpr(args[0], ctx);
-        return switch (v) {
+        return switch (try evalExpr(args[0], ctx)) {
             .float_val => |f| .{ .float_val = @round(f) },
-            .int_val => v,
+            .int_val => |v| .{ .int_val = v },
             else => error.TypeMismatch,
         };
     }
-    // Unknown functions return null (user WASM functions handled separately)
-    return .null_val;
+    return null;
 }
 
 fn likeMatch(s: []const u8, pattern: []const u8) bool {

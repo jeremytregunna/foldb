@@ -91,7 +91,11 @@ pub const ResultSet = struct {
 
 /// Result ring buffer size. Power of two so seq % ring_size compiles to a mask.
 /// Must exceed the maximum number of in-flight transactions at any instant.
-pub const result_ring_size: usize = 256;
+pub const result_ring_size: u32 = 256;
+
+comptime {
+    std.debug.assert(std.math.isPowerOfTwo(result_ring_size));
+}
 
 pub const ResultSlot = struct { seq: Seq, result: ExecResult };
 
@@ -340,11 +344,17 @@ pub const SqlExecutor = struct {
             try self.executeStmt(stmt, ctx, &mutations, returning_rows);
         }
 
-        // Capture before-images for CDC (before storage.apply)
+        // Capture before-images for CDC (before storage.apply).
         var before: ?cdc_mod.BeforeImages = null;
         if (self.cdc) |cdc| {
             if (mutations.items.len > 0) {
-                before = cdc.capture_before_images(mutations.items, self.storage, seq, self.alloc) catch null;
+                before = cdc.capture_before_images(mutations.items, self.storage, seq, self.alloc) catch |e| blk: {
+                    // Before-image capture failed; record the error but continue — the
+                    // transaction must still commit. CDC dispatch is skipped below to avoid
+                    // emitting an incomplete change event.
+                    self.setDetail("cdc before-image capture failed: {}", .{e});
+                    break :blk null;
+                };
             }
         }
         defer if (before) |*b| b.deinit();
@@ -352,10 +362,13 @@ pub const SqlExecutor = struct {
         const count: u64 = @intCast(mutations.items.len);
         self.storage.apply(mutations.items, seq) catch return error.TableNotFound;
 
-        // Dispatch CDC events (after storage.apply)
+        // Dispatch CDC events (after storage.apply). Only dispatch when before-images
+        // were captured successfully — a null before means capture failed above.
         if (self.cdc) |cdc| {
             if (before) |b| {
-                cdc.dispatch(seq, epoch, entry_kind, mutations.items, b, self.alloc) catch {};
+                cdc.dispatch(seq, epoch, entry_kind, mutations.items, b, self.alloc) catch |e| {
+                    self.setDetail("cdc dispatch failed: {}", .{e});
+                };
             }
         }
 
@@ -387,367 +400,402 @@ pub const SqlExecutor = struct {
         }
     }
 
+    /// Maximum recursive plan-tree depth. Prevents stack overflow on pathological queries.
+    const MAX_PLAN_DEPTH: u32 = 64;
+
     fn executeScan(
         self: *SqlExecutor,
         node: *plan_mod.PlanNode,
         ctx: EvalCtx,
         out: *std.ArrayList([]const ?ColumnValue),
     ) SqlExecError!void {
+        return self.executeScanInner(node, ctx, out, 0);
+    }
+
+    fn executeScanInner(
+        self: *SqlExecutor,
+        node: *plan_mod.PlanNode,
+        ctx: EvalCtx,
+        out: *std.ArrayList([]const ?ColumnValue),
+        depth: u32,
+    ) SqlExecError!void {
+        std.debug.assert(depth < MAX_PLAN_DEPTH);
         switch (node.*) {
-            .scan => |s| {
-                var iter = self.storage.scan(s.table_id, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch return error.TableNotFound;
-                defer iter.deinit();
-                while (iter.next() catch null) |row| {
-                    const r = try self.rowToValues(row, s.columns, ctx.alloc);
-                    try out.append(ctx.alloc, r);
-                }
-            },
-            .ann_scan => |s| {
-                if (s.query_param >= ctx.params.len) return error.TypeMismatch;
-                const raw_bytes = switch (ctx.params[s.query_param]) {
-                    .bytes => |b| b,
-                    else => return error.TypeMismatch,
-                };
-                const query_vec = vector_codec.decode(raw_bytes, ctx.alloc) catch return error.TypeMismatch;
-                defer ctx.alloc.free(query_vec);
-                const matches = self.storage.vectorSearch(s.index_id, query_vec, s.k, ctx.seq -| 1, ctx.alloc) catch return error.TableNotFound;
-                defer {
-                    for (matches) |m| ctx.alloc.free(m.pk);
-                    ctx.alloc.free(matches);
-                }
-                for (matches) |m| {
-                    const row_opt = self.storage.get(s.table_id, m.pk, ctx.seq -| 1) catch return error.TableNotFound;
-                    if (row_opt) |row| {
-                        var r = row;
-                        defer r.deinit(ctx.alloc);
-                        const projected = try self.rowToValues(r, s.columns, ctx.alloc);
-                        try out.append(ctx.alloc, projected);
-                    }
-                }
-            },
-            .filter => |f| {
-                var inner: std.ArrayList([]const ?ColumnValue) = .empty;
-                defer {
-                    for (inner.items) |r| freeRowValues(r, ctx.alloc);
-                    inner.deinit(ctx.alloc);
-                }
-                try self.executeScan(f.input, ctx, &inner);
-                for (inner.items) |row| {
-                    var row_ctx = ctx;
-                    row_ctx.row = row;
-                    const v = try evalExpr(f.predicate, row_ctx);
-                    if (v.toBool() orelse false) {
-                        const r = try SqlExecutor.dupeRow(row, ctx.alloc);
-                        try out.append(ctx.alloc, r);
-                    }
-                }
-            },
-            .project => |p| {
-                var inner: std.ArrayList([]const ?ColumnValue) = .empty;
-                defer {
-                    for (inner.items) |r| freeRowValues(r, ctx.alloc);
-                    inner.deinit(ctx.alloc);
-                }
-                try self.executeScan(p.input, ctx, &inner);
-                var seen = std.StringHashMap(void).init(ctx.alloc);
-                defer {
-                    var it = seen.keyIterator();
-                    while (it.next()) |k| ctx.alloc.free(k.*);
-                    seen.deinit();
-                }
-                for (inner.items) |row| {
-                    var eval_arena = std.heap.ArenaAllocator.init(ctx.alloc);
-                    defer eval_arena.deinit();
-                    var row_ctx = ctx;
-                    row_ctx.row = row;
-                    row_ctx.alloc = eval_arena.allocator();
-                    const projected = try ctx.alloc.alloc(?ColumnValue, p.exprs.len);
-                    for (p.exprs, 0..) |item, i| {
-                        const v = try evalExpr(item.expr, row_ctx);
-                        projected[i] = planValueToColumnValue(v, ctx.alloc) catch null;
-                    }
-                    if (p.distinct) {
-                        const key = try serializeRowKey(projected, ctx.alloc);
-                        const gop = try seen.getOrPut(key);
-                        if (gop.found_existing) {
-                            ctx.alloc.free(key);
-                            freeRowValues(projected, ctx.alloc);
-                            continue;
-                        }
-                    }
-                    try out.append(ctx.alloc, projected);
-                }
-            },
-            .limit => |l| {
-                var inner: std.ArrayList([]const ?ColumnValue) = .empty;
-                defer {
-                    for (inner.items) |r| freeRowValues(r, ctx.alloc);
-                    inner.deinit(ctx.alloc);
-                }
-                try self.executeScan(l.input, ctx, &inner);
-                const offset_val: u64 = if (l.offset) |o| blk: {
-                    const v = try evalExpr(o, ctx);
-                    break :blk switch (v) {
-                        .int_val => |n| @intCast(n),
-                        else => 0,
-                    };
-                } else 0;
-                const limit_val: u64 = if (l.limit) |lim| blk: {
-                    const v = try evalExpr(lim, ctx);
-                    break :blk switch (v) {
-                        .int_val => |n| @intCast(n),
-                        else => std.math.maxInt(u64),
-                    };
-                } else std.math.maxInt(u64);
-                var taken: u64 = 0;
-                for (inner.items, 0..) |row, i| {
-                    if (i < offset_val) continue;
-                    if (taken >= limit_val) break;
-                    const r = try SqlExecutor.dupeRow(row, ctx.alloc);
-                    try out.append(ctx.alloc, r);
-                    taken += 1;
-                }
-            },
-            .sort => |s| {
-                var inner: std.ArrayList([]const ?ColumnValue) = .empty;
-                defer {
-                    for (inner.items) |r| freeRowValues(r, ctx.alloc);
-                    inner.deinit(ctx.alloc);
-                }
-                try self.executeScan(s.input, ctx, &inner);
-                // Deterministic sort: evaluate sort keys for each row, then sort
-                const SortCtx = struct {
-                    rows: []const []const ?ColumnValue,
-                    keys: []const plan_mod.SortKey,
-                    eval_ctx: EvalCtx,
-                };
-                _ = SortCtx{
-                    .rows = inner.items,
-                    .keys = s.keys,
-                    .eval_ctx = ctx,
-                };
-                // Simple insertion sort for determinism (stable)
-                var sorted = try ctx.alloc.dupe([]const ?ColumnValue, inner.items);
-                defer ctx.alloc.free(sorted);
-                for (1..sorted.len) |i| {
-                    const key = sorted[i];
-                    var j: usize = i;
-                    while (j > 0) {
-                        var row_ctx_a = ctx;
-                        var row_ctx_b = ctx;
-                        row_ctx_a.row = sorted[j - 1];
-                        row_ctx_b.row = key;
-                        const should_swap = blk: {
-                            for (s.keys) |sk| {
-                                const va = evalExpr(sk.expr, row_ctx_a) catch break :blk false;
-                                const vb = evalExpr(sk.expr, row_ctx_b) catch break :blk false;
-                                if (!va.eql(vb)) {
-                                    break :blk if (sk.asc) vb.lessThan(va) else va.lessThan(vb);
-                                }
-                            }
-                            break :blk false;
-                        };
-                        if (!should_swap) break;
-                        sorted[j] = sorted[j - 1];
-                        j -= 1;
-                    }
-                    sorted[j] = key;
-                }
-                for (sorted) |r| {
-                    try out.append(ctx.alloc, try SqlExecutor.dupeRow(r, ctx.alloc));
-                }
-            },
+            .scan => |s| try self.executeScanBase(s, ctx, out),
+            .ann_scan => |s| try self.executeScanAnn(s, ctx, out),
+            .filter => |f| try self.executeScanFilter(f, ctx, out, depth),
+            .project => |p| try self.executeScanProject(p, ctx, out, depth),
+            .limit => |l| try self.executeScanLimit(l, ctx, out, depth),
+            .sort => |s| try self.executeScanSort(s, ctx, out, depth),
             .empty => {}, // no rows
-            .single_row => { // one empty row (for FROM-less SELECT)
+            .single_row => { // one empty row for FROM-less SELECT
                 const r = try ctx.alloc.alloc(?ColumnValue, 0);
                 try out.append(ctx.alloc, r);
             },
-
-            .window => |w| {
-                var inner: std.ArrayList([]const ?ColumnValue) = .empty;
-                defer {
-                    for (inner.items) |r| freeRowValues(r, ctx.alloc);
-                    inner.deinit(ctx.alloc);
-                }
-                try self.executeScan(w.input, ctx, &inner);
-
-                if (inner.items.len == 0) return;
-
-                // Allocate result matrix: [row_idx][fn_idx] = ColumnValue
-                const win_results = try ctx.alloc.alloc([]?ColumnValue, inner.items.len);
-                defer {
-                    for (win_results) |r| ctx.alloc.free(r);
-                    ctx.alloc.free(win_results);
-                }
-                for (win_results) |*r| {
-                    r.* = try ctx.alloc.alloc(?ColumnValue, w.fns.len);
-                    for (r.*) |*v| v.* = null;
-                }
-
-                for (w.fns, 0..) |wf, fi| {
-                    try window_exec_mod.computeWindowFnForAll(wf, inner.items, win_results, fi, ctx);
-                }
-
-                for (inner.items, 0..) |row, ri| {
-                    const aug = try ctx.alloc.alloc(?ColumnValue, row.len + w.fns.len);
-                    errdefer ctx.alloc.free(aug);
-                    for (row, 0..) |v, i| aug[i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
-                    @memcpy(aug[row.len..], win_results[ri]);
-                    try out.append(ctx.alloc, aug);
-                }
-            },
-
+            .window => |w| try self.executeScanWindow(w, ctx, out, depth),
             .merge => {}, // not a scan context
+            .hash_join => |j| try self.executeScanHashJoin(j, ctx, out, depth),
+            .hash_agg => |ha| try self.executeScanHashAgg(ha, ctx, out, depth),
+            else => {}, // DML nodes not valid in scan context
+        }
+    }
 
-            .hash_join => |j| {
-                var left_rows: std.ArrayList([]const ?ColumnValue) = .empty;
-                defer {
-                    for (left_rows.items) |r| freeRowValues(r, ctx.alloc);
-                    left_rows.deinit(ctx.alloc);
+    fn executeScanBase(
+        self: *SqlExecutor,
+        s: plan_mod.ScanNode,
+        ctx: EvalCtx,
+        out: *std.ArrayList([]const ?ColumnValue),
+    ) SqlExecError!void {
+        var iter = self.storage.scan(s.table_id, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch return error.TableNotFound;
+        defer iter.deinit();
+        while (iter.next() catch return error.StorageReadError) |row| {
+            const r = try self.rowToValues(row, s.columns, ctx.alloc);
+            try out.append(ctx.alloc, r);
+        }
+    }
+
+    fn executeScanAnn(
+        self: *SqlExecutor,
+        s: plan_mod.AnnScanNode,
+        ctx: EvalCtx,
+        out: *std.ArrayList([]const ?ColumnValue),
+    ) SqlExecError!void {
+        if (s.query_param >= ctx.params.len) return error.TypeMismatch;
+        const raw_bytes = switch (ctx.params[s.query_param]) {
+            .bytes => |b| b,
+            else => return error.TypeMismatch,
+        };
+        const query_vec = vector_codec.decode(raw_bytes, ctx.alloc) catch return error.TypeMismatch;
+        defer ctx.alloc.free(query_vec);
+        const matches = self.storage.vectorSearch(s.index_id, query_vec, s.k, ctx.seq -| 1, ctx.alloc) catch return error.TableNotFound;
+        defer {
+            for (matches) |m| ctx.alloc.free(m.pk);
+            ctx.alloc.free(matches);
+        }
+        for (matches) |m| {
+            const row_opt = self.storage.get(s.table_id, m.pk, ctx.seq -| 1) catch return error.TableNotFound;
+            if (row_opt) |row| {
+                var r = row;
+                defer r.deinit(ctx.alloc);
+                const projected = try self.rowToValues(r, s.columns, ctx.alloc);
+                try out.append(ctx.alloc, projected);
+            }
+        }
+    }
+
+    fn executeScanFilter(
+        self: *SqlExecutor,
+        f: plan_mod.FilterNode,
+        ctx: EvalCtx,
+        out: *std.ArrayList([]const ?ColumnValue),
+        depth: u32,
+    ) SqlExecError!void {
+        var inner: std.ArrayList([]const ?ColumnValue) = .empty;
+        defer {
+            for (inner.items) |r| freeRowValues(r, ctx.alloc);
+            inner.deinit(ctx.alloc);
+        }
+        try self.executeScanInner(f.input, ctx, &inner, depth + 1);
+        for (inner.items) |row| {
+            var row_ctx = ctx;
+            row_ctx.row = row;
+            const v = try evalExpr(f.predicate, row_ctx);
+            if (v.toBool() orelse false) {
+                const r = try SqlExecutor.dupeRow(row, ctx.alloc);
+                try out.append(ctx.alloc, r);
+            }
+        }
+    }
+
+    fn executeScanProject(
+        self: *SqlExecutor,
+        p: plan_mod.ProjectNode,
+        ctx: EvalCtx,
+        out: *std.ArrayList([]const ?ColumnValue),
+        depth: u32,
+    ) SqlExecError!void {
+        var inner: std.ArrayList([]const ?ColumnValue) = .empty;
+        defer {
+            for (inner.items) |r| freeRowValues(r, ctx.alloc);
+            inner.deinit(ctx.alloc);
+        }
+        try self.executeScanInner(p.input, ctx, &inner, depth + 1);
+        var seen = std.StringHashMap(void).init(ctx.alloc);
+        defer {
+            var it = seen.keyIterator();
+            while (it.next()) |k| ctx.alloc.free(k.*);
+            seen.deinit();
+        }
+        for (inner.items) |row| {
+            var eval_arena = std.heap.ArenaAllocator.init(ctx.alloc);
+            defer eval_arena.deinit();
+            var row_ctx = ctx;
+            row_ctx.row = row;
+            row_ctx.alloc = eval_arena.allocator();
+            const projected = try ctx.alloc.alloc(?ColumnValue, p.exprs.len);
+            for (p.exprs, 0..) |item, i| {
+                const v = try evalExpr(item.expr, row_ctx);
+                projected[i] = planValueToColumnValue(v, ctx.alloc) catch null; // type mismatch → SQL NULL
+            }
+            if (p.distinct) {
+                const key = try serializeRowKey(projected, ctx.alloc);
+                const gop = try seen.getOrPut(key);
+                if (gop.found_existing) {
+                    ctx.alloc.free(key);
+                    freeRowValues(projected, ctx.alloc);
+                    continue;
                 }
-                var right_rows: std.ArrayList([]const ?ColumnValue) = .empty;
-                defer {
-                    for (right_rows.items) |r| freeRowValues(r, ctx.alloc);
-                    right_rows.deinit(ctx.alloc);
-                }
-                try self.executeScan(j.left, ctx, &left_rows);
-                try self.executeScan(j.right, ctx, &right_rows);
+            }
+            try out.append(ctx.alloc, projected);
+        }
+    }
 
-                const right_width = if (right_rows.items.len > 0) right_rows.items[0].len else 0;
+    fn executeScanLimit(
+        self: *SqlExecutor,
+        l: plan_mod.LimitNode,
+        ctx: EvalCtx,
+        out: *std.ArrayList([]const ?ColumnValue),
+        depth: u32,
+    ) SqlExecError!void {
+        var inner: std.ArrayList([]const ?ColumnValue) = .empty;
+        defer {
+            for (inner.items) |r| freeRowValues(r, ctx.alloc);
+            inner.deinit(ctx.alloc);
+        }
+        try self.executeScanInner(l.input, ctx, &inner, depth + 1);
+        const offset_val: u64 = if (l.offset) |o| blk: {
+            const v = try evalExpr(o, ctx);
+            break :blk switch (v) {
+                .int_val => |n| if (n < 0) return error.TypeMismatch else @intCast(n),
+                else => 0,
+            };
+        } else 0;
+        const limit_val: u64 = if (l.limit) |lim| blk: {
+            const v = try evalExpr(lim, ctx);
+            break :blk switch (v) {
+                .int_val => |n| if (n < 0) return error.TypeMismatch else @intCast(n),
+                else => std.math.maxInt(u64),
+            };
+        } else std.math.maxInt(u64);
+        var taken: u64 = 0;
+        for (inner.items, 0..) |row, i| {
+            if (i < offset_val) continue;
+            if (taken >= limit_val) break;
+            const r = try SqlExecutor.dupeRow(row, ctx.alloc);
+            try out.append(ctx.alloc, r);
+            taken += 1;
+        }
+    }
 
-                const left_width = if (left_rows.items.len > 0) left_rows.items[0].len else 0;
-
-                // Track which right rows were matched (for RIGHT and FULL joins)
-                const right_matched = try ctx.alloc.alloc(bool, right_rows.items.len);
-                defer ctx.alloc.free(right_matched);
-                @memset(right_matched, false);
-
-                for (left_rows.items) |lr| {
-                    var matched = false;
-                    for (right_rows.items, 0..) |rr, ri| {
-                        const passes = if (j.kind == .cross) true else blk: {
-                            const combined = try ctx.alloc.alloc(?ColumnValue, lr.len + rr.len);
-                            @memcpy(combined[0..lr.len], lr);
-                            @memcpy(combined[lr.len..], rr);
-                            var join_ctx = ctx;
-                            join_ctx.row = combined;
-                            const v = (try evalExpr(j.condition, join_ctx)).toBool() orelse false;
-                            ctx.alloc.free(combined);
-                            break :blk v;
-                        };
-                        if (passes) {
-                            matched = true;
-                            right_matched[ri] = true;
-                            const owned = try ctx.alloc.alloc(?ColumnValue, lr.len + rr.len);
-                            errdefer ctx.alloc.free(owned);
-                            for (lr, 0..) |v, i| owned[i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
-                            for (rr, 0..) |v, i| owned[lr.len + i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
-                            try out.append(ctx.alloc, owned);
-                        }
+    fn executeScanSort(
+        self: *SqlExecutor,
+        s: plan_mod.SortNode,
+        ctx: EvalCtx,
+        out: *std.ArrayList([]const ?ColumnValue),
+        depth: u32,
+    ) SqlExecError!void {
+        var inner: std.ArrayList([]const ?ColumnValue) = .empty;
+        defer {
+            for (inner.items) |r| freeRowValues(r, ctx.alloc);
+            inner.deinit(ctx.alloc);
+        }
+        try self.executeScanInner(s.input, ctx, &inner, depth + 1);
+        // Stable insertion sort — deterministic for reproducible test output.
+        var sorted = try ctx.alloc.dupe([]const ?ColumnValue, inner.items);
+        defer ctx.alloc.free(sorted);
+        for (1..sorted.len) |i| {
+            const key = sorted[i];
+            var j: usize = i;
+            while (j > 0) {
+                var row_ctx_a = ctx;
+                var row_ctx_b = ctx;
+                row_ctx_a.row = sorted[j - 1];
+                row_ctx_b.row = key;
+                const should_swap = blk: {
+                    for (s.keys) |sk| {
+                        const va = evalExpr(sk.expr, row_ctx_a) catch break :blk false;
+                        const vb = evalExpr(sk.expr, row_ctx_b) catch break :blk false;
+                        if (!va.eql(vb)) break :blk if (sk.asc) vb.lessThan(va) else va.lessThan(vb);
                     }
-                    // LEFT and FULL: unmatched left rows get NULL-padded right side
-                    if (!matched and (j.kind == .left or j.kind == .full)) {
-                        const padded = try ctx.alloc.alloc(?ColumnValue, lr.len + right_width);
-                        errdefer ctx.alloc.free(padded);
-                        for (lr, 0..) |v, i| padded[i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
-                        for (padded[lr.len..]) |*v| v.* = null;
-                        try out.append(ctx.alloc, padded);
-                    }
-                }
-                // RIGHT and FULL: unmatched right rows get NULL-padded left side
-                if (j.kind == .right or j.kind == .full) {
-                    for (right_rows.items, 0..) |rr, ri| {
-                        if (right_matched[ri]) continue;
-                        const padded = try ctx.alloc.alloc(?ColumnValue, left_width + rr.len);
-                        errdefer ctx.alloc.free(padded);
-                        for (padded[0..left_width]) |*v| v.* = null;
-                        for (rr, 0..) |v, i| padded[left_width + i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
-                        try out.append(ctx.alloc, padded);
-                    }
-                }
-            },
-
-            .hash_agg => |ha| {
-                var inner: std.ArrayList([]const ?ColumnValue) = .empty;
-                defer {
-                    for (inner.items) |r| freeRowValues(r, ctx.alloc);
-                    inner.deinit(ctx.alloc);
-                }
-                try self.executeScan(ha.input, ctx, &inner);
-
-                const GroupRow = struct {
-                    key: []const ?ColumnValue,
-                    accums: []AggAccum,
+                    break :blk false;
                 };
+                if (!should_swap) break;
+                sorted[j] = sorted[j - 1];
+                j -= 1;
+            }
+            sorted[j] = key;
+        }
+        for (sorted) |r| try out.append(ctx.alloc, try SqlExecutor.dupeRow(r, ctx.alloc));
+    }
 
-                var groups: std.ArrayList(GroupRow) = .empty;
-                defer {
-                    for (groups.items) |g| {
-                        freeRowValues(g.key, ctx.alloc);
-                        for (g.accums) |*acc| acc.deinit(ctx.alloc);
-                        ctx.alloc.free(g.accums);
-                    }
-                    groups.deinit(ctx.alloc);
+    fn executeScanWindow(
+        self: *SqlExecutor,
+        w: plan_mod.WindowNode,
+        ctx: EvalCtx,
+        out: *std.ArrayList([]const ?ColumnValue),
+        depth: u32,
+    ) SqlExecError!void {
+        var inner: std.ArrayList([]const ?ColumnValue) = .empty;
+        defer {
+            for (inner.items) |r| freeRowValues(r, ctx.alloc);
+            inner.deinit(ctx.alloc);
+        }
+        try self.executeScanInner(w.input, ctx, &inner, depth + 1);
+        if (inner.items.len == 0) return;
+        // Allocate result matrix: [row_idx][fn_idx] = ColumnValue
+        const win_results = try ctx.alloc.alloc([]?ColumnValue, inner.items.len);
+        defer {
+            for (win_results) |r| ctx.alloc.free(r);
+            ctx.alloc.free(win_results);
+        }
+        for (win_results) |*r| {
+            r.* = try ctx.alloc.alloc(?ColumnValue, w.fns.len);
+            for (r.*) |*v| v.* = null;
+        }
+        for (w.fns, 0..) |wf, fi| try window_exec_mod.computeWindowFnForAll(wf, inner.items, win_results, fi, ctx);
+        for (inner.items, 0..) |row, ri| {
+            const aug = try ctx.alloc.alloc(?ColumnValue, row.len + w.fns.len);
+            errdefer ctx.alloc.free(aug);
+            for (row, 0..) |v, i| aug[i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
+            @memcpy(aug[row.len..], win_results[ri]);
+            try out.append(ctx.alloc, aug);
+        }
+    }
+
+    fn executeScanHashJoin(
+        self: *SqlExecutor,
+        j: plan_mod.HashJoinNode,
+        ctx: EvalCtx,
+        out: *std.ArrayList([]const ?ColumnValue),
+        depth: u32,
+    ) SqlExecError!void {
+        var left_rows: std.ArrayList([]const ?ColumnValue) = .empty;
+        defer {
+            for (left_rows.items) |r| freeRowValues(r, ctx.alloc);
+            left_rows.deinit(ctx.alloc);
+        }
+        var right_rows: std.ArrayList([]const ?ColumnValue) = .empty;
+        defer {
+            for (right_rows.items) |r| freeRowValues(r, ctx.alloc);
+            right_rows.deinit(ctx.alloc);
+        }
+        try self.executeScanInner(j.left, ctx, &left_rows, depth + 1);
+        try self.executeScanInner(j.right, ctx, &right_rows, depth + 1);
+        const right_width = if (right_rows.items.len > 0) right_rows.items[0].len else 0;
+        const left_width = if (left_rows.items.len > 0) left_rows.items[0].len else 0;
+        // Track which right rows were matched (for RIGHT and FULL joins).
+        const right_matched = try ctx.alloc.alloc(bool, right_rows.items.len);
+        defer ctx.alloc.free(right_matched);
+        @memset(right_matched, false);
+        for (left_rows.items) |lr| {
+            var matched = false;
+            for (right_rows.items, 0..) |rr, ri| {
+                const passes = if (j.kind == .cross) true else blk: {
+                    const combined = try ctx.alloc.alloc(?ColumnValue, lr.len + rr.len);
+                    @memcpy(combined[0..lr.len], lr);
+                    @memcpy(combined[lr.len..], rr);
+                    var join_ctx = ctx;
+                    join_ctx.row = combined;
+                    const v = (try evalExpr(j.condition, join_ctx)).toBool() orelse false;
+                    ctx.alloc.free(combined);
+                    break :blk v;
+                };
+                if (passes) {
+                    matched = true;
+                    right_matched[ri] = true;
+                    const owned = try ctx.alloc.alloc(?ColumnValue, lr.len + rr.len);
+                    errdefer ctx.alloc.free(owned);
+                    for (lr, 0..) |v, i| owned[i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
+                    for (rr, 0..) |v, i| owned[lr.len + i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
+                    try out.append(ctx.alloc, owned);
                 }
+            }
+            // LEFT and FULL: unmatched left rows get NULL-padded right side.
+            if (!matched and (j.kind == .left or j.kind == .full)) {
+                const padded = try ctx.alloc.alloc(?ColumnValue, lr.len + right_width);
+                errdefer ctx.alloc.free(padded);
+                for (lr, 0..) |v, i| padded[i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
+                for (padded[lr.len..]) |*v| v.* = null;
+                try out.append(ctx.alloc, padded);
+            }
+        }
+        // RIGHT and FULL: unmatched right rows get NULL-padded left side.
+        if (j.kind == .right or j.kind == .full) {
+            for (right_rows.items, 0..) |rr, ri| {
+                if (right_matched[ri]) continue;
+                const padded = try ctx.alloc.alloc(?ColumnValue, left_width + rr.len);
+                errdefer ctx.alloc.free(padded);
+                for (padded[0..left_width]) |*v| v.* = null;
+                for (rr, 0..) |v, i| padded[left_width + i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
+                try out.append(ctx.alloc, padded);
+            }
+        }
+    }
 
-                for (inner.items) |row| {
-                    var row_ctx = ctx;
-                    row_ctx.row = row;
-
-                    const key = try ctx.alloc.alloc(?ColumnValue, ha.group_keys.len);
-                    for (ha.group_keys, 0..) |ke, i| {
-                        const v = try evalExpr(ke, row_ctx);
-                        key[i] = planValueToColumnValue(v, ctx.alloc) catch null;
-                    }
-
-                    var found_group: ?*GroupRow = null;
-                    for (groups.items) |*g| {
-                        if (aggKeyEquals(g.key, key)) {
-                            found_group = g;
-                            break;
-                        }
-                    }
-
-                    if (found_group) |g| {
-                        freeRowValues(key, ctx.alloc);
-                        for (ha.agg_exprs, g.accums) |ae, *acc| {
-                            try acc.update(ae, row_ctx);
-                        }
-                    } else {
-                        const accums = try ctx.alloc.alloc(AggAccum, ha.agg_exprs.len);
-                        for (accums) |*a| a.* = .{};
-                        for (ha.agg_exprs, accums) |ae, *acc| {
-                            try acc.update(ae, row_ctx);
-                        }
-                        try groups.append(ctx.alloc, .{ .key = key, .accums = accums });
-                    }
-                }
-
-                // If no rows and no GROUP BY, still emit one aggregate row (e.g. COUNT(*) = 0)
-                if (groups.items.len == 0 and ha.group_keys.len == 0) {
-                    const accums = try ctx.alloc.alloc(AggAccum, ha.agg_exprs.len);
-                    for (accums) |*a| a.* = .{};
-                    const key = try ctx.alloc.alloc(?ColumnValue, 0);
-                    try groups.append(ctx.alloc, .{ .key = key, .accums = accums });
-                }
-
-                for (groups.items) |g| {
-                    var agg_arena = std.heap.ArenaAllocator.init(ctx.alloc);
-                    defer agg_arena.deinit();
-                    const agg_alloc = agg_arena.allocator();
-                    const result_row = try ctx.alloc.alloc(?ColumnValue, ha.group_keys.len + ha.agg_exprs.len);
-                    errdefer ctx.alloc.free(result_row);
-                    for (g.key, 0..) |v, i| result_row[i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
-                    for (ha.agg_exprs, g.accums, 0..) |ae, acc, i| {
-                        const v = try acc.toValue(ae, agg_alloc);
-                        result_row[ha.group_keys.len + i] = planValueToColumnValue(v, ctx.alloc) catch null;
-                    }
-                    try out.append(ctx.alloc, result_row);
-                }
-            },
-
-            // DML nodes not valid in scan context
-            else => {},
+    fn executeScanHashAgg(
+        self: *SqlExecutor,
+        ha: plan_mod.HashAggNode,
+        ctx: EvalCtx,
+        out: *std.ArrayList([]const ?ColumnValue),
+        depth: u32,
+    ) SqlExecError!void {
+        var inner: std.ArrayList([]const ?ColumnValue) = .empty;
+        defer {
+            for (inner.items) |r| freeRowValues(r, ctx.alloc);
+            inner.deinit(ctx.alloc);
+        }
+        try self.executeScanInner(ha.input, ctx, &inner, depth + 1);
+        const GroupRow = struct { key: []const ?ColumnValue, accums: []AggAccum };
+        var groups: std.ArrayList(GroupRow) = .empty;
+        defer {
+            for (groups.items) |g| {
+                freeRowValues(g.key, ctx.alloc);
+                for (g.accums) |*acc| acc.deinit(ctx.alloc);
+                ctx.alloc.free(g.accums);
+            }
+            groups.deinit(ctx.alloc);
+        }
+        for (inner.items) |row| {
+            var row_ctx = ctx;
+            row_ctx.row = row;
+            const key = try ctx.alloc.alloc(?ColumnValue, ha.group_keys.len);
+            for (ha.group_keys, 0..) |ke, i| {
+                const v = try evalExpr(ke, row_ctx);
+                key[i] = planValueToColumnValue(v, ctx.alloc) catch null; // type mismatch → SQL NULL (group key NULL bucket)
+            }
+            var found_group: ?*GroupRow = null;
+            for (groups.items) |*g| {
+                if (aggKeyEquals(g.key, key)) { found_group = g; break; }
+            }
+            if (found_group) |g| {
+                freeRowValues(key, ctx.alloc);
+                for (ha.agg_exprs, g.accums) |ae, *acc| try acc.update(ae, row_ctx);
+            } else {
+                const accums = try ctx.alloc.alloc(AggAccum, ha.agg_exprs.len);
+                for (accums) |*a| a.* = .{};
+                for (ha.agg_exprs, accums) |ae, *acc| try acc.update(ae, row_ctx);
+                try groups.append(ctx.alloc, .{ .key = key, .accums = accums });
+            }
+        }
+        // If no rows and no GROUP BY, still emit one aggregate row (e.g. COUNT(*) = 0).
+        if (groups.items.len == 0 and ha.group_keys.len == 0) {
+            const accums = try ctx.alloc.alloc(AggAccum, ha.agg_exprs.len);
+            for (accums) |*a| a.* = .{};
+            const key = try ctx.alloc.alloc(?ColumnValue, 0);
+            try groups.append(ctx.alloc, .{ .key = key, .accums = accums });
+        }
+        for (groups.items) |g| {
+            var agg_arena = std.heap.ArenaAllocator.init(ctx.alloc);
+            defer agg_arena.deinit();
+            const agg_alloc = agg_arena.allocator();
+            const result_row = try ctx.alloc.alloc(?ColumnValue, ha.group_keys.len + ha.agg_exprs.len);
+            errdefer ctx.alloc.free(result_row);
+            for (g.key, 0..) |v, i| result_row[i] = if (v) |cv| try cv.dupe(ctx.alloc) else null;
+            for (ha.agg_exprs, g.accums, 0..) |ae, acc, i| {
+                const v = try acc.toValue(ae, agg_alloc);
+                result_row[ha.group_keys.len + i] = planValueToColumnValue(v, ctx.alloc) catch null; // type mismatch → SQL NULL (agg result)
+            }
+            try out.append(ctx.alloc, result_row);
         }
     }
 
@@ -820,7 +868,7 @@ pub const SqlExecutor = struct {
     ) SqlExecError!void {
         if (ins.on_conflict) |oc| {
             // Check whether the key already exists in storage.
-            var existing = self.storage.get(ins.table_id, key, ctx.seq -| 1) catch null;
+            var existing = self.storage.get(ins.table_id, key, ctx.seq -| 1) catch return error.StorageReadError;
             defer if (existing) |*ex| ex.deinit(ctx.alloc);
 
             if (existing != null) {
@@ -929,7 +977,7 @@ pub const SqlExecutor = struct {
         if (upd.from_table_id) |from_id| {
             var fi = self.storage.scan(from_id, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch return error.TableNotFound;
             defer fi.deinit();
-            while (fi.next() catch null) |fr| {
+            while (fi.next() catch return error.StorageReadError) |fr| {
                 try from_rows.append(ctx.alloc, try self.rowToValues(fr, &.{}, ctx.alloc));
             }
         }
@@ -937,7 +985,7 @@ pub const SqlExecutor = struct {
         var iter = self.storage.scan(upd.table_id, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch return error.TableNotFound;
         defer iter.deinit();
 
-        while (iter.next() catch null) |row| {
+        while (iter.next() catch return error.StorageReadError) |row| {
             const row_vals = try self.rowToValues(row, pkColumnIds(tbl), ctx.alloc);
             defer freeRowValues(row_vals, ctx.alloc);
 
@@ -1051,7 +1099,7 @@ pub const SqlExecutor = struct {
             var bucket: std.ArrayList([]const ?ColumnValue) = .empty;
             var ui = self.storage.scan(uid, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch return error.TableNotFound;
             defer ui.deinit();
-            while (ui.next() catch null) |ur| {
+            while (ui.next() catch return error.StorageReadError) |ur| {
                 try bucket.append(ctx.alloc, try self.rowToValues(ur, &.{}, ctx.alloc));
             }
             try using_rows.append(ctx.alloc, bucket);
@@ -1064,7 +1112,7 @@ pub const SqlExecutor = struct {
         var iter = self.storage.scan(del.table_id, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch return error.TableNotFound;
         defer iter.deinit();
 
-        while (iter.next() catch null) |row| {
+        while (iter.next() catch return error.StorageReadError) |row| {
             const need_row_vals = del.filter != null or del.using_table_ids.len > 0 or (returning_rows != null and del.returning.len > 0);
             const row_vals: ?[]const ?ColumnValue = if (need_row_vals)
                 try self.rowToValues(row, &.{}, ctx.alloc)
@@ -1198,7 +1246,7 @@ pub const SqlExecutor = struct {
             const ref_key = try buildForeignKeyLookup(ref_tbl, fk.ref_columns, fk_vals, ctx.alloc);
             defer ctx.alloc.free(ref_key);
 
-            const maybe_row = self.storage.get(fk.ref_table_id, ref_key, ctx.seq -| 1) catch null;
+            const maybe_row = self.storage.get(fk.ref_table_id, ref_key, ctx.seq -| 1) catch return error.StorageReadError;
             if (maybe_row) |row| {
                 var r = row;
                 r.deinit(ctx.alloc);
@@ -1247,7 +1295,7 @@ pub const SqlExecutor = struct {
             // Scan child table; if any child row's FK columns match, reject the delete
             var child_iter = self.storage.scan(child_tbl.id, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch continue;
             defer child_iter.deinit();
-            while (child_iter.next() catch null) |child_row| {
+            while (child_iter.next() catch return error.StorageReadError) |child_row| {
                 var matches = true;
                 for (fk.columns, 0..) |fk_col_id, i| {
                     const col_pos: usize = for (child_tbl.columns, 0..) |col, ci| {
@@ -1305,7 +1353,7 @@ pub const SqlExecutor = struct {
         }
         var target_iter = self.storage.scan(m.target_id, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch return error.TableNotFound;
         defer target_iter.deinit();
-        while (target_iter.next() catch null) |row| {
+        while (target_iter.next() catch return error.StorageReadError) |row| {
             const key_copy = try ctx.alloc.dupe(u8, row.key);
             const vals = try self.rowToValues(row, &.{}, ctx.alloc);
             try target_data.append(ctx.alloc, .{ .key = key_copy, .vals = vals });
@@ -1478,7 +1526,7 @@ fn projectReturning(
     row_ctx.row = virtual_row;
     for (items, 0..) |item, i| {
         const v = try evalExpr(item.expr, row_ctx);
-        projected[i] = planValueToColumnValue(v, ctx.alloc) catch null;
+        projected[i] = planValueToColumnValue(v, ctx.alloc) catch null; // type mismatch → SQL NULL
     }
     try out.append(ctx.alloc, projected);
 }

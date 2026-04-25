@@ -92,7 +92,7 @@ pub fn decodeParams(data: []const u8, types: []const ast.SqlType, alloc: std.mem
     if (count == 0) return &.{};
     if (types.len > 0 and count != types.len) return error.TypeMismatch;
     const values = try alloc.alloc(ColumnValue, count);
-    var pos: usize = 2;
+    var pos: u32 = 2;
     for (0..count) |i| {
         if (pos >= data.len) return error.TypeMismatch;
         const tag_byte = data[pos];
@@ -106,7 +106,7 @@ pub fn decodeParams(data: []const u8, types: []const ast.SqlType, alloc: std.mem
     return values;
 }
 
-fn decodeParamValue(data: []const u8, pos: *usize, typ: ast.SqlType, alloc: std.mem.Allocator) !ColumnValue {
+fn decodeParamValue(data: []const u8, pos: *u32, typ: ast.SqlType, alloc: std.mem.Allocator) !ColumnValue {
     return switch (typ) {
         .bool => blk: {
             const b = data[pos.*];
@@ -181,7 +181,7 @@ fn decodeParamValue(data: []const u8, pos: *usize, typ: ast.SqlType, alloc: std.
     };
 }
 
-fn decodeParamValueByTag(data: []const u8, pos: *usize, tag: u8, alloc: std.mem.Allocator) !ColumnValue {
+fn decodeParamValueByTag(data: []const u8, pos: *u32, tag: u8, alloc: std.mem.Allocator) !ColumnValue {
     const col_type: ColumnType = switch (tag) {
         0 => .bool_t,
         1 => .int8,

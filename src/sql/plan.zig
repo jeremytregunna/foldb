@@ -3,6 +3,8 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const schema_mod = @import("schema.zig");
 
+const assert = std.debug.assert;
+
 pub const PlanError = error{
     TableNotFound,
     ColumnNotFound,
@@ -504,6 +506,7 @@ pub const Planner = struct {
     }
 
     fn planSelect(self: *Planner, q: ast.SelectStmt) PlanError!*PlanNode {
+        assert(q.items.len > 0 or q.from != null);
         const scope_save = self.scope.items.len;
         const post_agg_save = self.post_agg_cols.items.len;
         const cte_save = self.cte_stack.items.len;
@@ -514,127 +517,121 @@ pub const Planner = struct {
             self.cte_stack.shrinkRetainingCapacity(cte_save);
             self.window_fn_cols.shrinkRetainingCapacity(win_fn_save);
         }
-
-        // Register CTEs so planTableRef can resolve cte_ref nodes
         for (q.with) |cte| {
             const cte_node = try self.planSelect(cte.query.*);
-            try self.cte_stack.append(self.arena, .{
-                .name = cte.name,
-                .node = cte_node,
-                .items = cte.query.items,
-            });
+            try self.cte_stack.append(self.arena, .{ .name = cte.name, .node = cte_node, .items = cte.query.items });
         }
-
         const tbl_ref = q.from orelse {
-            // SELECT without FROM — emit a single empty row so expressions can be evaluated
+            // SELECT without FROM — emit a single empty row so expressions can be evaluated.
             const node = try self.arena.create(PlanNode);
             node.* = .single_row;
             return node;
         };
-
         var node = try self.planTableRef(tbl_ref);
+        node = try self.planSelectJoins(q.joins, node);
+        node = try self.planSelectWhere(q.where, node);
+        node = try self.planSelectGroupBy(q, node, scope_save, post_agg_save);
+        if (q.having) |h| {
+            const filter_node = try self.arena.create(PlanNode);
+            filter_node.* = .{ .filter = .{ .input = node, .predicate = try self.planExpr(h) } };
+            node = filter_node;
+        }
+        node = try self.planSelectWindow(q.items, node);
+        node = try self.planSelectOrderLimit(q, node);
+        node = try self.planSelectProject(q, node);
+        return node;
+    }
 
-        // Joins
-        for (q.joins) |j| {
+    fn planSelectJoins(self: *Planner, joins: []const ast.Join, base: *PlanNode) PlanError!*PlanNode {
+        var node = base;
+        for (joins) |j| {
             const right_scope_start: usize = self.scope.items.len;
             const right = try self.planTableRef(j.table);
             const cond = if (j.condition) |c| switch (c) {
                 .on => |e| try self.planExpr(e),
-                .using => |cols| blk: {
-                    // Build: col_left = col_right [AND ...] by matching column names in each side's scope
-                    var cond_expr: ?*PlanExpr = null;
-                    for (cols) |col_name| {
-                        var left_pos: ?u32 = null;
-                        var right_pos: ?u32 = null;
-                        for (self.scope.items[0..right_scope_start]) |e| {
-                            if (std.ascii.eqlIgnoreCase(e.col_name, col_name)) {
-                                left_pos = e.position;
-                                break;
-                            }
-                        }
-                        for (self.scope.items[right_scope_start..]) |e| {
-                            if (std.ascii.eqlIgnoreCase(e.col_name, col_name)) {
-                                right_pos = e.position;
-                                break;
-                            }
-                        }
-                        if (left_pos == null or right_pos == null) return error.ColumnNotFound;
-                        const lc = try self.arena.create(PlanExpr);
-                        lc.* = .{ .column = left_pos.? };
-                        const rc = try self.arena.create(PlanExpr);
-                        rc.* = .{ .column = right_pos.? };
-                        const eq = try self.arena.create(PlanExpr);
-                        eq.* = .{ .binary = .{ .op = .eq, .left = lc, .right = rc } };
-                        if (cond_expr == null) {
-                            cond_expr = eq;
-                        } else {
-                            const and_node = try self.arena.create(PlanExpr);
-                            and_node.* = .{ .binary = .{ .op = .and_op, .left = cond_expr.?, .right = eq } };
-                            cond_expr = and_node;
-                        }
-                    }
-                    if (cond_expr) |e| break :blk e;
-                    const dummy = try self.arena.create(PlanExpr);
-                    dummy.* = .{ .bool_literal = true };
-                    break :blk dummy;
-                },
+                .using => |cols| try self.planSelectJoinUsing(cols, right_scope_start),
             } else blk: {
                 const dummy = try self.arena.create(PlanExpr);
                 dummy.* = .{ .bool_literal = true };
                 break :blk dummy;
             };
             const join_node = try self.arena.create(PlanNode);
-            join_node.* = .{ .hash_join = .{
-                .left = node,
-                .right = right,
-                .kind = j.kind,
-                .condition = cond,
-            } };
+            join_node.* = .{ .hash_join = .{ .left = node, .right = right, .kind = j.kind, .condition = cond } };
             node = join_node;
         }
+        return node;
+    }
 
-        // WHERE filter — or ANN vector search if WHERE is ANN(col, $param, k).
-        if (q.where) |w| {
-            const is_ann = ann_blk: {
-                const fc = switch (w.*) {
-                    .fn_call => |fc| fc,
-                    else => break :ann_blk false,
-                };
-                if (!std.ascii.eqlIgnoreCase(fc.name, "ANN") or fc.args.len != 3) break :ann_blk false;
-                const scan = switch (node.*) {
-                    .scan => |s| s,
-                    else => break :ann_blk false,
-                };
-                const param_idx: u32 = switch (fc.args[1].*) {
-                    .param => |p| p,
-                    else => break :ann_blk false,
-                };
-                const k_raw: i128 = switch (fc.args[2].*) {
-                    .lit_int => |v| v,
-                    else => break :ann_blk false,
-                };
-                if (k_raw <= 0) break :ann_blk false;
-                const idx_id = scan.index_hint orelse break :ann_blk false;
-                const ann_node = try self.arena.create(PlanNode);
-                ann_node.* = .{ .ann_scan = .{
-                    .table_id = scan.table_id,
-                    .index_id = idx_id,
-                    .columns = scan.columns,
-                    .query_param = param_idx,
-                    .k = @intCast(k_raw),
-                } };
-                node = ann_node;
-                break :ann_blk true;
-            };
-            if (!is_ann) {
-                const pred = try self.planExpr(w);
-                const filter_node = try self.arena.create(PlanNode);
-                filter_node.* = .{ .filter = .{ .input = node, .predicate = pred } };
-                node = filter_node;
+    fn planSelectJoinUsing(self: *Planner, cols: []const []const u8, right_scope_start: usize) PlanError!*PlanExpr {
+        var cond_expr: ?*PlanExpr = null;
+        for (cols) |col_name| {
+            var left_pos: ?u32 = null;
+            var right_pos: ?u32 = null;
+            for (self.scope.items[0..right_scope_start]) |e| {
+                if (std.ascii.eqlIgnoreCase(e.col_name, col_name)) { left_pos = e.position; break; }
+            }
+            for (self.scope.items[right_scope_start..]) |e| {
+                if (std.ascii.eqlIgnoreCase(e.col_name, col_name)) { right_pos = e.position; break; }
+            }
+            if (left_pos == null or right_pos == null) return error.ColumnNotFound;
+            const lc = try self.arena.create(PlanExpr);
+            lc.* = .{ .column = left_pos.? };
+            const rc = try self.arena.create(PlanExpr);
+            rc.* = .{ .column = right_pos.? };
+            const eq = try self.arena.create(PlanExpr);
+            eq.* = .{ .binary = .{ .op = .eq, .left = lc, .right = rc } };
+            if (cond_expr == null) {
+                cond_expr = eq;
+            } else {
+                const and_node = try self.arena.create(PlanExpr);
+                and_node.* = .{ .binary = .{ .op = .and_op, .left = cond_expr.?, .right = eq } };
+                cond_expr = and_node;
             }
         }
+        if (cond_expr) |e| return e;
+        const dummy = try self.arena.create(PlanExpr);
+        dummy.* = .{ .bool_literal = true };
+        return dummy;
+    }
 
-        // GROUP BY + aggregates (also handles implicit aggregate: SELECT COUNT(*) FROM t with no GROUP BY)
+    fn planSelectWhere(self: *Planner, where: ?*ast.Expr, base: *PlanNode) PlanError!*PlanNode {
+        const w = where orelse return base;
+        var node = base;
+        // Rewrite WHERE ANN(col, $param, k) as an AnnScanNode when the base is a plain scan.
+        const is_ann = ann_blk: {
+            const fc = switch (w.*) {
+                .fn_call => |fc| fc,
+                else => break :ann_blk false,
+            };
+            if (!std.ascii.eqlIgnoreCase(fc.name, "ANN") or fc.args.len != 3) break :ann_blk false;
+            const scan = switch (node.*) { .scan => |s| s, else => break :ann_blk false };
+            const param_idx: u32 = switch (fc.args[1].*) { .param => |p| p, else => break :ann_blk false };
+            const k_raw: i128 = switch (fc.args[2].*) { .lit_int => |v| v, else => break :ann_blk false };
+            if (k_raw <= 0) break :ann_blk false;
+            const idx_id = scan.index_hint orelse break :ann_blk false;
+            const ann_node = try self.arena.create(PlanNode);
+            ann_node.* = .{ .ann_scan = .{
+                .table_id = scan.table_id, .index_id = idx_id, .columns = scan.columns,
+                .query_param = param_idx, .k = @intCast(k_raw),
+            } };
+            node = ann_node;
+            break :ann_blk true;
+        };
+        if (!is_ann) {
+            const filter_node = try self.arena.create(PlanNode);
+            filter_node.* = .{ .filter = .{ .input = node, .predicate = try self.planExpr(w) } };
+            node = filter_node;
+        }
+        return node;
+    }
+
+    fn planSelectGroupBy(
+        self: *Planner,
+        q: ast.SelectStmt,
+        base: *PlanNode,
+        scope_save: usize,
+        post_agg_save: usize,
+    ) PlanError!*PlanNode {
         const has_implicit_agg = q.group_by.len == 0 and blk: {
             for (q.items) |item| {
                 switch (item) {
@@ -644,141 +641,86 @@ pub const Planner = struct {
             }
             break :blk false;
         };
-        if (q.group_by.len > 0 or has_implicit_agg) {
-            var keys: std.ArrayList(*PlanExpr) = .empty;
-            var key_col_refs: std.ArrayList(?ast.ColumnRef) = .empty;
-            for (q.group_by) |g| {
-                try keys.append(self.arena, try self.planExpr(g));
-                try key_col_refs.append(self.arena, if (g.* == .column_ref) g.column_ref else null);
-            }
-            var agg_exprs: std.ArrayList(AggExpr) = .empty;
-            for (q.items) |item| {
-                switch (item) {
-                    .star => {},
-                    .expr => |ei| {
-                        if (extractAggFn(ei.expr)) |fn_call| {
-                            const arg: ?*PlanExpr = if (fn_call.args.len > 0)
-                                try self.planExpr(fn_call.args[0])
-                            else
-                                null;
-                            const sep: ?*PlanExpr = if (fn_call.args.len > 1 and
-                                std.ascii.eqlIgnoreCase(fn_call.name, "string_agg"))
-                                try self.planExpr(fn_call.args[1])
-                            else
-                                null;
-                            const filt: ?*PlanExpr = if (fn_call.filter) |f|
-                                try self.planExpr(f)
-                            else
-                                null;
-                            try agg_exprs.append(self.arena, .{
-                                .fn_name = fn_call.name,
-                                .arg = arg,
-                                .distinct = fn_call.distinct,
-                                .alias = ei.alias orelse fn_call.name,
-                                .filter = filt,
-                                .separator = sep,
-                            });
-                        }
-                    },
-                }
-            }
-            const group_keys_slice = try keys.toOwnedSlice(self.arena);
-            const agg_exprs_slice = try agg_exprs.toOwnedSlice(self.arena);
-            const agg_node = try self.arena.create(PlanNode);
-            agg_node.* = .{ .hash_agg = .{
-                .input = node,
-                .group_keys = group_keys_slice,
-                .agg_exprs = agg_exprs_slice,
-            } };
-            node = agg_node;
-
-            // Rebuild scope for hash_agg output: [group_key_0, ..., agg_0, ...]
-            self.scope.shrinkRetainingCapacity(scope_save);
-            self.post_agg_cols.shrinkRetainingCapacity(post_agg_save);
-            for (key_col_refs.items, 0..) |maybe_ref, i| {
-                if (maybe_ref) |ref| {
-                    try self.scope.append(self.arena, .{
-                        .table_alias = ref.table orelse "",
-                        .col_name = ref.column,
-                        .position = @intCast(i),
+        if (q.group_by.len == 0 and !has_implicit_agg) return base;
+        var keys: std.ArrayList(*PlanExpr) = .empty;
+        var key_col_refs: std.ArrayList(?ast.ColumnRef) = .empty;
+        for (q.group_by) |g| {
+            try keys.append(self.arena, try self.planExpr(g));
+            try key_col_refs.append(self.arena, if (g.* == .column_ref) g.column_ref else null);
+        }
+        var agg_exprs: std.ArrayList(AggExpr) = .empty;
+        for (q.items) |item| {
+            switch (item) {
+                .star => {},
+                .expr => |ei| if (extractAggFn(ei.expr)) |fn_call| {
+                    const arg: ?*PlanExpr = if (fn_call.args.len > 0) try self.planExpr(fn_call.args[0]) else null;
+                    const sep: ?*PlanExpr = if (fn_call.args.len > 1 and std.ascii.eqlIgnoreCase(fn_call.name, "string_agg"))
+                        try self.planExpr(fn_call.args[1]) else null;
+                    const filt: ?*PlanExpr = if (fn_call.filter) |f| try self.planExpr(f) else null;
+                    try agg_exprs.append(self.arena, .{
+                        .fn_name = fn_call.name, .arg = arg, .distinct = fn_call.distinct,
+                        .alias = ei.alias orelse fn_call.name, .filter = filt, .separator = sep,
                     });
-                }
-            }
-            for (agg_exprs_slice, 0..) |ae, i| {
-                try self.post_agg_cols.append(self.arena, .{
-                    .fn_name = ae.fn_name,
-                    .position = @intCast(group_keys_slice.len + i),
-                });
+                },
             }
         }
-
-        // HAVING filter
-        if (q.having) |h| {
-            const pred = try self.planExpr(h);
-            const filter_node = try self.arena.create(PlanNode);
-            filter_node.* = .{ .filter = .{ .input = node, .predicate = pred } };
-            node = filter_node;
-        }
-
-        // Window functions: pre-scan SELECT items, assign positions, build WindowNode
-        {
-            const win_base: u32 = @intCast(self.scope.items.len);
-            var win_specs: std.ArrayList(WindowFnSpec) = .empty;
-            for (q.items) |item| {
-                switch (item) {
-                    .star => {},
-                    .expr => |ei| {
-                        if (ei.expr.* == .window_fn) {
-                            const wf = ei.expr.window_fn;
-                            const pos = win_base + @as(u32, @intCast(win_specs.items.len));
-                            var args_pe: std.ArrayList(*PlanExpr) = .empty;
-                            for (wf.call.args) |a| try args_pe.append(self.arena, try self.planExpr(a));
-                            var pb_pe: std.ArrayList(*PlanExpr) = .empty;
-                            for (wf.window.partition_by) |pb| try pb_pe.append(self.arena, try self.planExpr(pb));
-                            var ob_keys: std.ArrayList(SortKey) = .empty;
-                            for (wf.window.order_by) |ob| {
-                                try ob_keys.append(self.arena, .{
-                                    .expr = try self.planExpr(ob.expr),
-                                    .asc = ob.asc,
-                                    .nulls_first = ob.nulls_first orelse !ob.asc,
-                                });
-                            }
-                            const frame: ?FrameSpec = if (wf.window.frame) |f| .{
-                                .mode = switch (f.mode) {
-                                    .rows => .rows,
-                                    .range => .range,
-                                },
-                                .start = try self.planFrameBound(f.start),
-                                .end = try self.planFrameBound(f.end),
-                            } else null;
-                            try win_specs.append(self.arena, .{
-                                .fn_name = wf.call.name,
-                                .args = try args_pe.toOwnedSlice(self.arena),
-                                .partition_by = try pb_pe.toOwnedSlice(self.arena),
-                                .order_by = try ob_keys.toOwnedSlice(self.arena),
-                                .result_col = pos,
-                                .frame = frame,
-                            });
-                            try self.window_fn_cols.append(self.arena, .{
-                                .fn_name = wf.call.name,
-                                .position = pos,
-                            });
-                        }
-                    },
-                }
-            }
-            if (win_specs.items.len > 0) {
-                const win_node = try self.arena.create(PlanNode);
-                win_node.* = .{ .window = .{
-                    .input = node,
-                    .fns = try win_specs.toOwnedSlice(self.arena),
-                    .input_width = win_base,
-                } };
-                node = win_node;
+        const group_keys_slice = try keys.toOwnedSlice(self.arena);
+        const agg_exprs_slice = try agg_exprs.toOwnedSlice(self.arena);
+        const agg_node = try self.arena.create(PlanNode);
+        agg_node.* = .{ .hash_agg = .{ .input = base, .group_keys = group_keys_slice, .agg_exprs = agg_exprs_slice } };
+        // Rebuild scope for hash_agg output: [group_key_0, ..., agg_0, ...]
+        self.scope.shrinkRetainingCapacity(scope_save);
+        self.post_agg_cols.shrinkRetainingCapacity(post_agg_save);
+        for (key_col_refs.items, 0..) |maybe_ref, i| {
+            if (maybe_ref) |ref| {
+                try self.scope.append(self.arena, .{ .table_alias = ref.table orelse "", .col_name = ref.column, .position = @intCast(i) });
             }
         }
+        for (agg_exprs_slice, 0..) |ae, i| {
+            try self.post_agg_cols.append(self.arena, .{ .fn_name = ae.fn_name, .position = @intCast(group_keys_slice.len + i) });
+        }
+        return agg_node;
+    }
 
-        // ORDER BY (always with deterministic ordering)
+    fn planSelectWindow(self: *Planner, items: []const ast.SelectItem, base: *PlanNode) PlanError!*PlanNode {
+        const win_base: u32 = @intCast(self.scope.items.len);
+        var win_specs: std.ArrayList(WindowFnSpec) = .empty;
+        for (items) |item| {
+            switch (item) {
+                .star => {},
+                .expr => |ei| if (ei.expr.* == .window_fn) {
+                    const wf = ei.expr.window_fn;
+                    const pos = win_base + @as(u32, @intCast(win_specs.items.len));
+                    var args_pe: std.ArrayList(*PlanExpr) = .empty;
+                    for (wf.call.args) |a| try args_pe.append(self.arena, try self.planExpr(a));
+                    var pb_pe: std.ArrayList(*PlanExpr) = .empty;
+                    for (wf.window.partition_by) |pb| try pb_pe.append(self.arena, try self.planExpr(pb));
+                    var ob_keys: std.ArrayList(SortKey) = .empty;
+                    for (wf.window.order_by) |ob| {
+                        try ob_keys.append(self.arena, .{ .expr = try self.planExpr(ob.expr), .asc = ob.asc, .nulls_first = ob.nulls_first orelse !ob.asc });
+                    }
+                    const frame: ?FrameSpec = if (wf.window.frame) |f| .{
+                        .mode = switch (f.mode) { .rows => .rows, .range => .range },
+                        .start = try self.planFrameBound(f.start),
+                        .end = try self.planFrameBound(f.end),
+                    } else null;
+                    try win_specs.append(self.arena, .{
+                        .fn_name = wf.call.name, .args = try args_pe.toOwnedSlice(self.arena),
+                        .partition_by = try pb_pe.toOwnedSlice(self.arena), .order_by = try ob_keys.toOwnedSlice(self.arena),
+                        .result_col = pos, .frame = frame,
+                    });
+                    try self.window_fn_cols.append(self.arena, .{ .fn_name = wf.call.name, .position = pos });
+                },
+            }
+        }
+        if (win_specs.items.len == 0) return base;
+        const win_node = try self.arena.create(PlanNode);
+        win_node.* = .{ .window = .{ .input = base, .fns = try win_specs.toOwnedSlice(self.arena), .input_width = win_base } };
+        return win_node;
+    }
+
+    fn planSelectOrderLimit(self: *Planner, q: ast.SelectStmt, base: *PlanNode) PlanError!*PlanNode {
+        var node = base;
         if (q.order_by.len > 0) {
             var keys: std.ArrayList(SortKey) = .empty;
             for (q.order_by) |ob| {
@@ -792,8 +734,6 @@ pub const Planner = struct {
             sort_node.* = .{ .sort = .{ .input = node, .keys = try keys.toOwnedSlice(self.arena) } };
             node = sort_node;
         }
-
-        // LIMIT / OFFSET
         if (q.limit != null or q.offset != null) {
             const limit_node = try self.arena.create(PlanNode);
             limit_node.* = .{ .limit = .{
@@ -803,8 +743,10 @@ pub const Planner = struct {
             } };
             node = limit_node;
         }
+        return node;
+    }
 
-        // Project selected items
+    fn planSelectProject(self: *Planner, q: ast.SelectStmt, base: *PlanNode) PlanError!*PlanNode {
         var proj_items: std.ArrayList(ProjectItem) = .empty;
         for (q.items) |item| {
             switch (item) {
@@ -817,20 +759,14 @@ pub const Planner = struct {
                         }
                         break :blk exprNaturalName(ei.expr);
                     };
-                    try proj_items.append(self.arena, .{
-                        .expr = try self.planExpr(ei.expr),
-                        .alias = alias,
-                    });
+                    try proj_items.append(self.arena, .{ .expr = try self.planExpr(ei.expr), .alias = alias });
                 },
             }
         }
-        if (proj_items.items.len > 0) {
-            const proj_node = try self.arena.create(PlanNode);
-            proj_node.* = .{ .project = .{ .input = node, .exprs = try proj_items.toOwnedSlice(self.arena), .distinct = q.distinct } };
-            node = proj_node;
-        }
-
-        return node;
+        if (proj_items.items.len == 0) return base;
+        const proj_node = try self.arena.create(PlanNode);
+        proj_node.* = .{ .project = .{ .input = base, .exprs = try proj_items.toOwnedSlice(self.arena), .distinct = q.distinct } };
+        return proj_node;
     }
 
     fn planTableRef(self: *Planner, tref: ast.TableRef) PlanError!*PlanNode {

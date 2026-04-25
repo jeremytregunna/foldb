@@ -4,6 +4,12 @@ const lex_mod = @import("lexer.zig");
 const ast = @import("ast.zig");
 const tok = @import("token.zig");
 
+const assert = std.debug.assert;
+
+/// Maximum items collected by any single parse loop. Guards against unbounded
+/// loops on malformed input that never produces a clean break condition.
+const MAX_PARSE_ITEMS: u32 = 4096;
+
 pub const Lexer = lex_mod.Lexer;
 pub const Token = tok.Token;
 pub const TokenKind = tok.TokenKind;
@@ -99,6 +105,7 @@ pub const Parser = struct {
     pub fn parseQuery(self: *Parser) ParseError!ast.ParsedQuery {
         var stmts: std.ArrayList(ast.Stmt) = .empty;
         while (true) {
+            assert(stmts.items.len < MAX_PARSE_ITEMS);
             _ = try self.eat(.sym_semicolon);
             const k = try self.peekKind();
             if (k == .eof) break;
@@ -142,11 +149,13 @@ pub const Parser = struct {
         _ = try self.expect(.kw_with);
         const recursive = try self.eat(.kw_recursive);
         while (true) {
+            assert(ctes.items.len < MAX_PARSE_ITEMS);
             const name = try self.expectIdent();
             const columns = blk: {
                 if (try self.eat(.sym_lparen)) {
                     var cols: std.ArrayList([]const u8) = .empty;
                     while (true) {
+                        assert(cols.items.len < MAX_PARSE_ITEMS);
                         try cols.append(self.arena, try self.expectIdent());
                         if (!try self.eat(.sym_comma)) break;
                     }
@@ -213,6 +222,7 @@ pub const Parser = struct {
         if (try self.eat(.kw_from)) {
             from_ref = try self.parseTableRef();
             while (true) {
+                assert(joins.items.len < MAX_PARSE_ITEMS);
                 const jk = try self.peekKind();
                 if (jk == .kw_join or jk == .kw_inner or jk == .kw_left or
                     jk == .kw_right or jk == .kw_full or jk == .kw_cross)
@@ -235,6 +245,7 @@ pub const Parser = struct {
         var windows: std.ArrayList(ast.NamedWindow) = .empty;
         if (try self.eat(.kw_window)) {
             while (true) {
+                assert(windows.items.len < MAX_PARSE_ITEMS);
                 const wname = try self.expectIdent();
                 _ = try self.expect(.kw_as);
                 _ = try self.expect(.sym_lparen);
@@ -273,6 +284,7 @@ pub const Parser = struct {
     fn parseSelectItems(self: *Parser) ParseError![]const ast.SelectItem {
         var items: std.ArrayList(ast.SelectItem) = .empty;
         while (true) {
+            assert(items.items.len < MAX_PARSE_ITEMS);
             const k = try self.peekKind();
             if (k == .op_star) {
                 _ = try self.advance();
@@ -361,6 +373,7 @@ pub const Parser = struct {
                 _ = try self.expect(.sym_lparen);
                 var cols: std.ArrayList([]const u8) = .empty;
                 while (true) {
+                    assert(cols.items.len < MAX_PARSE_ITEMS);
                     try cols.append(self.arena, try self.expectIdent());
                     if (!try self.eat(.sym_comma)) break;
                 }
@@ -422,6 +435,7 @@ pub const Parser = struct {
     fn parseOrderByList(self: *Parser) ParseError![]const ast.OrderByItem {
         var items: std.ArrayList(ast.OrderByItem) = .empty;
         while (true) {
+            assert(items.items.len < MAX_PARSE_ITEMS);
             const e = try self.parseExpr();
             var asc = true;
             if (try self.eat(.kw_asc)) {
@@ -454,6 +468,7 @@ pub const Parser = struct {
         var columns: std.ArrayList([]const u8) = .empty;
         if (try self.eat(.sym_lparen)) {
             while (true) {
+                assert(columns.items.len < MAX_PARSE_ITEMS);
                 try columns.append(self.arena, try self.expectIdent());
                 if (!try self.eat(.sym_comma)) break;
             }
@@ -464,6 +479,7 @@ pub const Parser = struct {
             if (try self.eat(.kw_values)) {
                 var rows: std.ArrayList([]*ast.Expr) = .empty;
                 while (true) {
+                    assert(rows.items.len < MAX_PARSE_ITEMS);
                     _ = try self.expect(.sym_lparen);
                     const vals = try self.parseExprList();
                     _ = try self.expect(.sym_rparen);
@@ -492,6 +508,7 @@ pub const Parser = struct {
                 var target: std.ArrayList([]const u8) = .empty;
                 if (try self.eat(.sym_lparen)) {
                     while (true) {
+                        assert(target.items.len < MAX_PARSE_ITEMS);
                         try target.append(self.arena, try self.expectIdent());
                         if (!try self.eat(.sym_comma)) break;
                     }
@@ -547,6 +564,7 @@ pub const Parser = struct {
     fn parseAssignmentList(self: *Parser) ParseError![]const ast.Assignment {
         var list: std.ArrayList(ast.Assignment) = .empty;
         while (true) {
+            assert(list.items.len < MAX_PARSE_ITEMS);
             const col = try self.expectIdent();
             _ = try self.expect(.op_eq);
             const val = try self.parseExpr();
@@ -566,6 +584,7 @@ pub const Parser = struct {
         var using: std.ArrayList(ast.TableRef) = .empty;
         if (try self.eat(.kw_using)) {
             while (true) {
+                assert(using.items.len < MAX_PARSE_ITEMS);
                 try using.append(self.arena, try self.parseTableRef());
                 if (!try self.eat(.sym_comma)) break;
             }
@@ -618,6 +637,7 @@ pub const Parser = struct {
                 var cols: std.ArrayList([]const u8) = .empty;
                 if (try self.eat(.sym_lparen)) {
                     while (true) {
+                        assert(cols.items.len < MAX_PARSE_ITEMS);
                         try cols.append(self.arena, try self.expectIdent());
                         if (!try self.eat(.sym_comma)) break;
                     }
@@ -673,12 +693,14 @@ pub const Parser = struct {
         var pk_cols: std.ArrayList([]const u8) = .empty;
         var fk_defs: std.ArrayList(ast.ForeignKeyConstraint) = .empty;
         while (true) {
+            assert(columns.items.len + pk_cols.items.len + fk_defs.items.len < MAX_PARSE_ITEMS);
             const k = try self.peekKind();
             if (k == .kw_primary) {
                 _ = try self.advance();
                 _ = try self.expect(.kw_key);
                 _ = try self.expect(.sym_lparen);
                 while (true) {
+                    assert(pk_cols.items.len < MAX_PARSE_ITEMS);
                     try pk_cols.append(self.arena, try self.expectIdent());
                     if (!try self.eat(.sym_comma)) break;
                 }
@@ -708,7 +730,7 @@ pub const Parser = struct {
                             _ = try self.expect(.kw_key);
                             is_pk = true;
                             got_null = .not_null; // PRIMARY KEY implies NOT NULL
-                        } else break;
+                        } else break; // exits the inner while(true) loop
                     }
                     if (got_null) |n| break :blk n;
                     break :blk .nullable; // default: nullable when no constraint given
@@ -739,6 +761,7 @@ pub const Parser = struct {
         _ = try self.expect(.sym_lparen);
         var local_cols: std.ArrayList([]const u8) = .empty;
         while (true) {
+            assert(local_cols.items.len < MAX_PARSE_ITEMS);
             try local_cols.append(self.arena, try self.expectIdent());
             if (!try self.eat(.sym_comma)) break;
         }
@@ -748,6 +771,7 @@ pub const Parser = struct {
         var ref_cols: std.ArrayList([]const u8) = .empty;
         if (try self.eat(.sym_lparen)) {
             while (true) {
+                assert(ref_cols.items.len < MAX_PARSE_ITEMS);
                 try ref_cols.append(self.arena, try self.expectIdent());
                 if (!try self.eat(.sym_comma)) break;
             }
@@ -786,6 +810,7 @@ pub const Parser = struct {
                 _ = try self.expect(.sym_lparen);
                 var paths: std.ArrayList([]const u8) = .empty;
                 while (true) {
+                    assert(paths.items.len < MAX_PARSE_ITEMS);
                     try paths.append(self.arena, try self.expectIdent());
                     if (!try self.eat(.sym_comma)) break;
                 }
@@ -801,6 +826,7 @@ pub const Parser = struct {
         _ = try self.expect(.sym_lparen);
         var cols: std.ArrayList([]const u8) = .empty;
         while (true) {
+            assert(cols.items.len < MAX_PARSE_ITEMS);
             try cols.append(self.arena, try self.expectIdent());
             if (!try self.eat(.sym_comma)) break;
         }
@@ -858,6 +884,7 @@ pub const Parser = struct {
         var params: std.ArrayList(ast.TxnParam) = .empty;
         if (try self.eat(.sym_lparen)) {
             while (true) {
+                assert(params.items.len < MAX_PARSE_ITEMS);
                 const pname = try self.expectIdent();
                 const ptyp = try self.parseType();
                 try params.append(self.arena, .{ .name = pname, .typ = ptyp });
@@ -979,6 +1006,7 @@ pub const Parser = struct {
     fn parseExprList(self: *Parser) ParseError![]*ast.Expr {
         var list: std.ArrayList(*ast.Expr) = .empty;
         while (true) {
+            assert(list.items.len < MAX_PARSE_ITEMS);
             try list.append(self.arena, try self.parseExpr());
             if (!try self.eat(.sym_comma)) break;
         }
@@ -1182,7 +1210,10 @@ pub const Parser = struct {
 
     fn parseShiftExpr(self: *Parser) ParseError!*ast.Expr {
         var left = try self.parseAdditiveExpr();
+        var depth: u32 = 0;
         while (true) {
+            assert(depth < MAX_PARSE_ITEMS);
+            depth += 1;
             const k = try self.peekKind();
             const op: ast.BinOp = switch (k) {
                 .op_lshift => .shl,
@@ -1200,7 +1231,10 @@ pub const Parser = struct {
 
     fn parseAdditiveExpr(self: *Parser) ParseError!*ast.Expr {
         var left = try self.parseMultiplicativeExpr();
+        var depth: u32 = 0;
         while (true) {
+            assert(depth < MAX_PARSE_ITEMS);
+            depth += 1;
             const k = try self.peekKind();
             const op: ast.BinOp = switch (k) {
                 .op_plus => .add,
@@ -1221,7 +1255,10 @@ pub const Parser = struct {
 
     fn parseMultiplicativeExpr(self: *Parser) ParseError!*ast.Expr {
         var left = try self.parseUnaryExpr();
+        var depth: u32 = 0;
         while (true) {
+            assert(depth < MAX_PARSE_ITEMS);
+            depth += 1;
             const k = try self.peekKind();
             const op: ast.BinOp = switch (k) {
                 .op_star => .mul,
@@ -1264,7 +1301,10 @@ pub const Parser = struct {
             base = e;
         }
         // Postfix -> and ->> (JSON operators)
+        var json_depth: u32 = 0;
         while (true) {
+            assert(json_depth < MAX_PARSE_ITEMS);
+            json_depth += 1;
             const k = try self.peekKind();
             const op: ast.BinOp = switch (k) {
                 .op_arrow => .arrow,
@@ -1465,6 +1505,7 @@ pub const Parser = struct {
             var args: std.ArrayList(*ast.Expr) = .empty;
             if (!star and (try self.peekKind()) != .sym_rparen) {
                 while (true) {
+                    assert(args.items.len < MAX_PARSE_ITEMS);
                     try args.append(self.arena, try self.parseExpr());
                     if (!try self.eat(.sym_comma)) break;
                 }
