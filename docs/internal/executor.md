@@ -56,6 +56,21 @@ Single-partition entries bypass `PartitionSet` entirely.
 - **Storage**: Mutations accumulate during handler execution, then commit atomically via `storage.apply()`.
 - **CDC**: Receives before/after images after each successful apply. See [CDC](cdc.md).
 
+## OCC Conflict Detection (low-level handler path only)
+
+The low-level `Executor` (used by `PartitionSet`) implements optimistic concurrency control to detect cases where a handler's read set was invalidated between reconnaissance and execution.
+
+When a `TxnIntent` carries a non-zero `recon_seq`, the executor wires a `ReadTracker` to storage before calling the handler and detaches it after. Every `get()` and `scan()` call records `(table_id, key, row_seq)` for each key read. After the handler returns, `read_write_conflict()` checks whether any recorded `row_seq > recon_seq` — if so, a key the handler read was written after reconnaissance, and the entry aborts with code `retry`. The gateway re-scouts at the conflicting seq and resubmits.
+
+**What OCC covers:**
+- Point reads (`get`) — both found rows and missing keys (recorded with `row_seq = 0`)
+- Rows returned by range scans (`scan`) — each returned row is individually tracked
+
+**What OCC does not cover — phantom reads:**
+A phantom occurs when a new row is inserted into a range that the handler scanned, after `recon_seq`. Because the inserted row was not present during the scan, there is no `ReadEntry` for it and no conflict is detected. Preventing phantoms requires range-predicate tracking: recording the scan bounds and checking, during conflict detection, whether any key in that range has `row_seq > recon_seq`. This is not yet implemented.
+
+**This does not affect the SQL execution path.** `FoldExecutor` → `SqlExecutor` does not use OCC at all — strict serializability there is structural, achieved by executing every transaction in a deterministic serial order derived from the Raft log.
+
 ## Error Conditions
 
 | Error | Meaning |

@@ -67,6 +67,39 @@ pub const SqlRegistry = struct {
         self.queries.deinit();
     }
 
+    /// Validate a SQL string and return its QueryHash without registering it.
+    /// Does the same parse → canonicalize → type-check → plan pipeline as register(),
+    /// but discards all results. Safe to call from any thread; does not mutate state.
+    pub fn validateQuery(self: *SqlRegistry, sql: []const u8) RegistryError!QueryHash {
+        var arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena.deinit();
+        const arena_alloc = arena.allocator();
+
+        const sql_copy = try arena_alloc.dupe(u8, sql);
+        const parsed = try parser_mod.parse(sql_copy, arena_alloc);
+        const h = try canon.canonicalize(parsed, arena_alloc);
+
+        if (self.queries.contains(h)) return h;
+
+        const param_types = try extractParamTypes(parsed, arena_alloc);
+
+        var checker = tc_mod.TypeChecker.init(arena_alloc, self.schema);
+        for (parsed.stmts) |stmt| {
+            try checker.checkStmt(stmt, param_types, true);
+        }
+
+        var planner = plan_mod.Planner.init(arena_alloc, self.schema);
+        if (parsed.stmts.len == 1 and parsed.stmts[0] == .transaction) {
+            _ = try planner.planTransaction(parsed.stmts[0].transaction);
+        } else {
+            for (parsed.stmts) |s| {
+                _ = try planner.planAstStmt(s);
+            }
+        }
+
+        return h;
+    }
+
     /// Register a SQL string, returning its QueryHash.
     /// Rejects SELECT * in registered queries.
     /// Idempotent: registering the same SQL twice returns the same hash.

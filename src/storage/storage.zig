@@ -521,6 +521,17 @@ pub const Storage = struct {
         const rows = try lsm.scan(range, at_seq, alloc);
         self.metrics.scans.inc();
         self.metrics.scan_rows_returned.add(@intCast(rows.len));
+        if (self.read_tracker) |tracker| {
+            for (rows) |row| {
+                // Record each returned row so OCC detects writes to those keys after
+                // recon_seq. Best-effort: OOM here causes a false negative (no retry).
+                tracker.record(table_id, row.key, row.seq) catch |err|
+                    std.log.warn("read tracker record: {}", .{err});
+            }
+            // Note: new rows inserted into this range after recon_seq (phantoms) are
+            // not detected here — range predicate tracking requires a separate extension
+            // to ReadEntry and is not yet implemented.
+        }
         return ScanIterator{ .rows = rows, .pos = 0, .alloc = alloc };
     }
 

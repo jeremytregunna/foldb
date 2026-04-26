@@ -344,44 +344,60 @@ pub const Sequencer = struct {
                     );
                 },
                 .committed => |commit_seq| {
-                    // Apply all newly committed Raft entries to the local partition logs.
-                    // Runs on every node — leader and followers — so all nodes stay in sync.
-                    var idx = self.last_applied + 1;
-                    while (idx <= commit_seq) : (idx += 1) {
-                        const raft_entries = self.raft_log.read(idx, 1, alloc) catch break;
-                        defer {
-                            for (raft_entries) |*e| e.deinit(alloc);
-                            alloc.free(raft_entries);
-                        }
-                        if (raft_entries.len == 0) break;
-                        const re = raft_entries[0];
-                        if (re.header.kind == .epoch_decision) {
-                            const dec = types_mod.deserializeEpochDecision(re.payload, alloc) catch {
-                                self.last_applied = idx;
-                                continue;
-                            };
-                            defer alloc.free(dec.entries);
-                            for (dec.entries) |oe| {
-                                assert(oe.partition < self.partition_logs.len);
-                                const pl = &self.partition_logs[oe.partition];
-                                const le = LogEntry.create(oe.seq, 0, dec.entry_kind, dec.payload);
-                                try pl.append_entry_at(le);
-                            }
-                            // Notify after all entries in the batch are written, so FoldExecutor
-                            // does not wake mid-batch and race with concurrent writes.
-                            for (dec.entries) |oe| {
-                                self.partition_logs[oe.partition].notifyAppend();
-                            }
-                        }
-                        self.last_applied = idx;
-                    }
-                    try writeLastApplied(self.last_applied_path, self.last_applied);
+                    try self.applyCommitted(commit_seq, alloc);
                 },
                 // Raft peer list is already updated internally by RaftNode when this fires.
                 // Transport was pre-registered in addNode / cleaned up in removeNode.
                 .apply_config => {},
             }
         }
+    }
+
+    /// Apply all Raft entries up to commit_seq to the partition logs.
+    /// Idempotent: entries already present (seq <= current_seq) are skipped.
+    /// Advances next_seq past every seq the Raft log has assigned and persists last_applied.
+    fn applyCommitted(self: *Sequencer, commit_seq: Seq, alloc: std.mem.Allocator) !void {
+        var idx = self.last_applied + 1;
+        while (idx <= commit_seq) : (idx += 1) {
+            const raft_entries = self.raft_log.read(idx, 1, alloc) catch break;
+            defer {
+                for (raft_entries) |*e| e.deinit(alloc);
+                alloc.free(raft_entries);
+            }
+            if (raft_entries.len == 0) break;
+            const re = raft_entries[0];
+            if (re.header.kind == .epoch_decision) {
+                const dec = types_mod.deserializeEpochDecision(re.payload, alloc) catch {
+                    self.last_applied = idx;
+                    continue;
+                };
+                defer alloc.free(dec.entries);
+                for (dec.entries) |oe| {
+                    assert(oe.partition < self.partition_logs.len);
+                    const pl = &self.partition_logs[oe.partition];
+                    // Re-apply is at-least-once: last_applied is persisted after all
+                    // partition writes, so a mid-batch crash replays this epoch.
+                    // Seq uniqueness means oe.seq <= current_seq is the entry already
+                    // on disk — skip rather than error.
+                    if (oe.seq <= pl.current_seq) continue;
+                    const le = LogEntry.create(oe.seq, 0, dec.entry_kind, dec.payload);
+                    try pl.append_entry_at(le);
+                }
+                // Keep next_seq ahead of every seq the Raft log has assigned.
+                // Covers seqs written just now and seqs skipped above as already-present,
+                // so post-restart commits never reuse a seq from a prior epoch decision.
+                for (dec.entries) |oe| {
+                    if (oe.seq >= self.next_seq) self.next_seq = oe.seq + 1;
+                }
+                // Notify after all entries in the batch are written, so FoldExecutor
+                // does not wake mid-batch and race with concurrent writes.
+                for (dec.entries) |oe| {
+                    self.partition_logs[oe.partition].notifyAppend();
+                }
+            }
+            self.last_applied = idx;
+        }
+        try writeLastApplied(self.last_applied_path, self.last_applied);
     }
 
     /// Return a pointer to the log for the given partition (for reading committed entries).
@@ -509,6 +525,12 @@ fn writeLastApplied(path: []const u8, seq: Seq) !void {
 /// This loop is non-terminating by design — it exits only when shutdown is set via deinit().
 fn runLoop(self: *Sequencer) void {
     const tick_ns: u64 = @as(u64, self.tick_interval_ms) * 1_000_000;
+    // Apply any Raft entries already committed before this run started. This brings
+    // next_seq up to the true Raft high-water mark before commitBroadcast can assign
+    // new seqs, closing the window where a post-crash restart could reuse a seq from
+    // a partially-written prior epoch.
+    self.applyCommitted(self.raft.commit_index, self.alloc) catch |err|
+        std.log.warn("startup catch-up: {}", .{err});
     while (!self.shutdown.load(.acquire)) {
         // Sample seq before pop — if a producer pushes between the failed pop and
         // waitForWork, the seq change causes waitForWork to return immediately.

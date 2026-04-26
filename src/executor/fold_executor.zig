@@ -168,17 +168,53 @@ pub const FoldExecutor = struct {
 
     // ---- Schema / DDL ----
 
-    /// Validate and apply DDL to local schema. Called by Gateway before Raft submission.
-    pub fn applyDdlLocal(self: *FoldExecutor, sql: []const u8) !void {
-        try self.applyDdlToSchema(sql);
+    /// Validate DDL against the current schema without mutating any state.
+    /// Called by Gateway before Raft submission so the client gets early error feedback.
+    /// Does not check SchemaBreakingChange — that is enforced at replay time.
+    pub fn validateDdl(self: *FoldExecutor, sql: []const u8) !void {
+        assert(sql.len > 0);
+        var arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena.deinit();
+        var parser = sql_mod.parser.Parser.init(sql, arena.allocator());
+        const parsed = try parser.parseQuery();
+        if (parsed.stmts.len == 0) return;
+        const stmt = parsed.stmts[0];
+        switch (stmt) {
+            .create_table => |ct| {
+                if (self.schema.getTable(ct.name) != null) return error.TableAlreadyExists;
+            },
+            .drop_table => |dt| {
+                if (!dt.if_exists and self.schema.getTable(dt.name) == null) return error.TableNotFound;
+            },
+            .create_index => |ci| {
+                const tbl = self.schema.getTable(ci.table) orelse return error.TableNotFound;
+                for (tbl.indexes) |idx| {
+                    if (std.ascii.eqlIgnoreCase(idx.name, ci.name)) return error.IndexAlreadyExists;
+                }
+            },
+            .alter_table => |at| {
+                const tbl = self.schema.getTable(at.table) orelse return error.TableNotFound;
+                switch (at.action) {
+                    .add_column => |col| {
+                        if (tbl.columnByName(col.name) != null) return error.ColumnAlreadyExists;
+                    },
+                    .drop_column => |col_name| {
+                        if (tbl.columnByName(col_name) == null) return error.ColumnNotFound;
+                    },
+                }
+            },
+            else => return error.TypeCheckError,
+        }
     }
 
     fn replayDdl(self: *FoldExecutor, sql: []const u8) !void {
+        // Suppress "already exists / not found" errors: at-least-once replay on crash-restart
+        // can re-deliver an entry whose effects are already in the schema.
         self.applyDdlToSchema(sql) catch |e| switch (e) {
             error.TableAlreadyExists,
             error.IndexAlreadyExists,
             error.ColumnAlreadyExists,
-            error.ColumnNotFound, // DROP COLUMN replay when already applied locally
+            error.ColumnNotFound,
             error.TableNotFound,
             => {},
             else => return e,
@@ -246,12 +282,11 @@ pub const FoldExecutor = struct {
 
     // ---- Query Registration ----
 
-    /// Validate SQL against the current schema and register it locally.
-    /// Safe to call from the gateway thread when FoldExecutor is idle (i.e., after wait_for
-    /// returns and before Raft submission of this entry). If validation fails (e.g. column
-    /// not found), the error is returned and the caller must not submit to Raft.
-    pub fn registerLocal(self: *FoldExecutor, sql: []const u8) !sql_mod.QueryHash {
-        return self.registry.register(sql);
+    /// Validate a SQL string against the current schema without registering it.
+    /// Returns the canonical hash on success. Does not mutate any state.
+    /// Called by Gateway before Raft submission for early client-visible error feedback.
+    pub fn validateQuery(self: *FoldExecutor, sql: []const u8) !sql_mod.QueryHash {
+        return self.registry.validateQuery(sql);
     }
 
     /// Compute the canonical hash of a SQL string without registering it.

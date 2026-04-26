@@ -108,6 +108,7 @@ pub const SchemaRegistry = struct {
             self.alloc.free(tbl.columns);
             self.alloc.free(tbl.primary_key);
             for (tbl.indexes) |idx| {
+                self.alloc.free(idx.name);
                 self.alloc.free(idx.columns);
                 switch (idx.extra) {
                     .json_paths => |paths| self.alloc.free(paths),
@@ -283,9 +284,11 @@ pub const SchemaRegistry = struct {
             else => .none,
         };
 
+        const idx_name = try self.alloc.dupe(u8, stmt.name);
+        errdefer self.alloc.free(idx_name);
         const new_idx = IndexSchema{
             .id = self.next_index_id,
-            .name = stmt.name,
+            .name = idx_name,
             .kind = kind,
             .unique = stmt.unique,
             .columns = col_ids,

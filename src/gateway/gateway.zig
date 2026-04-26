@@ -364,9 +364,9 @@ pub const Gateway = struct {
     pub fn register(self: *Gateway, sql: []const u8) !RegisterResult {
         self.error_detail_len = 0;
         // Validate SQL against the current schema before committing to Raft.
-        // registerLocal does full parse+typecheck+plan — returns ColumnNotFound etc.
-        // if the query references columns/tables that don't exist in the current schema.
-        const hash = self.fold_executors[0].registerLocal(sql) catch |e| {
+        // validateQuery does full parse+typecheck+plan without mutating state —
+        // returns ColumnNotFound etc. if the query references unknown columns/tables.
+        const hash = self.fold_executors[0].validateQuery(sql) catch |e| {
             if (e == error.UnexpectedToken or e == error.UnsupportedSyntax) {
                 var arena = std.heap.ArenaAllocator.init(self.alloc);
                 defer arena.deinit();
@@ -635,7 +635,7 @@ pub const Gateway = struct {
     /// Validates and applies locally first so the connection sees errors before committing.
     pub fn applyDdl(self: *Gateway, sql: []const u8) !void {
         self.error_detail_len = 0;
-        try self.fold_executors[0].applyDdlLocal(sql);
+        try self.fold_executors[0].validateDdl(sql);
         self.client_seq += 1;
         // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
         var pending: sequencer_mod.PendingSubmit = undefined;
