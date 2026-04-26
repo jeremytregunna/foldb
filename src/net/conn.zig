@@ -402,10 +402,15 @@ pub const Conn = struct {
             self.sendStreamError(stream_id, code, emsg);
             return;
         };
-        var out: std.ArrayListUnmanaged(u8) = .empty;
-        defer out.deinit(self.alloc);
-        try msg.encodeExecOk(&out, self.alloc, .{ .rows_affected = exec_result.rows_affected, .committed_seq = self.gw.currentSeq() });
-        try frame.sendFrame(&self.writer.interface, stream_id, .exec_ok, .final_only, null, out.items);
+        if (exec_result.result_set) |rs| {
+            // RETURNING clause produced rows — send them and free (sendResultSet owns rs)
+            try self.sendResultSet(stream_id, rs);
+        } else {
+            var out: std.ArrayListUnmanaged(u8) = .empty;
+            defer out.deinit(self.alloc);
+            try msg.encodeExecOk(&out, self.alloc, .{ .rows_affected = exec_result.rows_affected, .committed_seq = self.gw.currentSeq() });
+            try frame.sendFrame(&self.writer.interface, stream_id, .exec_ok, .final_only, null, out.items);
+        }
     }
 
     // ---- ReadAt ----
