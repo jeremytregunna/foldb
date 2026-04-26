@@ -11,7 +11,6 @@ const ast_mod = sql.ast;
 const schema_mod = sql.schema;
 const registry_mod = sql.registry;
 
-const Decimal = ast_mod.Decimal;
 const ColumnValue = eb.ColumnValue;
 const Storage = eb.Storage;
 

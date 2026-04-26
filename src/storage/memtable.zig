@@ -8,7 +8,6 @@ const assert = std.debug.assert;
 const TableSchema = types.TableSchema;
 const ColumnValue = types.ColumnValue;
 const Seq = types.Seq;
-const Row = types.Row;
 const KeyRange = types.KeyRange;
 const SSTableWriter = sstable_mod.SSTableWriter;
 

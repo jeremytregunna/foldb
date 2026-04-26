@@ -119,7 +119,7 @@ test "Flags.final_only" {
 
 test "MORE and FINAL are mutually exclusive (spec §2.2)" {
     // Just verify the bit positions don't overlap
-    const more_bit: u8 = @as(u8, @bitCast(Flags.more_only));
-    const final_bit: u8 = @as(u8, @bitCast(Flags.final_only));
+    const more_bit: u8 = @bitCast(Flags.more_only);
+    const final_bit: u8 = @bitCast(Flags.final_only);
     try testing.expectEqual(@as(u8, 0), more_bit & final_bit);
 }

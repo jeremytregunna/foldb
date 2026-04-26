@@ -15,9 +15,7 @@ const Storage = storage_mod.Storage;
 const TableSchema = storage_mod.TableSchema;
 const ColumnValue = storage_mod.ColumnValue;
 const Mutation = storage_mod.Mutation;
-const Log = log_mod.Log;
 const LogEntry = log_mod.LogEntry;
-const EntryKind = log_mod.EntryKind;
 const Seq = log_mod.Seq;
 
 fn makeTempDir() ![]const u8 {

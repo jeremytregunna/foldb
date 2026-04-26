@@ -17,7 +17,7 @@ pub const ClockSource = struct {
         var ts: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
         const sec_us: i64 = @as(i64, @intCast(ts.sec)) * 1_000_000;
-        const nsec_us: i64 = @as(i64, @intCast(@divTrunc(ts.nsec, 1_000)));
+        const nsec_us: i64 = @intCast(@divTrunc(ts.nsec, 1_000));
         return sec_us + nsec_us;
     }
 };

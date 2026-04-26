@@ -10,25 +10,19 @@ const testing = std.testing;
 const executor_mod = @import("executor.zig");
 const partition_set_mod = @import("partition_set.zig");
 const storage_mod = @import("storage.zig");
-const log_mod = @import("log.zig");
 
 const PartitionSet = partition_set_mod.PartitionSet;
-const PartitionExecResult = partition_set_mod.PartitionExecResult;
 const CrossPartitionQueryHandler = executor_mod.CrossPartitionQueryHandler;
 const QueryContext = executor_mod.QueryContext;
 const ForeignReadRequest = executor_mod.ForeignReadRequest;
 const ForeignRow = executor_mod.ForeignRow;
 const Storage = executor_mod.Storage;
 const Mutation = executor_mod.Mutation;
-const ExecResult = executor_mod.ExecResult;
 const AbortCode = executor_mod.AbortCode;
 const LogEntry = executor_mod.LogEntry;
-const EntryKind = executor_mod.EntryKind;
 const serialize_txn_intent = executor_mod.serialize_txn_intent;
-const ResolvedValue = executor_mod.ResolvedValue;
 
 const TableSchema = storage_mod.TableSchema;
-const ColumnSchema = storage_mod.ColumnSchema;
 const ColumnValue = storage_mod.ColumnValue;
 const KeyRange = storage_mod.KeyRange;
 

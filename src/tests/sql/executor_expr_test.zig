@@ -9,7 +9,6 @@ const eb = sql.executor_bridge;
 
 const ColumnValue = eb.ColumnValue;
 const Storage = eb.Storage;
-const ResolvedValue = eb.ResolvedValue;
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
 

@@ -8,7 +8,6 @@ const testing = std.testing;
 const sequencer_mod = @import("sequencer.zig");
 
 const Sequencer = sequencer_mod.Sequencer;
-const Config = sequencer_mod.Config;
 const PeerAddr = sequencer_mod.PeerAddr;
 
 // ---------------------------------------------------------------------------

@@ -3,7 +3,6 @@ const std = @import("std");
 const testing = std.testing;
 const gateway_mod = @import("gateway.zig");
 const storage_mod = @import("storage.zig");
-const sql_mod = @import("sql.zig");
 
 const Gateway = gateway_mod.Gateway;
 const QueryHash = gateway_mod.QueryHash;

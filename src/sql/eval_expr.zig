@@ -14,7 +14,6 @@ pub const ResolvedValue = executor_mod.ResolvedValue;
 pub const Seq = executor_mod.Seq;
 
 const columnValueToPlanValue = type_conv.columnValueToPlanValue;
-const planValueToColumnValue = type_conv.planValueToColumnValue;
 const castValue = type_conv.castValue;
 
 const Decimal = ast.Decimal;

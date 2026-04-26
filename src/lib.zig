@@ -1,5 +1,4 @@
 const std = @import("std");
-const testing = std.testing;
 
 pub const VERSION = "0.1.0";
 

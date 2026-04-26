@@ -9,7 +9,6 @@ const gateway_mod = @import("gateway.zig");
 const sequencer_mod = @import("sequencer.zig");
 
 const Gateway = gateway_mod.Gateway;
-const ColumnValue = gateway_mod.ColumnValue;
 
 // ---------------------------------------------------------------------------
 // Temp dir helpers

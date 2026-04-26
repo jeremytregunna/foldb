@@ -4,8 +4,6 @@ const testing = std.testing;
 const sequencer_mod = @import("sequencer.zig");
 
 const Sequencer = sequencer_mod.Sequencer;
-const Config = sequencer_mod.Config;
-const NodeId = sequencer_mod.NodeId;
 
 fn makeTempDir(suffix: []const u8) ![]const u8 {
     var ts: std.os.linux.timespec = undefined;

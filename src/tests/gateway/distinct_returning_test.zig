@@ -4,7 +4,6 @@ const testing = std.testing;
 const gateway_mod = @import("gateway.zig");
 
 const Gateway = gateway_mod.Gateway;
-const ColumnValue = gateway_mod.ColumnValue;
 
 fn makeTempDir() ![]const u8 {
     var ts: std.os.linux.timespec = undefined;

@@ -3,7 +3,6 @@
 /// Deletes are soft-tombstoned; graph is rebuilt from base table on recovery.
 const std = @import("std");
 const types = @import("types.zig");
-const vector_codec = @import("vector_codec.zig");
 
 const Seq = types.Seq;
 const TableId = types.TableId;

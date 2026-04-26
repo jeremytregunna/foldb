@@ -19,7 +19,6 @@ const gateway_mod = @import("gateway.zig");
 const storage_mod = @import("storage.zig");
 
 const Gateway = gateway_mod.Gateway;
-const ColumnValue = gateway_mod.ColumnValue;
 const MemoryObjectStore = storage_mod.MemoryObjectStore;
 
 // ---------------------------------------------------------------------------

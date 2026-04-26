@@ -19,7 +19,6 @@ const std = @import("std");
 const testing = std.testing;
 const sim = @import("sim.zig");
 const gateway_mod = @import("gateway.zig");
-const storage_mod = @import("storage.zig");
 const wl = sim.workload;
 
 const Gateway = gateway_mod.Gateway;

@@ -12,15 +12,11 @@ const std = @import("std");
 const testing = std.testing;
 const cdc_mod = @import("cdc.zig");
 const storage_mod = @import("storage.zig");
-const log_mod = @import("log.zig");
 
 const CdcManager = cdc_mod.CdcManager;
 const CdcEvent = cdc_mod.CdcEvent;
-const CdcOperation = cdc_mod.CdcOperation;
-const Seq = log_mod.Seq;
 const Mutation = storage_mod.Mutation;
 const ColumnValue = storage_mod.ColumnValue;
-const EntryKind = log_mod.EntryKind;
 
 // ---------------------------------------------------------------------------
 // Helpers

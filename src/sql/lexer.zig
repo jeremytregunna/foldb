@@ -39,7 +39,7 @@ pub const Lexer = struct {
 
     fn advance(self: *Lexer) LexError!Token {
         self.skipWhitespace();
-        self.skipComments() catch |e| return e;
+        try self.skipComments();
         self.skipWhitespace();
 
         if (self.pos >= self.src.len) {

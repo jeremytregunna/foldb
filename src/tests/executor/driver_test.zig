@@ -9,15 +9,12 @@ const Executor = executor_mod.Executor;
 const ExecutorDriver = executor_mod.ExecutorDriver;
 const Storage = executor_mod.Storage;
 const LogEntry = executor_mod.LogEntry;
-const EntryKind = executor_mod.EntryKind;
 const Mutation = executor_mod.Mutation;
 const QueryContext = executor_mod.QueryContext;
 const serialize_txn_intent = executor_mod.serialize_txn_intent;
-const ResolvedValue = executor_mod.ResolvedValue;
 const Log = log_mod.Log;
 
 const TableSchema = storage_mod.TableSchema;
-const ColumnSchema = storage_mod.ColumnSchema;
 const ColumnValue = storage_mod.ColumnValue;
 
 fn makeSchema() TableSchema {

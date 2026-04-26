@@ -2,7 +2,6 @@ const std = @import("std");
 const testing = std.testing;
 const gateway_mod = @import("gateway.zig");
 const storage_mod = @import("storage.zig");
-const log_mod = @import("log.zig");
 
 const Gateway = gateway_mod.Gateway;
 const ColumnValue = gateway_mod.ColumnValue;

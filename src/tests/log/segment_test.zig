@@ -3,7 +3,6 @@ const std = @import("std");
 const testing = std.testing;
 const log = @import("log.zig");
 
-const crc = log.crc;
 const Seq = log.Seq;
 const NodeId = log.NodeId;
 const LogEntry = log.LogEntry;

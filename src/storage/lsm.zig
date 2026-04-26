@@ -7,10 +7,8 @@ const block_cache_mod = @import("block_cache.zig");
 const object_store_mod = @import("object_store.zig");
 
 const TableSchema = types.TableSchema;
-const TableId = types.TableId;
 const ColumnValue = types.ColumnValue;
 const Mutation = types.Mutation;
-const MutationKind = types.MutationKind;
 const Seq = types.Seq;
 const Row = types.Row;
 const KeyRange = types.KeyRange;

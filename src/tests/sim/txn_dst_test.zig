@@ -15,9 +15,7 @@ const sim = @import("sim.zig");
 const gateway_mod = @import("gateway.zig");
 
 const Gateway = gateway_mod.Gateway;
-const ColumnValue = gateway_mod.ColumnValue;
 const ClockSource = gateway_mod.ClockSource;
-const RandSource = gateway_mod.RandSource;
 
 // ---- VirtualClock → ClockSource adapter ----
 
@@ -180,10 +178,10 @@ fn runTxnDeterminismTest(seed: u64, n_transfers: usize, alloc: std.mem.Allocator
     var rng = std.Random.Xoroshiro128.init(seed ^ 0xFEED_BEEF);
     var i: usize = 0;
     while (i < n_transfers) : (i += 1) {
-        const from = @as(i64, @intCast(rng.random().intRangeAtMost(u32, 1, 5)));
-        const to_raw = @as(i64, @intCast(rng.random().intRangeAtMost(u32, 1, 4)));
+        const from: i64 = @intCast(rng.random().intRangeAtMost(u32, 1, 5));
+        const to_raw: i64 = @intCast(rng.random().intRangeAtMost(u32, 1, 4));
         const to: i64 = if (to_raw >= from) to_raw + 1 else to_raw;
-        const amount: i64 = @as(i64, @intCast(rng.random().intRangeAtMost(u32, 1, 200)));
+        const amount: i64 = @intCast(rng.random().intRangeAtMost(u32, 1, 200));
 
         // Transfers may abort (ASSERT) — that's expected and both gateways see the same abort.
         _ = gw_a.execute(xfer_a, &.{ .{ .int64 = from }, .{ .int64 = to }, .{ .int64 = amount } }, &.{}) catch {};

@@ -20,7 +20,6 @@
 ///   5. Call external I/O                              (reads go through storage parameter)
 ///
 /// These rules also apply transitively to any function called from a handler.
-const std = @import("std");
 
 /// Called at comptime from executor.zig to verify structural invariants.
 pub fn verifyExecutorModule() void {

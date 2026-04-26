@@ -5,7 +5,6 @@ const codec = @import("codec.zig");
 
 const TypedValue = codec.TypedValue;
 const Cursor = codec.Cursor;
-const Decimal = codec.Decimal;
 const Vector = codec.Vector;
 const VectorElementType = codec.VectorElementType;
 const StructField = codec.StructField;

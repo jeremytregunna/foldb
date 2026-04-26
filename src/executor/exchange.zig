@@ -3,7 +3,6 @@
 /// When a TxnIntent touches multiple partitions, each executor declares which rows
 /// it needs from other partitions (ForeignReadRequest), and receives those rows
 /// (ForeignRow) before executing its local slice of the transaction.
-const std = @import("std");
 const types = @import("types.zig");
 const storage_mod = @import("storage.zig");
 

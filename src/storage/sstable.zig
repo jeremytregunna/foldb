@@ -5,12 +5,10 @@ const block_mod = @import("block.zig");
 const crc_mod = @import("crc.zig");
 
 const TableSchema = types.TableSchema;
-const ColumnType = types.ColumnType;
 const ColumnValue = types.ColumnValue;
 const TableId = types.TableId;
 const Seq = types.Seq;
 const Row = types.Row;
-const KeyRange = types.KeyRange;
 const BlockWriter = block_mod.BlockWriter;
 const BlockReader = block_mod.BlockReader;
 

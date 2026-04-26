@@ -5,10 +5,8 @@ const object_store_mod = @import("object_store.zig");
 const types = @import("types.zig");
 
 const LSM = lsm_mod.LSM;
-const SSTableMeta = sstable_mod.SSTableMeta;
 const ObjectStore = object_store_mod.ObjectStore;
 const TableSchema = types.TableSchema;
-const Seq = types.Seq;
 
 /// Callback for writing a snapshot_marker entry to a log.
 /// Implemented by callers who have a *Log reference.

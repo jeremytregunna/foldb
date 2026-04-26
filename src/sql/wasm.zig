@@ -49,11 +49,6 @@ const Section = enum(u8) {
 };
 
 /// Opcodes forbidden for determinism.
-const FORBIDDEN_OPCODES = [_]u8{
-    0x00, // unreachable — allowed, but marks a trap
-    // Thread-related opcodes (0xFE prefix):
-    // We reject any 0xFE-prefixed instruction.
-};
 
 /// Allowed host import modules.
 const ALLOWED_IMPORT_MODULES = [_][]const u8{
@@ -153,7 +148,7 @@ pub fn validate(bytes: []const u8, alloc: std.mem.Allocator) WasmError!WasmModul
         const section_data = bytes[pos .. pos + section_len];
         pos += section_len;
 
-        const section = @as(Section, @enumFromInt(section_id));
+        const section: Section = @enumFromInt(section_id);
         switch (section) {
             .type => types = try parseTypeSection(section_data, alloc),
             .import => try validateImportSection(section_data),

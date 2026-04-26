@@ -4,11 +4,9 @@ const std = @import("std");
 const testing = std.testing;
 const executor_mod = @import("executor.zig");
 const storage_mod = @import("storage.zig");
-const log_mod = @import("log.zig");
 
 const Executor = executor_mod.Executor;
 const QueryContext = executor_mod.QueryContext;
-const ResolvedValue = executor_mod.ResolvedValue;
 const Mutation = executor_mod.Mutation;
 const Storage = executor_mod.Storage;
 const LogEntry = executor_mod.LogEntry;

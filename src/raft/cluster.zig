@@ -10,14 +10,12 @@ const std = @import("std");
 const log_mod = @import("log.zig");
 const node_mod = @import("node.zig");
 const transport_mod = @import("transport.zig");
-const rpc = @import("rpc.zig");
 const persistent = @import("persistent_state.zig");
 const sim_mod = @import("sim.zig");
 
 const assert = std.debug.assert;
 
 const Log = log_mod.Log;
-const LogEntry = log_mod.LogEntry;
 const Seq = log_mod.Seq;
 const NodeId = log_mod.NodeId;
 pub const RaftNode = node_mod.RaftNode;
@@ -26,8 +24,6 @@ pub const Config = node_mod.Config;
 pub const Output = node_mod.Output;
 pub const ConfigChangeOp = node_mod.ConfigChangeOp;
 const InProcessBus = transport_mod.InProcessBus;
-const Envelope = transport_mod.Envelope;
-const AppendEntriesArgs = rpc.AppendEntriesArgs;
 
 pub const NetworkSim = sim_mod.NetworkSim;
 pub const NetworkConfig = sim_mod.NetworkConfig;

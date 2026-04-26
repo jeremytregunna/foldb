@@ -2,7 +2,6 @@ const std = @import("std");
 const testing = std.testing;
 const sim = @import("sim.zig");
 const NetworkSim = sim.NetworkSim;
-const NetworkConfig = sim.NetworkConfig;
 
 test "NetworkSim: drop_prob=0.0 never drops" {
     var net = NetworkSim.init(1, .{ .drop_prob = 0.0 });

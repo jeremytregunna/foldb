@@ -5,7 +5,6 @@
 ///          INSERT/UPDATE/DELETE mutations, and ASSERT constraints.
 const std = @import("std");
 const plan_mod = @import("plan.zig");
-const ast = @import("ast.zig");
 const schema_mod = @import("schema.zig");
 const registry_mod = @import("registry.zig");
 
@@ -17,7 +16,6 @@ const cdc_mod = @import("cdc.zig");
 
 // Sub-modules split from this file
 const type_conv = @import("type_conv.zig");
-const agg_helpers = @import("agg_helpers.zig");
 const params_codec = @import("params_codec.zig");
 const key_encode = @import("key_encode.zig");
 const eval_expr_mod = @import("eval_expr.zig");
@@ -25,19 +23,12 @@ const window_exec_mod = @import("window_exec.zig");
 const agg_accum_mod = @import("agg_accum.zig");
 
 // Aliases so internal call sites remain unchanged
-const columnValueToPlanValue = type_conv.columnValueToPlanValue;
 const planValueToColumnValue = type_conv.planValueToColumnValue;
 const planValueToTypedColumnValue = type_conv.planValueToTypedColumnValue;
-const castValue = type_conv.castValue;
 const defaultValue = type_conv.defaultValue;
 const aggKeyEquals = type_conv.aggKeyEquals;
-const dupePlanValue = agg_helpers.dupePlanValue;
-const freePlanValue = agg_helpers.freePlanValue;
-const serializeArrayAgg = agg_helpers.serializeArrayAgg;
-const buildStringAgg = agg_helpers.buildStringAgg;
 const buildPrimaryKey = key_encode.buildPrimaryKey;
 const buildForeignKeyLookup = key_encode.buildForeignKeyLookup;
-const encodeKeyComponent = key_encode.encodeKeyComponent;
 const pkColumnIds = key_encode.pkColumnIds;
 const buildVirtualRow = key_encode.buildVirtualRow;
 const serializeRowKey = key_encode.serializeRowKey;

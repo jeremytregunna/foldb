@@ -8,7 +8,6 @@ const NodeId = log.NodeId;
 const TxnIntent = log.TxnIntent;
 const LogEntry = log.LogEntry;
 const Log = log.Log;
-const LogError = log.LogError;
 
 fn toNullZ(allocator: std.mem.Allocator, path: []const u8) ![:0]u8 {
     const buf = try allocator.allocSentinel(u8, path.len, 0);

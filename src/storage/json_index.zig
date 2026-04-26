@@ -8,10 +8,7 @@ const json_path_mod = @import("json_path.zig");
 const TableId = types.TableId;
 const Seq = types.Seq;
 const Mutation = types.Mutation;
-const MutationKind = types.MutationKind;
-const ColumnValue = types.ColumnValue;
 const KeyRange = types.KeyRange;
-const Row = types.Row;
 
 pub const PkList = struct {
     pks: []const []u8,

@@ -10,7 +10,6 @@ const testing = std.testing;
 const gateway_mod = @import("gateway.zig");
 
 const Gateway = gateway_mod.Gateway;
-const ColumnValue = gateway_mod.ColumnValue;
 
 // ---- Temp dir helpers ----
 

@@ -54,7 +54,7 @@ pub const CanonWriter = struct {
     }
 
     fn writeF64(self: *CanonWriter, v: f64) !void {
-        const bits = @as(u64, @bitCast(v));
+        const bits: u64 = @bitCast(v);
         var bytes: [8]u8 = undefined;
         std.mem.writeInt(u64, &bytes, bits, .little);
         try self.buf.appendSlice(self.alloc, &bytes);

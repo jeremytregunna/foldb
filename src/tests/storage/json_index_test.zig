@@ -4,7 +4,6 @@ const storage = @import("storage.zig");
 const Storage = storage.Storage;
 const Mutation = storage.Mutation;
 const ColumnValue = storage.ColumnValue;
-const KeyRange = storage.KeyRange;
 
 fn makeTempDir(alloc: std.mem.Allocator) ![]u8 {
     var ts: std.os.linux.timespec = undefined;

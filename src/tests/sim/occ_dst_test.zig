@@ -13,7 +13,6 @@ const testing = std.testing;
 const sim = @import("sim.zig");
 const executor_mod = @import("executor.zig");
 const storage_mod = @import("storage.zig");
-const log_mod = @import("log.zig");
 
 const Executor = executor_mod.Executor;
 const ExecResult = executor_mod.ExecResult;

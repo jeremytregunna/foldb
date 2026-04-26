@@ -10,12 +10,10 @@ const eb = sql.executor_bridge;
 const Storage = eb.Storage;
 const ColumnValue = eb.ColumnValue;
 const LogEntry = eb.LogEntry;
-const ResolvedValue = eb.ResolvedValue;
 
 // Re-exported from executor_mod through eb
 const executor_mod = @import("executor.zig");
 const serialize_txn_intent = executor_mod.serialize_txn_intent;
-const storage_mod = @import("storage.zig");
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
 

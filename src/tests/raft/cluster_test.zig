@@ -5,7 +5,6 @@
 const std = @import("std");
 const testing = std.testing;
 const raft = @import("raft.zig");
-const log_mod = @import("log.zig");
 
 const SimCluster3 = raft.SimCluster(3);
 const DynSimCluster = raft.DynSimCluster;

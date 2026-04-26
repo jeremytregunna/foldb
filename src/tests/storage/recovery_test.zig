@@ -14,7 +14,6 @@ const Storage = storage_mod.Storage;
 const Executor = executor_mod.Executor;
 const Log = log_mod.Log;
 const LogEntry = log_mod.LogEntry;
-const TxnIntent = log_mod.TxnIntent;
 
 const TABLE_ID: u32 = 7;
 

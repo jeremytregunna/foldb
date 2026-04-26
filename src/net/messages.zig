@@ -1,7 +1,6 @@
 /// Per-kind message payload encode/decode for the FoldDB wire protocol.
 const std = @import("std");
 const codec = @import("codec.zig");
-const frame = @import("frame.zig");
 
 const assert = std.debug.assert;
 

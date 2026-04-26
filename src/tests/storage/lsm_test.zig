@@ -3,7 +3,6 @@ const testing = std.testing;
 const storage = @import("storage.zig");
 
 const TableSchema = storage.TableSchema;
-const ColumnSchema = storage.ColumnSchema;
 const ColumnValue = storage.ColumnValue;
 const Mutation = storage.Mutation;
 const Storage = storage.Storage;

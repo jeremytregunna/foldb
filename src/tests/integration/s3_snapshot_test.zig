@@ -25,7 +25,6 @@ const gateway_mod = @import("gateway.zig");
 const storage_mod = @import("storage.zig");
 
 const Gateway = gateway_mod.Gateway;
-const ColumnValue = gateway_mod.ColumnValue;
 
 // ---------------------------------------------------------------------------
 // Filesystem helpers (mirrors snapshot_dst_test.zig)

@@ -22,7 +22,6 @@ const Log = log_mod.Log;
 const LogEntry = log_mod.LogEntry;
 const Seq = log_mod.Seq;
 const NodeId = log_mod.NodeId;
-const Epoch = log_mod.Epoch;
 pub const Term = types.Term;
 pub const RaftRole = types.RaftRole;
 const AppendEntriesArgs = rpc.AppendEntriesArgs;

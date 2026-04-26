@@ -14,7 +14,6 @@ const sim = @import("sim.zig");
 const gateway_mod = @import("gateway.zig");
 
 const Gateway = gateway_mod.Gateway;
-const ColumnValue = gateway_mod.ColumnValue;
 const ClockSource = gateway_mod.ClockSource;
 
 // ---- VirtualClock adapter ----

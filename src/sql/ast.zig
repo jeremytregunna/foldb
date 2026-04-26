@@ -1,5 +1,4 @@
 /// SQL AST types. All nodes are arena-allocated; call arena.deinit() to free.
-const std = @import("std");
 const token_mod = @import("token.zig");
 const storage_mod = @import("storage.zig");
 pub const Span = token_mod.Span;
