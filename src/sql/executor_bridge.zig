@@ -824,6 +824,7 @@ pub const SqlExecutor = struct {
                     }
                     try self.checkForeignKeys(tbl, ins.column_ids, values, ctx);
                     const key = try buildPrimaryKey(tbl, ins.column_ids, values, ctx.alloc);
+                    errdefer ctx.alloc.free(key);
                     try self.appendInsertMutation(ins, tbl, key, values, ctx, mutations, returning_rows);
                 }
             },
@@ -849,6 +850,7 @@ pub const SqlExecutor = struct {
                     }
                     try self.checkForeignKeys(tbl, ins.column_ids, values, ctx);
                     const key = try buildPrimaryKey(tbl, ins.column_ids, values, ctx.alloc);
+                    errdefer ctx.alloc.free(key);
                     try self.appendInsertMutation(ins, tbl, key, values, ctx, mutations, returning_rows);
                 }
             },
@@ -946,13 +948,11 @@ pub const SqlExecutor = struct {
 
         // No conflict (or no on_conflict clause) — regular insert.
         // For plain INSERT (no ON CONFLICT), enforce primary-key uniqueness.
+        // Cleanup of key+values on error is handled by the errdefers in executeInsert.
         if (ins.on_conflict == null) {
             var existing = self.storage.get(ins.table_id, key, ctx.seq -| 1) catch return error.StorageReadError;
             if (existing) |*ex| {
                 ex.deinit(ctx.alloc);
-                ctx.alloc.free(key);
-                for (values) |v| v.freeIfOwned(ctx.alloc);
-                ctx.alloc.free(values);
                 return error.ConstraintViolation;
             }
         }
