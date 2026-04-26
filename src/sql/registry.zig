@@ -30,6 +30,10 @@ pub const RegisteredQuery = struct {
     nondet_count: u32,
     /// Schema version at registration time (for invalidation on DDL changes).
     schema_seq: u64,
+    /// Output column names for SELECT queries, pre-computed at registration time using
+    /// the schema as of registration. Empty for non-SELECT queries and DESCRIBE TABLE.
+    /// Owned by the arena — freed automatically with it.
+    output_column_names: []const []const u8,
     /// Arena that owns all AST/plan allocations for this query.
     arena: std.heap.ArenaAllocator,
 
@@ -138,6 +142,13 @@ pub const SqlRegistry = struct {
             };
         };
 
+        // Pre-compute output column names from the plan and current schema. Stored in arena
+        // so they're freed with the RegisteredQuery without any extra bookkeeping.
+        const col_names: []const []const u8 = if (exec_plan.stmts.len > 0 and exec_plan.stmts[0] == .select)
+            extractPlanColumnNames(exec_plan.stmts[0].select, self.schema, arena_alloc) catch &.{}
+        else
+            &.{};
+
         const rq = self.alloc.create(RegisteredQuery) catch |e| {
             arena.deinit();
             return e;
@@ -149,6 +160,7 @@ pub const SqlRegistry = struct {
             .param_types = param_types,
             .nondet_count = exec_plan.nondet_count,
             .schema_seq = self.schema_seq,
+            .output_column_names = col_names,
             .arena = arena,
         };
 
@@ -231,6 +243,67 @@ pub const SqlRegistry = struct {
         return module.hash;
     }
 };
+
+/// Compute the canonical hash of a SQL string without storing it in the registry.
+/// Safe to call from any thread — pure computation with no shared state.
+pub fn computeQueryHash(sql: []const u8, alloc: std.mem.Allocator) !QueryHash {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+    const sql_copy = try arena_alloc.dupe(u8, sql);
+    const parsed = try parser_mod.parse(sql_copy, arena_alloc);
+    return canon.canonicalize(parsed, arena_alloc);
+}
+
+/// Extract output column names from a SELECT plan node using the schema at registration time.
+/// Returns an arena-allocated slice; caller must ensure the arena outlives the slice.
+fn extractPlanColumnNames(
+    node: *const plan_mod.PlanNode,
+    schema: *const schema_mod.SchemaRegistry,
+    alloc: std.mem.Allocator,
+) ![]const []const u8 {
+    switch (node.*) {
+        .project => |p| {
+            const names = try alloc.alloc([]const u8, p.exprs.len);
+            for (p.exprs, 0..) |item, i| names[i] = try alloc.dupe(u8, item.alias);
+            return names;
+        },
+        .scan => |s| {
+            const tbl = schema.getTableById(s.table_id) orelse return &.{};
+            const names = try alloc.alloc([]const u8, s.columns.len);
+            for (s.columns, 0..) |col_id, i| {
+                const col = tbl.columnById(col_id);
+                names[i] = if (col) |c| try alloc.dupe(u8, c.name)
+                            else try std.fmt.allocPrint(alloc, "col{d}", .{i});
+            }
+            return names;
+        },
+        .ann_scan => |s| {
+            const tbl = schema.getTableById(s.table_id) orelse return &.{};
+            const names = try alloc.alloc([]const u8, s.columns.len);
+            for (s.columns, 0..) |col_id, i| {
+                const col = tbl.columnById(col_id);
+                names[i] = if (col) |c| try alloc.dupe(u8, c.name)
+                            else try std.fmt.allocPrint(alloc, "col{d}", .{i});
+            }
+            return names;
+        },
+        .pk_lookup => |pk| {
+            const tbl = schema.getTableById(pk.table_id) orelse return &.{};
+            const names = try alloc.alloc([]const u8, pk.columns.len);
+            for (pk.columns, 0..) |col_id, i| {
+                const col = tbl.columnById(col_id);
+                names[i] = if (col) |c| try alloc.dupe(u8, c.name)
+                            else try std.fmt.allocPrint(alloc, "col{d}", .{i});
+            }
+            return names;
+        },
+        .filter => |f| return extractPlanColumnNames(f.input, schema, alloc),
+        .sort => |s| return extractPlanColumnNames(s.input, schema, alloc),
+        .limit => |l| return extractPlanColumnNames(l.input, schema, alloc),
+        else => return &.{},
+    }
+}
 
 fn extractParamTypes(parsed: ast.ParsedQuery, alloc: std.mem.Allocator) ![]const ast.SqlType {
     // If there's a TRANSACTION block, params come from it

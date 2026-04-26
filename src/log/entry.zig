@@ -376,6 +376,34 @@ pub const LogEntry = struct {
         return .{ .header = log_header, .payload = payload };
     }
 
+    /// Deserialize using pread with an explicit offset. Advances *offset by the bytes consumed.
+    /// Safe for concurrent use with write() on the same fd (pread does not affect the fd's position).
+    pub fn deserialize_pread(fd: std.posix.fd_t, offset: *i64, alloc: std.mem.Allocator) !LogEntry {
+        var header_buf: [LogEntryHeader.header_size]u8 = undefined;
+        const n = std.os.linux.pread(
+            @intCast(fd), &header_buf, LogEntryHeader.header_size, offset.*,
+        );
+        if (n != LogEntryHeader.header_size) return error.EndOfStream;
+        offset.* += @intCast(n);
+
+        const log_header = try LogEntryHeader.deserialize_from(&header_buf);
+        if (log_header.payload_len > payload_len_max) return error.InvalidPayloadLength;
+
+        const payload = try alloc.alloc(u8, log_header.payload_len);
+        errdefer alloc.free(payload);
+
+        if (log_header.payload_len > 0) {
+            const pn = std.os.linux.pread(
+                @intCast(fd), payload.ptr, log_header.payload_len, offset.*,
+            );
+            if (pn != log_header.payload_len) return error.EndOfStream;
+            offset.* += @intCast(pn);
+        }
+
+        std.debug.assert(payload.len == log_header.payload_len);
+        return .{ .header = log_header, .payload = payload };
+    }
+
     pub fn verify_crc(self: LogEntry) bool {
         return crc.crc32c(self.payload) == self.header.payload_crc;
     }

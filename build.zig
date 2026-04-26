@@ -512,6 +512,18 @@ pub fn build(b: *std.Build) void {
     sql_module.addImport("log.zig", log_module);
     sql_module.addImport("cdc.zig", cdc_module);
 
+    // FoldExecutor module — SQL-aware OS-thread executor wrapping SqlExecutor.
+    const fold_executor_module = b.createModule(.{
+        .root_source_file = b.path("src/executor/fold_executor.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    fold_executor_module.addImport("sql.zig", sql_module);
+    fold_executor_module.addImport("executor_bridge.zig", sql_module);
+    fold_executor_module.addImport("storage.zig", storage_module);
+    fold_executor_module.addImport("log.zig", log_module);
+    fold_executor_module.addImport("cdc.zig", cdc_module);
+
     // SQL lexer tests
     const sql_lexer_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/sql/lexer_test.zig"),
@@ -715,6 +727,7 @@ pub fn build(b: *std.Build) void {
     gateway_module.addImport("sql.zig", sql_module);
     gateway_module.addImport("storage.zig", storage_module);
     gateway_module.addImport("executor.zig", executor_module);
+    gateway_module.addImport("fold_executor.zig", fold_executor_module);
     gateway_module.addImport("log.zig", log_module);
     gateway_module.addImport("sequencer.zig", sequencer_module);
     gateway_module.addImport("registry.zig", sql_module);

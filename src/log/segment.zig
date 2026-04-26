@@ -308,7 +308,9 @@ pub const Segment = struct {
         max: usize,
         alloc: std.mem.Allocator,
     ) ![]LogEntry {
-        _ = std.os.linux.lseek(@intCast(self.fd), @intCast(header_size), std.os.linux.SEEK.SET);
+        // Use pread with an explicit offset so concurrent appends (which use write()
+        // and advance the fd's shared position) cannot corrupt our read position.
+        var offset: i64 = @intCast(header_size);
 
         var result: std.ArrayList(LogEntry) = .empty;
         errdefer {
@@ -318,7 +320,7 @@ pub const Segment = struct {
 
         var read_count: u32 = 0;
         while (read_count < self.entry_count and result.items.len < max) {
-            const entry = LogEntry.deserialize_fd(self.fd, alloc) catch break;
+            const entry = LogEntry.deserialize_pread(self.fd, &offset, alloc) catch break;
             read_count += 1;
 
             if (entry.header.seq < from_seq) {

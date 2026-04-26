@@ -365,6 +365,11 @@ pub const Sequencer = struct {
                                 const le = LogEntry.create(oe.seq, 0, dec.entry_kind, dec.payload);
                                 try pl.append_entry_at(le);
                             }
+                            // Notify after all entries in the batch are written, so FoldExecutor
+                            // does not wake mid-batch and race with concurrent writes.
+                            for (dec.entries) |oe| {
+                                self.partition_logs[oe.partition].notifyAppend();
+                            }
                         }
                         self.last_applied = idx;
                     }

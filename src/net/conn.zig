@@ -228,7 +228,6 @@ pub const Conn = struct {
         // protocol error is detected. Each iteration reads one complete frame from
         // the wire, so progress is guaranteed — we never spin without I/O.
         while (true) {
-            self.gw.applyNewEntries() catch {};
             const hdr = frame.readHeader(&self.reader.interface) catch return;
             if (hdr.payload_len > self.cap()) {
                 self.sendFatalError(.frame_too_large, "frame exceeds cap");

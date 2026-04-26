@@ -5,6 +5,7 @@ const errors = @import("errors.zig");
 const sql_mod = @import("sql.zig");
 const storage_mod = @import("storage.zig");
 const executor_mod = @import("executor.zig");
+const fold_executor_mod = @import("fold_executor.zig");
 const sequencer_mod = @import("sequencer.zig");
 const log_mod = @import("log.zig");
 const observability_mod = @import("observability.zig");
@@ -15,7 +16,7 @@ const snapshot_hooks_mod = @import("snapshot_hooks.zig");
 
 pub const QueryHash = sql_mod.QueryHash;
 pub const Seq = @import("types.zig").Seq;
-pub const ResolvedValue = @import("types.zig").ResolvedValue;
+pub const ResolvedValue = fold_executor_mod.ResolvedValue;
 
 // Re-export CDC types for use by the net layer
 pub const CdcSubscription = cdc_mod.CdcSubscription;
@@ -64,15 +65,12 @@ fn onSnapshotComplete(ptr: *anyopaque, snapshot_seq: sequencer_mod.Seq) void {
 /// The main Gateway struct.
 /// Always heap-allocated via `init`; internal pointers remain stable.
 pub const Gateway = struct {
-    schema: sql_mod.SchemaRegistry,
-    registry: sql_mod.SqlRegistry,
-    sql_exec: sql_mod.SqlExecutor,
+    /// FoldExecutor owns schema, registry, sql_exec and runs the apply loop on its own thread.
+    fold_executor: *fold_executor_mod.FoldExecutor,
     /// One Storage per data partition. Heap-allocated; owned by this gateway.
     storages: []*storage_mod.Storage,
-    /// Routing wrapper over storages — used by sql_exec and reconnaissance.
+    /// Routing wrapper over storages — used by fold_executor and reconnaissance.
     partitioned: storage_mod.PartitionedStorage,
-    /// Arena that owns storage-schema column slices allocated during DDL.
-    storage_schema_arena: std.heap.ArenaAllocator,
     nondet_resolver: nondet_mod.NondetResolver,
     sequencer: sequencer_mod.Sequencer,
     /// CDC event fan-out for wire-protocol subscriptions.
@@ -146,7 +144,6 @@ pub const Gateway = struct {
         errdefer alloc.destroy(gw);
 
         gw.alloc = alloc;
-        gw.storage_schema_arena = std.heap.ArenaAllocator.init(alloc);
 
         // Ensure the top-level storage directory exists before creating partition subdirs.
         storage_mod.mkdirAll(storage_dir);
@@ -217,9 +214,6 @@ pub const Gateway = struct {
         }
 
         gw.io = opts.io;
-        gw.schema = sql_mod.SchemaRegistry.init(alloc);
-        gw.registry = sql_mod.SqlRegistry.init(alloc, &gw.schema);
-        gw.sql_exec = sql_mod.SqlExecutor.init(&gw.partitioned, &gw.registry, &gw.schema, alloc);
         gw.nondet_resolver = nondet_mod.NondetResolver.init(opts.clock, opts.rand);
 
         const seq_cfg = sequencer_mod.Config{
@@ -236,7 +230,18 @@ pub const Gateway = struct {
         if (!opts.defer_sequencer_start) try gw.sequencer.start();
 
         gw.cdc = try cdc_mod.CdcManager.init(alloc);
-        gw.sql_exec.initCdc(&gw.cdc);
+
+        // Create FoldExecutor — owns schema/registry/sql_exec; borrows partitioned and logs.
+        gw.fold_executor = try fold_executor_mod.FoldExecutor.init(
+            &gw.partitioned,
+            &gw.cdc,
+            gw.sequencer.partition_logs,
+            alloc,
+        );
+        errdefer {
+            gw.fold_executor.stop();
+            gw.fold_executor.deinit();
+        }
 
         // Wire snapshot scheduling if an object store is available and interval is set.
         const snap_obj: ?storage_mod.ObjectStore = blk: {
@@ -279,7 +284,10 @@ pub const Gateway = struct {
         // Replay log to rebuild schema and storage state after restart.
         // Pass 1 reconstructs DDL/query registry; pass 2 replays DML into storage,
         // recovering rows that were in the memtable and not flushed before a crash.
-        try gw.replayFromLog();
+        try gw.fold_executor.replayFromLog();
+
+        // Start the FoldExecutor OS thread — continuously applies committed entries.
+        try gw.fold_executor.start();
 
         // Derive a stable client_id from the storage path hash
         gw.client_id = blk: {
@@ -297,11 +305,9 @@ pub const Gateway = struct {
     }
 
     pub fn deinit(self: *Gateway) void {
-        self.cdc.deinit();
-        self.sequencer.deinit();
-        self.registry.deinit();
-        self.schema.deinit();
-        // Flush memtables to SSTables before teardown so data survives restart.
+        self.fold_executor.stop();
+        // Flush memtables BEFORE freeing fold_executor's storage_schema_arena.
+        // Block.append() dereferences schema.columns; freeing the arena first causes a segfault.
         for (self.storages) |s| {
             const dir = s.dir;
             s.flushAll() catch |err| std.log.warn("flushAll failed during deinit: {}", .{err});
@@ -310,7 +316,9 @@ pub const Gateway = struct {
             self.alloc.free(dir);
         }
         self.alloc.free(self.storages);
-        self.storage_schema_arena.deinit();
+        self.fold_executor.deinit();
+        self.cdc.deinit();
+        self.sequencer.deinit();
         if (self.s3_store) |s3| self.alloc.destroy(s3);
         if (self.snapshot_writer_ctxs.len > 0) self.alloc.free(self.snapshot_writer_ctxs);
         self.alloc.destroy(self);
@@ -331,15 +339,8 @@ pub const Gateway = struct {
     }
 
     /// Returns true if the registered query is a pure SELECT (no mutations).
-    pub fn isSelectQuery(self: *const Gateway, hash: QueryHash) bool {
-        const rq = self.registry.lookup(hash) orelse return false;
-        for (rq.plan.stmts) |stmt| {
-            switch (stmt) {
-                .select, .describe_table => {},
-                else => return false,
-            }
-        }
-        return true;
+    pub fn isSelectQuery(self: *Gateway, hash: QueryHash) bool {
+        return self.fold_executor.isSelectQuery(hash);
     }
 
     /// Register a SQL query and return its hash with schema version.
@@ -347,9 +348,10 @@ pub const Gateway = struct {
     /// Routes through Raft so all nodes replicate the schema change.
     pub fn register(self: *Gateway, sql: []const u8) !RegisterResult {
         self.error_detail_len = 0;
-        // Register locally to compute the hash (idempotent — safe to call before commit).
-        const hash = self.registry.register(sql) catch |e| {
-            // On parse error, re-parse directly to surface the offending token.
+        // Validate SQL against the current schema before committing to Raft.
+        // registerLocal does full parse+typecheck+plan — returns ColumnNotFound etc.
+        // if the query references columns/tables that don't exist in the current schema.
+        const hash = self.fold_executor.registerLocal(sql) catch |e| {
             if (e == error.UnexpectedToken or e == error.UnsupportedSyntax) {
                 var arena = std.heap.ArenaAllocator.init(self.alloc);
                 defer arena.deinit();
@@ -372,20 +374,19 @@ pub const Gateway = struct {
             return e;
         };
         self.metrics.queries_registered.inc();
-        // Replicate via Raft — all nodes will apply this schema_change from the
-        // committed Raft entry and register the query in their local registries.
         self.client_seq += 1;
         var pending: sequencer_mod.PendingSubmit = undefined;
-        _ = try self.sequencer.submitBytes(
+        const result = try self.sequencer.submitBytes(
             &pending,
             sql,
             self.client_id,
             self.client_seq,
             .schema_change,
         ).awaitCommit(self.io);
+        try self.fold_executor.wait_for(result.seq, self.io);
         return .{
             .hash = hash,
-            .schema_version = self.registry.schema_seq,
+            .schema_version = self.fold_executor.schemaVersion(),
         };
     }
 
@@ -410,7 +411,7 @@ pub const Gateway = struct {
         buf: *std.ArrayList(u8),
     ) !void {
         var hints = try recon_mod.reconnaissanceScan(
-            plan, &self.partitioned, params, &self.schema,
+            plan, &self.partitioned, params, &self.fold_executor.schema,
             recon_seq, self.partition_count, self.recon_strategy, self.alloc,
         );
         defer hints.deinit();
@@ -421,8 +422,8 @@ pub const Gateway = struct {
         );
     }
 
-    /// Submit serialized intent bytes to the sequencer, drain the log, and dispatch
-    /// the executor result. Returns .done on success or .retry with the conflict seq.
+    /// Submit serialized intent bytes to the sequencer, wait for FoldExecutor to apply,
+    /// and dispatch the executor result. Returns .done on success or .retry with conflict seq.
     fn submitAndDrain(self: *Gateway, intent_bytes: []const u8, op_seq: u64) !SubmitOutcome {
         var pending: sequencer_mod.PendingSubmit = undefined;
         const handle = self.sequencer.submitBytes(
@@ -430,15 +431,10 @@ pub const Gateway = struct {
         );
         const result = try handle.awaitCommit(self.io);
 
-        // Drain committed log entries up to result.seq. This runs on the gateway thread
-        // after awaitCommit() guarantees the entry is durable — commit precedes execution.
-        // When a background apply thread is running (follower mode), waitFor() returns
-        // without draining here.
-        while (self.sql_exec.current_seq() < result.seq) {
-            try self.applyNewEntries();
-        }
-        const exec_result = self.sql_exec.waitFor(result.seq);
-        const exec_detail = self.sql_exec.lastDetail();
+        // Wait for FoldExecutor to process up to result.seq; suspends the fiber.
+        try self.fold_executor.wait_for(result.seq, self.io);
+        const exec_result = self.fold_executor.waitFor(result.seq);
+        const exec_detail = self.fold_executor.lastExecDetail();
         if (exec_detail.len > 0) self.setDetail("{s}", .{exec_detail});
 
         switch (exec_result) {
@@ -473,7 +469,7 @@ pub const Gateway = struct {
         params: []const ColumnValue,
         nondet: []const ResolvedValue,
     ) !ExecResult {
-        const rq = self.registry.lookup(hash) orelse return error.QueryNotFound;
+        const rq = self.fold_executor.lookupQuery(hash) orelse return error.QueryNotFound;
         self.metrics.queries_executed.inc();
 
         // Assign a stable client_seq for this logical operation ONCE, before any retry.
@@ -494,7 +490,7 @@ pub const Gateway = struct {
 
         // On retry, re-run reconnaissance at the seq the executor assigned to the
         // conflicting entry so hints reflect state as of that point.
-        var hint_seq: Seq = self.sql_exec.current_seq();
+        var hint_seq: Seq = self.fold_executor.current_seq();
 
         const max_retries: usize = 3;
         std.debug.assert(max_retries > 0);
@@ -526,67 +522,7 @@ pub const Gateway = struct {
         params: []const ColumnValue,
         nondet: []const ResolvedValue,
     ) !ResultSet {
-        const rq = self.registry.lookup(hash) orelse return error.QueryNotFound;
-
-        if (rq.plan.stmts.len > 0 and rq.plan.stmts[0] == .describe_table) {
-            return self.buildDescribeResult(rq.plan.stmts[0].describe_table);
-        }
-
-        const decoded_params = try decodeParams(params, rq.param_types, self.alloc);
-        defer self.alloc.free(decoded_params);
-
-        var rows = try self.sql_exec.querySelect(
-            rq.plan,
-            decoded_params,
-            nondet,
-            self.sql_exec.current_seq() + 1,
-            self.alloc,
-        );
-        const rows_slice = try rows.toOwnedSlice(self.alloc);
-        const columns_slice = if (rq.plan.stmts.len > 0 and rq.plan.stmts[0] == .select) blk: {
-            break :blk try extractColumnNames(rq.plan.stmts[0].select, &self.schema, self.alloc);
-        } else try self.alloc.alloc([]const u8, 0);
-
-        return ResultSet{
-            .columns = columns_slice,
-            .rows = rows_slice,
-            .alloc = self.alloc,
-        };
-    }
-
-    fn buildDescribeResult(self: *Gateway, table_name: []const u8) !ResultSet {
-        std.debug.assert(table_name.len > 0);
-        const tbl = self.schema.getTable(table_name) orelse return error.TableNotFound;
-        std.debug.assert(tbl.columns.len <= std.math.maxInt(u32));
-
-        const col_names = [_][]const u8{ "column", "type", "nullable", "primary_key" };
-        const columns = try self.alloc.alloc([]const u8, col_names.len);
-        errdefer self.alloc.free(columns);
-        for (col_names, 0..) |n, i| columns[i] = try self.alloc.dupe(u8, n);
-
-        const rows = try self.alloc.alloc([]const ?ColumnValue, tbl.columns.len);
-        errdefer self.alloc.free(rows);
-        var built: usize = 0;
-        errdefer for (rows[0..built]) |r| {
-            for (r) |v| if (v) |cv| cv.freeIfOwned(self.alloc);
-            self.alloc.free(r);
-        };
-
-        for (tbl.columns, 0..) |col, i| {
-            var is_pk = false;
-            for (tbl.primary_key) |pk_id| {
-                if (pk_id == col.id) { is_pk = true; break; }
-            }
-            const type_str = try sqlTypeStr(col.typ, self.alloc);
-            const row = try self.alloc.alloc(?ColumnValue, 4);
-            row[0] = .{ .string = try self.alloc.dupe(u8, col.name) };
-            row[1] = .{ .string = type_str };
-            row[2] = .{ .string = try self.alloc.dupe(u8, if (col.nullable == .nullable) "YES" else "NO") };
-            row[3] = .{ .string = try self.alloc.dupe(u8, if (is_pk) "YES" else "NO") };
-            rows[i] = row;
-            built += 1;
-        }
-        return ResultSet{ .columns = columns, .rows = rows, .alloc = self.alloc };
+        return self.fold_executor.querySelect(hash, params, nondet, self.alloc);
     }
 
     /// Read data at a specific sequence number (historical read).
@@ -597,155 +533,9 @@ pub const Gateway = struct {
         params: []const ColumnValue,
         seq: Seq,
     ) !ResultSet {
-        const rq = self.registry.lookup(hash) orelse return error.QueryNotFound;
-
-        const decoded_params = try decodeParams(params, rq.param_types, self.alloc);
-        defer self.alloc.free(decoded_params);
-
-        var rows = try self.sql_exec.querySelect(
-            rq.plan,
-            decoded_params,
-            &.{},
-            seq + 1,
-            self.alloc,
-        );
-        const rows_slice = try rows.toOwnedSlice(self.alloc);
-        const columns_slice = if (rq.plan.stmts.len > 0 and rq.plan.stmts[0] == .select) blk: {
-            break :blk try extractColumnNames(rq.plan.stmts[0].select, &self.schema, self.alloc);
-        } else try self.alloc.alloc([]const u8, 0);
-
-        return ResultSet{
-            .columns = columns_slice,
-            .rows = rows_slice,
-            .alloc = self.alloc,
-        };
+        return self.fold_executor.readAt(hash, params, seq, self.alloc);
     }
 
-    /// Replay partition log 0 in two passes to rebuild full gateway state after restart.
-    // This is the domain boundary — entries are read from the durable partition log whose
-    // payloads were validated at write time. Errors such as already-exists or parse failures
-    // are silently dropped: idempotent re-registration on restart is expected and correct.
-    //
-    // Pass 1 (schema): rebuild DDL and query registry so all query hashes are known.
-    // Pass 2 (DML): replay txn_intent entries through SqlExecutor to rebuild storage state,
-    //   including rows that were in the memtable and not yet flushed to SSTables at crash time.
-    fn replayFromLog(self: *Gateway) !void {
-        const batch = 256;
-
-        // Pass 1: schema — DDL and query registration only.
-        var from_seq: log_mod.Seq = 1;
-        while (true) {
-            const entries = try self.sequencer.partition_logs[0].read(from_seq, batch, self.alloc);
-            defer {
-                for (entries) |*e| e.deinit(self.alloc);
-                self.alloc.free(entries);
-            }
-            if (entries.len == 0) break;
-            for (entries) |e| {
-                if (e.header.kind == .schema_change) {
-                    if (isSqlDdl(e.payload)) {
-                        try self.replayDdl(e.payload);
-                    } else {
-                        _ = try self.registry.register(e.payload);
-                    }
-                }
-                from_seq = e.header.seq + 1;
-            }
-            if (entries.len < batch) break;
-        }
-
-        // Pass 2: DML — apply txn_intent entries to rebuild storage state.
-        // SqlExecutor.run handles CRC validation, deserialization, and committed_seq tracking.
-        // Aborted results (missing query, bad params) are encoded as ExecResult.abort, not Zig
-        // errors, so they advance committed_seq without surfacing here.
-        from_seq = 1;
-        while (true) {
-            const entries = try self.readMergedEntries(from_seq, batch);
-            defer {
-                for (entries) |*e| e.deinit(self.alloc);
-                self.alloc.free(entries);
-            }
-            if (entries.len == 0) break;
-            for (entries) |e| {
-                if (e.header.kind == .txn_intent) {
-                    _ = try self.sql_exec.run(e);
-                } else {
-                    self.sql_exec.advanceSeq(e.header.seq);
-                }
-                from_seq = e.header.seq + 1;
-            }
-            if (entries.len < batch * self.sequencer.partition_logs.len) break;
-        }
-    }
-
-    /// Read up to batch entries from every partition log starting at from_seq,
-    /// merge them, and return them sorted by seq. For partition_count=1 this is
-    /// a direct passthrough. Caller owns the returned slice and each entry's payload.
-    fn readMergedEntries(self: *Gateway, from_seq: log_mod.Seq, batch: usize) ![]log_mod.LogEntry {
-        const logs = self.sequencer.partition_logs;
-        if (logs.len == 1) return logs[0].read(from_seq, batch, self.alloc);
-        var list: std.ArrayList(log_mod.LogEntry) = .empty;
-        errdefer {
-            for (list.items) |*e| e.deinit(self.alloc);
-            list.deinit(self.alloc);
-        }
-        for (logs) |*log| {
-            const slice = try log.read(from_seq, batch, self.alloc);
-            defer self.alloc.free(slice);
-            try list.appendSlice(self.alloc, slice);
-        }
-        const merged = try list.toOwnedSlice(self.alloc);
-        std.sort.block(log_mod.LogEntry, merged, {}, struct {
-            fn lt(_: void, a: log_mod.LogEntry, b: log_mod.LogEntry) bool {
-                return a.header.seq < b.header.seq;
-            }
-        }.lt);
-        return merged;
-    }
-
-    /// Drain newly committed log entries into the executor.
-    /// The apply thread calls this in a loop; schema_change entries update the
-    /// registry before sql_exec.run() advances committed_seq.
-    pub fn applyNewEntries(self: *Gateway) !void {
-        const batch = 64;
-        var from_seq = self.sql_exec.current_seq() + 1;
-        while (true) {
-            const entries = try self.readMergedEntries(from_seq, batch);
-            defer {
-                for (entries) |*e| e.deinit(self.alloc);
-                self.alloc.free(entries);
-            }
-            if (entries.len == 0) break;
-            for (entries) |e| {
-                switch (e.header.kind) {
-                    .schema_change => {
-                        if (isSqlDdl(e.payload)) {
-                            try self.replayDdl(e.payload);
-                        } else {
-                            _ = try self.registry.register(e.payload);
-                        }
-                        self.sql_exec.advanceSeq(e.header.seq);
-                    },
-                    .txn_intent => _ = try self.sql_exec.run(e),
-                    else => self.sql_exec.advanceSeq(e.header.seq),
-                }
-                from_seq = e.header.seq + 1;
-            }
-            if (entries.len < batch * self.sequencer.partition_logs.len) break;
-        }
-    }
-
-    fn isSqlDdl(sql: []const u8) bool {
-        const s = std.mem.trimStart(u8, sql, " \t\r\n");
-        var end: usize = 0;
-        while (end < s.len and s[end] != ' ' and s[end] != '\t' and s[end] != '(') : (end += 1) {}
-        if (end == 0) return false;
-        var buf: [6]u8 = undefined;
-        const len = @min(end, buf.len);
-        for (s[0..len], 0..) |c, i| buf[i] = if (c >= 'A' and c <= 'Z') c + 32 else c;
-        const tok = buf[0..len];
-        return std.mem.eql(u8, tok, "create") or std.mem.eql(u8, tok, "drop") or std.mem.eql(u8, tok, "alter");
-    }
 
     /// Set a human-readable detail string for the last error (table/column context).
     fn setDetail(self: *Gateway, comptime fmt: []const u8, args: anytype) void {
@@ -759,116 +549,20 @@ pub const Gateway = struct {
     }
 
     /// Apply a DDL statement to the schema and replicate it via Raft.
-    /// Applies locally first so the originating connection sees the new schema
-    /// immediately; followers receive it through applyNewEntries when the Raft
-    /// entry commits, where replayDdl handles the idempotent re-application.
+    /// Validates and applies locally first so the connection sees errors before committing.
     pub fn applyDdl(self: *Gateway, sql: []const u8) !void {
         self.error_detail_len = 0;
-        try self.applyDdlToSchema(sql);
+        try self.fold_executor.applyDdlLocal(sql);
         self.client_seq += 1;
         var pending: sequencer_mod.PendingSubmit = undefined;
-        _ = try self.sequencer.submitBytes(
+        const result = try self.sequencer.submitBytes(
             &pending,
             sql,
             self.client_id,
             self.client_seq,
             .schema_change,
         ).awaitCommit(self.io);
-    }
-
-    /// Apply DDL during log replay (does not write to log).
-    /// Silently ignores "already exists" errors — these are expected on replay.
-    fn replayDdl(self: *Gateway, sql: []const u8) !void {
-        self.applyDdlToSchema(sql) catch |e| switch (e) {
-            error.TableAlreadyExists, error.IndexAlreadyExists, error.ColumnAlreadyExists => {},
-            error.TableNotFound => {}, // DROP TABLE on already-dropped table is a no-op on replay
-            else => return e,
-        };
-    }
-
-    fn applyDdlToSchema(self: *Gateway, sql: []const u8) !void {
-        std.debug.assert(sql.len > 0);
-        var arena = std.heap.ArenaAllocator.init(self.alloc);
-        defer arena.deinit();
-
-        var parser = sql_mod.parser.Parser.init(sql, arena.allocator());
-        const parsed = parser.parseQuery() catch |e| {
-            if (parser.err_msg) |msg| {
-                const pos = parser.err_pos;
-                if (pos < sql.len) {
-                    // Extract the token starting at err_pos (up to 24 chars).
-                    var end = pos;
-                    while (end < sql.len and end - pos < 24) : (end += 1) {
-                        const c = sql[end];
-                        if (c == ' ' or c == '\t' or c == '\n' or c == ';') break;
-                    }
-                    self.setDetail("{s} '{s}'", .{ msg, sql[pos..end] });
-                } else {
-                    self.setDetail("{s}", .{msg});
-                }
-            }
-            return e;
-        };
-
-        if (parsed.stmts.len == 0) return;
-        const stmt = parsed.stmts[0];
-
-        // For DROP TABLE, capture the table_id before registry.applyDdl removes it from schema.
-        const drop_table_id: ?storage_mod.TableId = if (stmt == .drop_table) blk: {
-            const dt = stmt.drop_table;
-            const tbl = self.schema.getTable(dt.name) orelse {
-                if (dt.if_exists) return; // table doesn't exist but IF EXISTS — silent success
-                break :blk null;
-            };
-            break :blk tbl.id;
-        } else null;
-
-        self.registry.applyDdl(stmt) catch |e| {
-            switch (stmt) {
-                .create_table => |ct| self.setDetail("'{s}': {s}", .{ ct.name, errors.humanize(e) }),
-                .create_index => |ci| self.setDetail("'{s}' on '{s}': {s}", .{ ci.name, ci.table, errors.humanize(e) }),
-                .alter_table => |at| self.setDetail("'{s}': {s}", .{ at.table, errors.humanize(e) }),
-                .drop_table => |dt| self.setDetail("'{s}': {s}", .{ dt.name, errors.humanize(e) }),
-                else => self.setDetail("{s}", .{errors.humanize(e)}),
-            }
-            return e;
-        };
-
-        switch (stmt) {
-            .create_table => |ct| {
-                const tbl = self.schema.getTable(ct.name) orelse return error.TableNotFound;
-                try self.partitioned.registerTable(try sqlTableToStorage(tbl, self.storage_schema_arena.allocator()));
-            },
-            .drop_table => {
-                if (drop_table_id) |id| self.partitioned.unregisterTable(id);
-            },
-            .create_index => |ci| {
-                const tbl = self.schema.getTable(ci.table) orelse return error.TableNotFound;
-                if (tbl.indexes.len == 0) return;
-                const idx = tbl.indexes[tbl.indexes.len - 1];
-                // Domain boundary — SQL-level index kind is validated by schema.createIndex()
-                // before reaching here; only vector and json_path kinds are passed to storage.
-                const spec: storage_mod.IndexSpec = switch (idx.kind) {
-                    .vector => .{ .vector = switch (idx.extra) {
-                        .vector_dim => |d| d,
-                        else => 0,
-                    } },
-                    .json_path => .{ .json_path = switch (idx.extra) {
-                        .json_paths => |p| p,
-                        else => &.{},
-                    } },
-                    else => return,
-                };
-                const column_idx: u32 = if (idx.columns.len > 0) idx.columns[0] else 0;
-                try self.partitioned.registerIndex(.{
-                    .id = idx.id,
-                    .table_id = tbl.id,
-                    .column_idx = column_idx,
-                    .spec = spec,
-                });
-            },
-            else => {},
-        }
+        try self.fold_executor.wait_for(result.seq, self.io);
     }
 
     /// Get the current committed sequence number.
@@ -920,138 +614,13 @@ pub const Gateway = struct {
     /// Resolve a table name to its numeric ID via the schema registry.
     /// Returns null if the table is not found.
     pub fn resolveTableName(self: *Gateway, name: []const u8) ?u32 {
-        const tbl = self.schema.getTable(name) orelse return null;
-        return tbl.id;
+        return self.fold_executor.resolveTableName(name);
     }
 
     /// Returns true if a table with this numeric ID exists in the schema.
     pub fn tableIdExists(self: *Gateway, id: u32) bool {
-        return self.schema.getTableById(id) != null;
+        return self.fold_executor.tableIdExists(id);
     }
 };
 
-fn decodeParams(
-    params: []const ColumnValue,
-    param_types: []const sql_mod.ast.SqlType,
-    alloc: std.mem.Allocator,
-) ![]const ColumnValue {
-    // param_types is only populated for TRANSACTION blocks; plain SELECT param types are not
-    // yet extracted by extractParamTypes. Enforce the count only when types are known.
-    if (param_types.len > 0 and params.len != param_types.len) return error.ParamDecodeError;
-    return try alloc.dupe(ColumnValue, params);
-}
-
-fn sqlTableToStorage(
-    tbl: *const sql_mod.schema.TableSchema,
-    alloc: std.mem.Allocator,
-) !storage_mod.TableSchema {
-    const cols = try alloc.alloc(storage_mod.ColumnSchema, tbl.columns.len);
-    for (tbl.columns, cols) |src, *dst| {
-        dst.* = .{
-            .col_type = sqlTypeToColumnType(src.typ),
-            .nullable = src.nullable == .nullable,
-        };
-    }
-    return .{
-        .table_id = tbl.id,
-        .columns = cols,
-    };
-}
-
-fn sqlTypeToColumnType(t: sql_mod.ast.SqlType) storage_mod.ColumnType {
-    return switch (t) {
-        .bool => .bool_t,
-        .int8 => .int8,
-        .int16 => .int16,
-        .int32 => .int32,
-        .int64 => .int64,
-        .uint8 => .uint8,
-        .uint16 => .uint16,
-        .uint32 => .uint32,
-        .uint64 => .uint64,
-        .string => .string,
-        .bytes => .bytes,
-        .uuid => .bytes,
-        .timestamp => .int64,
-        .interval_months, .interval_micros => .int64,
-        .decimal => .decimal,
-        .json, .vector, .array, .struct_type => .bytes,
-        .null_type => .bytes,
-    };
-}
-
-fn sqlTypeStr(t: sql_mod.ast.SqlType, alloc: std.mem.Allocator) ![]u8 {
-    return switch (t) {
-        .bool => alloc.dupe(u8, "bool"),
-        .int8 => alloc.dupe(u8, "int8"),
-        .int16 => alloc.dupe(u8, "int16"),
-        .int32 => alloc.dupe(u8, "int32"),
-        .int64 => alloc.dupe(u8, "int64"),
-        .uint8 => alloc.dupe(u8, "uint8"),
-        .uint16 => alloc.dupe(u8, "uint16"),
-        .uint32 => alloc.dupe(u8, "uint32"),
-        .uint64 => alloc.dupe(u8, "uint64"),
-        .decimal => |d| std.fmt.allocPrint(alloc, "decimal({d},{d})", .{ d.precision, d.scale }),
-        .string => alloc.dupe(u8, "string"),
-        .bytes => alloc.dupe(u8, "bytes"),
-        .uuid => alloc.dupe(u8, "uuid"),
-        .timestamp => alloc.dupe(u8, "timestamp"),
-        .interval_months => alloc.dupe(u8, "interval_months"),
-        .interval_micros => alloc.dupe(u8, "interval_micros"),
-        .json => alloc.dupe(u8, "json"),
-        .vector => |dim| std.fmt.allocPrint(alloc, "vector({d})", .{dim}),
-        .array => alloc.dupe(u8, "array"),
-        .struct_type => alloc.dupe(u8, "struct"),
-        .null_type => alloc.dupe(u8, "null"),
-    };
-}
-
-/// Extract output column names from a SELECT plan node.
-/// For project nodes uses the alias; for scan nodes uses schema column names.
-/// Caller owns the returned slice and its strings.
-fn extractColumnNames(
-    node: *const sql_mod.plan.PlanNode,
-    schema: *const sql_mod.SchemaRegistry,
-    alloc: std.mem.Allocator,
-) ![][]const u8 {
-    switch (node.*) {
-        .project => |p| {
-            const names = try alloc.alloc([]const u8, p.exprs.len);
-            errdefer alloc.free(names);
-            for (p.exprs, 0..) |item, i| names[i] = try alloc.dupe(u8, item.alias);
-            return names;
-        },
-        .scan => |s| {
-            const tbl = schema.getTableById(s.table_id) orelse return try alloc.alloc([]const u8, 0);
-            const ids = if (s.columns.len > 0) s.columns else blk: {
-                // all columns
-                const all = try alloc.alloc(sql_mod.schema.ColumnId, tbl.columns.len);
-                defer alloc.free(all);
-                for (tbl.columns, 0..) |col, i| all[i] = col.id;
-                break :blk all;
-            };
-            const names = try alloc.alloc([]const u8, ids.len);
-            errdefer alloc.free(names);
-            for (ids, 0..) |col_id, i| {
-                const col = tbl.columnById(col_id);
-                names[i] = if (col) |c| try alloc.dupe(u8, c.name) else try std.fmt.allocPrint(alloc, "col{d}", .{i});
-            }
-            return names;
-        },
-        .filter => |f| return extractColumnNames(f.input, schema, alloc),
-        .sort => |s| return extractColumnNames(s.input, schema, alloc),
-        .limit => |l| return extractColumnNames(l.input, schema, alloc),
-        .pk_lookup => |pk| {
-            const tbl = schema.getTableById(pk.table_id) orelse return try alloc.alloc([]const u8, 0);
-            const names = try alloc.alloc([]const u8, pk.columns.len);
-            errdefer alloc.free(names);
-            for (pk.columns, 0..) |col_id, i| {
-                const col = tbl.columnById(col_id);
-                names[i] = if (col) |c| try alloc.dupe(u8, c.name) else try std.fmt.allocPrint(alloc, "col{d}", .{i});
-            }
-            return names;
-        },
-        else => return try alloc.alloc([]const u8, 0),
-    }
-}
 

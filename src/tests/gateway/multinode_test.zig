@@ -220,10 +220,9 @@ test "multinode: DDL replicates to all followers" {
     const committed_seq = gc.gws[leader_idx].sequencer.currentSeq();
     try waitForReplication(&gc, committed_seq, 2000);
 
-    // Drive applyNewEntries on the two followers so their schemas are updated
-    // from the partition log entries written by the Raft committed handler.
+    // Wait for FoldExecutor on each follower to apply the replicated entries.
     for (gc.gws, 0..) |gw, i| {
-        if (i != leader_idx) try gw.applyNewEntries();
+        if (i != leader_idx) try gw.fold_executor.wait_for(committed_seq, null);
     }
 
     // All three nodes must resolve the table — proving DDL was replicated.
@@ -286,9 +285,9 @@ test "multinode: DML on leader is visible on follower after applyNewEntries" {
     const committed_seq = gw.sequencer.currentSeq();
     try waitForReplication(&gc, committed_seq, 2000);
 
-    // Apply all entries on a follower: DDL, register, INSERT.
+    // Wait for FoldExecutor on the follower to apply all replicated entries.
     const follower_idx: usize = if (leader_idx == 0) 1 else 0;
-    try gc.gws[follower_idx].applyNewEntries();
+    try gc.gws[follower_idx].fold_executor.wait_for(committed_seq, null);
 
     // The follower must be able to serve the SELECT from local storage.
     var rs = try gc.gws[follower_idx].querySelect(

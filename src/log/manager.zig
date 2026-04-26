@@ -46,6 +46,8 @@ pub const Log = struct {
     last_snapshot_seq: Seq = 0,
     metrics: obs.LogMetrics = .{},
     alloc: std.mem.Allocator,
+    /// Incremented on every append; readers can poll this for change detection.
+    append_epoch: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     pub fn init(path: []const u8, node_id: NodeId, alloc: std.mem.Allocator) !Log {
         return init_partitioned(path, node_id, 0, alloc);
@@ -377,5 +379,22 @@ pub const Log = struct {
         }
 
         self.sealed = true;
+    }
+
+    /// Called by the sequencer after appending an entry. Increments the epoch counter so
+    /// FoldExecutor can detect new entries by polling.
+    pub fn notifyAppend(self: *Log) void {
+        _ = self.append_epoch.fetchAdd(1, .release);
+    }
+
+    /// Called by FoldExecutor when the log is empty at from_seq.
+    /// Blocks using a brief nanosleep until the append epoch changes.
+    pub fn waitForEntries(self: *Log, from_seq: Seq) void {
+        const initial = self.append_epoch.load(.acquire);
+        const sleep_ns = std.os.linux.timespec{ .sec = 0, .nsec = 100_000 };
+        while (self.current_seq < from_seq) {
+            if (self.append_epoch.load(.acquire) != initial) return;
+            _ = std.os.linux.nanosleep(&sleep_ns, null);
+        }
     }
 };

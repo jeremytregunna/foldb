@@ -1,4 +1,4 @@
-/// TCP server: async accept loop with per-connection fibers and apply coroutine.
+/// TCP server: async accept loop with per-connection fibers.
 const std = @import("std");
 const conn_mod = @import("conn.zig");
 const gateway_mod = @import("gateway.zig");
@@ -8,15 +8,11 @@ const assert = std.debug.assert;
 
 const LISTEN_BACKLOG: u31 = 128;
 
-/// Apply interval for the applyEntriesLoop coroutine (5 ms).
-const APPLY_INTERVAL_NS: u64 = 5_000_000;
-
 /// POSIX shutdown(2) how=SHUT_RDWR, for the signal handler.
 const SHUT_RDWR: i32 = 2;
 
 comptime {
     assert(LISTEN_BACKLOG > 0);
-    assert(APPLY_INTERVAL_NS > 0);
 }
 
 /// Set by SIGINT/SIGTERM/SIGHUP handlers; checked after accept returns.
@@ -60,16 +56,6 @@ fn installSignalHandlers() void {
     _ = linux.sigaction(linux.SIG.PIPE, &sa_ignore, null);
 }
 
-/// Cooperative coroutine that calls applyNewEntries every APPLY_INTERVAL_NS.
-/// Runs as a group task alongside connection fibers, so schema/registry updates
-/// happen on the same cooperative thread — no locks needed.
-fn applyEntriesLoop(io: std.Io, gw: *gateway_mod.Gateway) !void {
-    while (true) {
-        gw.applyNewEntries() catch {};
-        try io.sleep(.{ .nanoseconds = APPLY_INTERVAL_NS }, .awake);
-    }
-}
-
 /// Connection task: runs the full lifecycle for one client.
 fn handleConn(
     io: std.Io,
@@ -101,7 +87,6 @@ pub fn serve(
     defer listener_handle.store(-1, .release);
 
     var group: std.Io.Group = .init;
-    group.async(io, applyEntriesLoop, .{ io, gw });
 
     while (true) {
         const stream = listener.accept(io) catch |e| switch (e) {
