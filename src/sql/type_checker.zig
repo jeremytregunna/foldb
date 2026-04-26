@@ -370,7 +370,9 @@ pub const TypeChecker = struct {
                 const et = try self.inferExpr(il.expr, ctx);
                 for (il.values) |v| {
                     const vt = try self.inferExpr(v, ctx);
-                    if (!vt.eql(.null_type) and !et.eql(vt)) return error.ImplicitTypeCoercion;
+                    if (!vt.eql(.null_type) and !et.eql(vt)) {
+                        if (!(isIntLiteral(v) and et.isInteger())) return error.ImplicitTypeCoercion;
+                    }
                 }
                 return .bool;
             },
@@ -378,7 +380,9 @@ pub const TypeChecker = struct {
                 const et = try self.inferExpr(il.expr, ctx);
                 for (il.values) |v| {
                     const vt = try self.inferExpr(v, ctx);
-                    if (!vt.eql(.null_type) and !et.eql(vt)) return error.ImplicitTypeCoercion;
+                    if (!vt.eql(.null_type) and !et.eql(vt)) {
+                        if (!(isIntLiteral(v) and et.isInteger())) return error.ImplicitTypeCoercion;
+                    }
                 }
                 return .bool;
             },
@@ -445,6 +449,13 @@ pub const TypeChecker = struct {
         return null;
     }
 
+    // True for bare integer literals and negated integer literals (-1, -42).
+    // Used to allow untyped literal integers to coerce to any integer column type.
+    fn isIntLiteral(e: *const ast.Expr) bool {
+        return e.* == .lit_int or
+            (e.* == .unary and e.unary.op == .neg and e.unary.expr.* == .lit_int);
+    }
+
     fn inferBinary(
         self: *TypeChecker,
         op: ast.BinOp,
@@ -458,11 +469,11 @@ pub const TypeChecker = struct {
         switch (op) {
             .add, .sub, .mul, .div, .mod => {
                 if (!lt.isNumeric() or !rt.isNumeric()) return error.TypeMismatch;
-                // §10.2: no implicit coercions — both sides must be same type
-                if (!lt.eql(rt) and rt != .null_type and lt != .null_type) {
-                    return error.ImplicitTypeCoercion;
-                }
-                return lt;
+                if (lt.eql(rt) or lt == .null_type or rt == .null_type) return lt;
+                // Integer literals are untyped — coerce to the column's integer type
+                if (isIntLiteral(left) and rt.isInteger()) return rt;
+                if (isIntLiteral(right) and lt.isInteger()) return lt;
+                return error.ImplicitTypeCoercion;
             },
             .eq, .neq, .lt, .gt, .lte, .gte => {
                 // §10.2: = on nullable column is an error unless IS NULL guard used.
@@ -484,9 +495,12 @@ pub const TypeChecker = struct {
                         }
                     }
                 }
-                // Types must match (or one is null_type)
+                // Types must match (or one is null_type).
+                // Integer literals are untyped — allow coercion to any integer column type.
                 if (!lt.eql(rt) and lt != .null_type and rt != .null_type) {
-                    return error.ImplicitTypeCoercion;
+                    if (!((isIntLiteral(left) and rt.isInteger()) or
+                          (isIntLiteral(right) and lt.isInteger())))
+                        return error.ImplicitTypeCoercion;
                 }
                 return .bool;
             },
@@ -509,7 +523,11 @@ pub const TypeChecker = struct {
             },
             .bit_and, .bit_or, .bit_xor, .shl, .shr => {
                 if (!lt.isInteger() or !rt.isInteger()) return error.TypeMismatch;
-                if (!lt.eql(rt) and rt != .null_type and lt != .null_type) return error.ImplicitTypeCoercion;
+                if (!lt.eql(rt) and rt != .null_type and lt != .null_type) {
+                    if (isIntLiteral(left)) return rt;
+                    if (isIntLiteral(right)) return lt;
+                    return error.ImplicitTypeCoercion;
+                }
                 return lt;
             },
         }
