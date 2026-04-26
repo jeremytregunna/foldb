@@ -243,6 +243,10 @@ pub const FoldExecutor = struct {
 
         try self.registry.applyDdl(stmt);
 
+        // Storage is shared across all executors; only partition 0 registers/unregisters
+        // tables and indexes to avoid concurrent DDL on the same HashMap from sibling threads.
+        if (self.partition_id != 0) return;
+
         switch (stmt) {
             .create_table => |ct| {
                 const tbl = self.schema.getTable(ct.name) orelse return error.TableNotFound;

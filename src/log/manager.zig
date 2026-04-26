@@ -284,6 +284,10 @@ pub const Log = struct {
         }
     }
 
+    pub fn sync(self: *Log) void {
+        self.current_segment.sync();
+    }
+
     pub fn update_term(self: *Log, term: entry_mod.Epoch) void {
         self.current_term = term;
     }

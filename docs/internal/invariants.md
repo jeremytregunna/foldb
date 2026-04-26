@@ -2,7 +2,7 @@
 
 Derived from `foldb-spec.md`. Invariants marked **implied** are not stated as formal
 invariants in the spec but follow necessarily from the design; these are the highest-value
-targets for TLA+ verification, particularly the multi-partition execution cluster (27–33).
+targets for TLA+ verification, particularly the multi-partition execution cluster (28–34).
 
 ---
 
@@ -73,6 +73,7 @@ targets for TLA+ verification, particularly the multi-partition execution cluste
 
 25. The determinism whitelist is transitive — any module reachable from query execution code must be on the whitelist, not just direct imports. Violation is a compile error.
 26. `run(entry)` advances `current_seq` even on abort — `current_seq` is never blocked.
+27. In a multi-partition deployment every executor receives each `schema_change` entry (broadcast) and updates its own per-executor `SchemaRegistry` and `SqlRegistry`. Only the executor with `partition_id == 0` applies the storage DDL (`registerTable` / `unregisterTable` / `registerIndex`) to the shared `PartitionedStorage`. All other executors skip the storage step. Rationale: `PartitionedStorage` is shared across all executors (reads must cross partition boundaries), so concurrent DDL from N threads on the same `HashMap` is a data race; designating one executor avoids this without a lock.
 
 ---
 
@@ -80,13 +81,13 @@ targets for TLA+ verification, particularly the multi-partition execution cluste
 
 All implied. None are stated as formal invariants in the spec; highest TLA+ value.
 
-27. Every executor receives every `txn_intent` (broadcast invariant).
-28. Each executor applies only the mutations whose keys hash to its own partition (partition filter invariant).
-29. All executors in a multi-partition txn read from the same snapshot: `seq = first_seq - 1` (consistent read snapshot invariant).
-30. Before executor P reads cross-partition state at `first_seq - 1`, every executor Q has `current_seq >= first_seq - N + Q` (sibling visibility invariant — the `waitForSiblings` formula).
-31. A constraint violation computed at partition P is identical to the violation that would be computed at any other partition given the same inputs — constraint evaluation is partition-independent.
-32. The total `rows_affected` reported to the client equals the sum of own-partition mutations across all executors for that txn.
-33. Sequential routing: the `i`th entry of a broadcast batch has `partition = i`. Combined with `first_seq = entry.seq - partition_id`, the formula is invertible: given any entry's `(seq, partition_id)`, its `first_seq` is uniquely determined.
+28. Every executor receives every `txn_intent` (broadcast invariant).
+29. Each executor applies only the mutations whose keys hash to its own partition (partition filter invariant).
+30. All executors in a multi-partition txn read from the same snapshot: `seq = first_seq - 1` (consistent read snapshot invariant).
+31. Before executor P reads cross-partition state at `first_seq - 1`, every executor Q has `current_seq >= first_seq - N + Q` (sibling visibility invariant — the `waitForSiblings` formula).
+32. A constraint violation computed at partition P is identical to the violation that would be computed at any other partition given the same inputs — constraint evaluation is partition-independent.
+33. The total `rows_affected` reported to the client equals the sum of own-partition mutations across all executors for that txn.
+34. Sequential routing: the `i`th entry of a broadcast batch has `partition = i`. Combined with `first_seq = entry.seq - partition_id`, the formula is invertible: given any entry's `(seq, partition_id)`, its `first_seq` is uniquely determined.
 
 ---
 
@@ -94,14 +95,14 @@ All implied. None are stated as formal invariants in the spec; highest TLA+ valu
 
 **Explicit:**
 
-34. Every accepted `TxnIntent` eventually gets a unique `seq` or the caller gets a failure.
-35. `seq` values are dense and monotonic.
-36. The same `TxnIntent` (by `client_id, client_seq`) submitted twice gets the same `seq` (idempotency).
+35. Every accepted `TxnIntent` eventually gets a unique `seq` or the caller gets a failure.
+36. `seq` values are dense and monotonic.
+37. The same `TxnIntent` (by `client_id, client_seq`) submitted twice gets the same `seq` (idempotency).
 
 **Implied:**
 
-37. Idempotency cache covers all in-flight and recently-completed txns; the window is large enough that network retries are always covered.
-38. Two concurrent epoch proposals from competing leaders cannot both commit (Raft safety: at most one leader per term commits).
+38. Idempotency cache covers all in-flight and recently-completed txns; the window is large enough that network retries are always covered.
+39. Two concurrent epoch proposals from competing leaders cannot both commit (Raft safety: at most one leader per term commits).
 
 ---
 
@@ -109,15 +110,15 @@ All implied. None are stated as formal invariants in the spec; highest TLA+ valu
 
 **Explicit:**
 
-39. A `QueryHash` uniquely determines the query's AST and type signature forever.
-40. No transaction is submitted with unresolved nondeterminism.
+40. A `QueryHash` uniquely determines the query's AST and type signature forever.
+41. No transaction is submitted with unresolved nondeterminism.
 
 **Implied:**
 
-41. Reconnaissance reads from a snapshot `seq <= current_committed_seq` — never from the future.
-42. If the actual read set at execution time exceeds the declared hint, the executor must emit a retry marker at `seq` and must not proceed with the undeclared reads.
-43. The retry loop for read-set conflicts terminates: the gateway re-scouts at the conflicting `seq`, ensuring the next attempt sees a strictly later snapshot.
-44. Params are encoded canonically — the same logical params always produce the same bytes in the intent.
+42. Reconnaissance reads from a snapshot `seq <= current_committed_seq` — never from the future.
+43. If the actual read set at execution time exceeds the declared hint, the executor must emit a retry marker at `seq` and must not proceed with the undeclared reads.
+44. The retry loop for read-set conflicts terminates: the gateway re-scouts at the conflicting `seq`, ensuring the next attempt sees a strictly later snapshot.
+45. Params are encoded canonically — the same logical params always produce the same bytes in the intent.
 
 ---
 
@@ -125,9 +126,9 @@ All implied. None are stated as formal invariants in the spec; highest TLA+ valu
 
 **Implied:**
 
-45. A schema change that would break a registered query is rejected before it reaches the log.
-46. An index is usable for query planning only at `seq >= backfill_complete_seq`; before that it exists in the schema but the planner must not use it.
-47. A deregistered query's hash is never reused for a different query.
+46. A schema change that would break a registered query is rejected before it reaches the log.
+47. An index is usable for query planning only at `seq >= backfill_complete_seq`; before that it exists in the schema but the planner must not use it.
+48. A deregistered query's hash is never reused for a different query.
 
 ---
 
@@ -135,9 +136,9 @@ All implied. None are stated as formal invariants in the spec; highest TLA+ valu
 
 **Implied:**
 
-48. CDC delivery is at-least-once at the system level; exactly-once is the consumer's responsibility.
-49. CDC delivers entries in monotonically increasing `seq` order with no gaps from the subscriber's starting `seq`.
-50. `before` images for CDC are computed at `seq - 1` — they reflect state strictly before the entry's mutations.
+49. CDC delivery is at-least-once at the system level; exactly-once is the consumer's responsibility.
+50. CDC delivers entries in monotonically increasing `seq` order with no gaps from the subscriber's starting `seq`.
+51. `before` images for CDC are computed at `seq - 1` — they reflect state strictly before the entry's mutations.
 
 ---
 
@@ -145,7 +146,7 @@ All implied. None are stated as formal invariants in the spec; highest TLA+ valu
 
 **Implied:**
 
-51. Log entries at `seq <= S` may only be truncated when: (a) a snapshot at `seq >= S` is durable in object storage, AND (b) all live CDC subscribers have acked past `S`, AND (c) no live `read_at(seq)` request targets `seq <= S`.
-52. Truncation removes whole segments only — entries within a segment cannot be selectively removed.
-53. Restoring from snapshot + log replay produces state bit-identical to a node that never crashed (snapshot + replay = continuous fold).
-54. A `config_change` entry takes effect at its `seq` on all nodes simultaneously — no node acts on the new config before processing that entry.
+52. Log entries at `seq <= S` may only be truncated when: (a) a snapshot at `seq >= S` is durable in object storage, AND (b) all live CDC subscribers have acked past `S`, AND (c) no live `read_at(seq)` request targets `seq <= S`.
+53. Truncation removes whole segments only — entries within a segment cannot be selectively removed.
+54. Restoring from snapshot + log replay produces state bit-identical to a node that never crashed (snapshot + replay = continuous fold).
+55. A `config_change` entry takes effect at its `seq` on all nodes simultaneously — no node acts on the new config before processing that entry.

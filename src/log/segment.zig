@@ -266,12 +266,26 @@ pub const Segment = struct {
         }
 
         const seg_footer = maybe_footer.?;
-        _ = std.os.linux.lseek(@intCast(fd), header_size, std.os.linux.SEEK.SET);
+
+        var index: std.ArrayList(IndexEntry) = .empty;
+        errdefer index.deinit(alloc);
+        try index.ensureTotalCapacity(alloc, seg_footer.entry_count);
+        {
+            var idx_off: i64 = @intCast(seg_footer.index_offset);
+            var buf: [IndexEntry.entry_size]u8 = undefined;
+            for (0..seg_footer.entry_count) |_| {
+                const n = std.os.linux.pread(@intCast(fd), &buf, IndexEntry.entry_size, idx_off);
+                if (n != IndexEntry.entry_size) return error.InvalidSegment;
+                idx_off += IndexEntry.entry_size;
+                index.appendAssumeCapacity(IndexEntry.deserialize_from(&buf));
+            }
+        }
+
         return Segment{
             .fd = fd,
             .path = path,
             .header = seg_header,
-            .index = .empty,
+            .index = index,
             .next_offset = seg_footer.index_offset,
             .entry_count = seg_footer.entry_count,
             .last_seq = seg_footer.last_seq,
@@ -309,31 +323,57 @@ pub const Segment = struct {
         max: usize,
         alloc: std.mem.Allocator,
     ) ![]LogEntry {
-        // Use pread with an explicit offset so concurrent appends (which use write()
-        // and advance the fd's shared position) cannot corrupt our read position.
-        var offset: i64 = @intCast(header_size);
-
         var result: std.ArrayList(LogEntry) = .empty;
         errdefer {
             for (result.items) |*entry| entry.deinit(alloc);
             result.deinit(alloc);
         }
 
+        // If the index is loaded (sealed segments and live current segment), binary-search
+        // for the first entry with seq >= from_seq and start pread there. Otherwise fall
+        // back to a linear scan from the segment header (recovered unsealed segments).
+        var offset: i64 = undefined;
+        var remaining: u32 = undefined;
+        if (self.index.items.len > 0) {
+            var lo: usize = 0;
+            var hi: usize = self.index.items.len;
+            while (lo < hi) {
+                const mid = lo + (hi - lo) / 2;
+                if (self.index.items[mid].seq < from_seq) lo = mid + 1 else hi = mid;
+            }
+            if (lo >= self.index.items.len) return try result.toOwnedSlice(alloc);
+            offset = @intCast(self.index.items[lo].file_offset);
+            remaining = self.entry_count - @as(u32, @intCast(lo));
+        } else {
+            offset = @intCast(header_size);
+            remaining = self.entry_count;
+        }
+
         var read_count: u32 = 0;
-        while (read_count < self.entry_count and result.items.len < max) {
+        while (read_count < remaining and result.items.len < max) {
             const entry = LogEntry.deserialize_pread(self.fd, &offset, alloc) catch break;
             read_count += 1;
 
             if (entry.header.seq < from_seq) {
-                var skip_entry = entry;
-                skip_entry.deinit(alloc);
+                var e = entry;
+                e.deinit(alloc);
                 continue;
+            }
+
+            if (!entry.verify_crc()) {
+                var e = entry;
+                e.deinit(alloc);
+                return error.CrcMismatch;
             }
 
             try result.append(alloc, entry);
         }
 
         return try result.toOwnedSlice(alloc);
+    }
+
+    pub fn sync(self: *Segment) void {
+        _ = std.os.linux.fdatasync(@intCast(self.fd));
     }
 
     pub fn seal(self: *Segment) !void {
@@ -397,6 +437,7 @@ pub const Segment = struct {
                     new_last = log_header.seq;
                 } else break;
             }
+            self.index.items.len = new_count;
             self.sealed = false;
         }
 

@@ -50,14 +50,25 @@ pub const ClockSource = nondet_mod.ClockSource;
 pub const RandSource = nondet_mod.RandSource;
 pub const NondetResolver = nondet_mod.NondetResolver;
 
-/// Context for the post-snapshot truncation hook. Stable once set in init.
-const TruncateCtx = struct { gateway: *Gateway };
+/// Context for the post-snapshot truncation hook. One per storage partition.
+const TruncateCtx = struct { gateway: *Gateway, partition_id: u32 };
 
 fn onSnapshotComplete(ptr: *anyopaque, snapshot_seq: sequencer_mod.Seq) void {
     const ctx: *TruncateCtx = @ptrCast(@alignCast(ptr));
     const gw = ctx.gateway;
-    if (snapshot_seq > gw.durable_snapshot_seq) gw.durable_snapshot_seq = snapshot_seq;
-    gw.truncateLog() catch |err| std.log.warn("truncateLog failed after snapshot: {}", .{err});
+    gw.partition_snapshot_seqs[ctx.partition_id] = snapshot_seq;
+    // Only advance the truncation watermark once every partition has snapshotted.
+    // Use the minimum seq across all partitions so no partition's unreplayed log
+    // entries are removed before its storage state is captured in a snapshot.
+    var min_seq: sequencer_mod.Seq = std.math.maxInt(sequencer_mod.Seq);
+    for (gw.partition_snapshot_seqs) |s| {
+        if (s == 0) return;
+        if (s < min_seq) min_seq = s;
+    }
+    if (min_seq > gw.durable_snapshot_seq) {
+        gw.durable_snapshot_seq = min_seq;
+        gw.truncateLog() catch |err| std.log.warn("truncateLog failed after snapshot: {}", .{err});
+    }
 }
 
 /// The main Gateway struct.
@@ -87,10 +98,12 @@ pub const Gateway = struct {
     s3_store: ?*storage_mod.S3ObjectStore = null,
     /// Per-partition context structs for snapshot log writers. Freed in deinit.
     snapshot_writer_ctxs: []snapshot_hooks_mod.SnapshotWriterCtx = &.{},
-    /// Highest seq for which a snapshot has been durably uploaded. Updated by postSnapshotImpl.
+    /// Per-partition context structs for the post-snapshot truncation hook. Freed in deinit.
+    truncate_ctxs: []TruncateCtx = &.{},
+    /// Per-partition last-snapshot seq. Truncation watermark is min across all partitions.
+    partition_snapshot_seqs: []sequencer_mod.Seq = &.{},
+    /// Minimum seq across all partition_snapshot_seqs; 0 until every partition has snapshotted.
     durable_snapshot_seq: sequencer_mod.Seq = 0,
-    /// Stable context for the post-snapshot truncation hook. Initialized in init.
-    truncate_ctx: TruncateCtx,
     /// Last error detail set by gateway operations (table/column context).
     /// Reset at the start of each operation that may set it.
     error_detail: [256]u8,
@@ -181,8 +194,9 @@ pub const Gateway = struct {
         gw.partitioned = .{ .partitions = storages, .alloc = alloc };
         gw.s3_store = null;
         gw.snapshot_writer_ctxs = &.{};
+        gw.truncate_ctxs = &.{};
+        gw.partition_snapshot_seqs = &.{};
         gw.durable_snapshot_seq = 0;
-        gw.truncate_ctx = .{ .gateway = gw };
         gw.error_detail = undefined;
         gw.error_detail_len = 0;
 
@@ -277,6 +291,15 @@ pub const Gateway = struct {
                     };
                 }
                 gw.snapshot_writer_ctxs = ctxs;
+
+                const truncate_ctxs = try alloc.alloc(TruncateCtx, pc);
+                for (truncate_ctxs, 0..) |*ctx, i| ctx.* = .{ .gateway = gw, .partition_id = @intCast(i) };
+                gw.truncate_ctxs = truncate_ctxs;
+
+                const snap_seqs = try alloc.alloc(sequencer_mod.Seq, pc);
+                for (snap_seqs) |*s| s.* = 0;
+                gw.partition_snapshot_seqs = snap_seqs;
+
                 for (gw.storages, 0..) |stor, i| {
                     stor.setSnapshotPolicy(.{
                         .interval = opts.snapshot_interval_entries,
@@ -287,7 +310,7 @@ pub const Gateway = struct {
                         },
                         .partition_id = @intCast(i),
                         .post_snapshot = .{
-                            .ptr = &gw.truncate_ctx,
+                            .ptr = &truncate_ctxs[i],
                             .hookFn = &onSnapshotComplete,
                         },
                     });
@@ -336,6 +359,8 @@ pub const Gateway = struct {
         self.sequencer.deinit();
         if (self.s3_store) |s3| self.alloc.destroy(s3);
         if (self.snapshot_writer_ctxs.len > 0) self.alloc.free(self.snapshot_writer_ctxs);
+        if (self.truncate_ctxs.len > 0) self.alloc.free(self.truncate_ctxs);
+        if (self.partition_snapshot_seqs.len > 0) self.alloc.free(self.partition_snapshot_seqs);
         self.alloc.destroy(self);
     }
 
