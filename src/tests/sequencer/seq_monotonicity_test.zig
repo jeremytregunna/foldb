@@ -116,7 +116,7 @@ fn runMonotonicityCheck(seed: u64, n_entries: usize, alloc: std.mem.Allocator) !
             1,
             @intCast(i + 1),
             .txn_intent,
-        ).awaitCommit();
+        ).awaitCommit(null);
         assigned_seqs[i] = result.seq;
     }
 
@@ -180,17 +180,17 @@ test "seq monotonicity: idempotency dedup does not create gaps" {
 
     // First submit: client_id=1, client_seq=1
     var pending1: PendingSubmit = undefined;
-    const r1 = try seq.submitBytes(&pending1, "first", 1, 1, .txn_intent).awaitCommit();
+    const r1 = try seq.submitBytes(&pending1, "first", 1, 1, .txn_intent).awaitCommit(null);
     try testing.expectEqual(@as(sequencer_mod.Seq, 1), r1.seq);
 
     // Duplicate submit: same (client_id=1, client_seq=1) — idempotency hit.
     var pending2: PendingSubmit = undefined;
-    const r2 = try seq.submitBytes(&pending2, "first", 1, 1, .txn_intent).awaitCommit();
+    const r2 = try seq.submitBytes(&pending2, "first", 1, 1, .txn_intent).awaitCommit(null);
     try testing.expectEqual(r1.seq, r2.seq); // same seq, cached result
 
     // New submit: client_seq=2 — must get seq=2, not seq=3 (no gap from dedup).
     var pending3: PendingSubmit = undefined;
-    const r3 = try seq.submitBytes(&pending3, "second", 1, 2, .txn_intent).awaitCommit();
+    const r3 = try seq.submitBytes(&pending3, "second", 1, 2, .txn_intent).awaitCommit(null);
     try testing.expectEqual(@as(sequencer_mod.Seq, 2), r3.seq);
 
     // Partition log must have exactly seqs 1 and 2.

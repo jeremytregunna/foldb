@@ -57,21 +57,36 @@ pub const PendingSubmit = struct {
     next: std.atomic.Value(?*PendingSubmit) = .init(null),
 };
 
-/// Maximum spins before returning CommitTimeout. Covers quorum loss after a proposal:
-/// rather than asserting (crashing the process), the caller gets a recoverable error.
+/// Maximum spins before returning CommitTimeout (spin-wait fallback path).
 const AWAIT_MAX_SPINS: u32 = 100_000_000;
+/// Maximum 1ms sleeps before CommitTimeout (async fiber path, ~30 s).
+const AWAIT_MAX_RETRIES: u32 = 30_000;
 
-/// Handle returned by Sequencer.submitBytes(). Spins on the done flag until the Sequencer
-/// thread commits the entry and writes the result.
+/// Handle returned by Sequencer.submitBytes().
 pub const SubmitHandle = struct {
     pending: *PendingSubmit,
 
-    pub fn awaitCommit(self: *const SubmitHandle) !SubmitResult {
-        var spins: u32 = 0;
-        while (!self.pending.done.load(.acquire)) {
-            if (spins >= AWAIT_MAX_SPINS) return error.CommitTimeout;
-            spins += 1;
-            _ = std.os.linux.sched_yield();
+    /// Wait for the Sequencer thread to commit this entry.
+    ///
+    /// When `io` is non-null the fiber suspends via io.sleep(1 ms) between
+    /// checks so other connection fibers can run during the Raft round-trip.
+    /// When `io` is null the function falls back to sched_yield spinning (safe
+    /// on dedicated sequencer-test threads that have no fiber scheduler).
+    pub fn awaitCommit(self: *const SubmitHandle, io: ?std.Io) !SubmitResult {
+        if (io) |the_io| {
+            var retries: u32 = 0;
+            while (!self.pending.done.load(.acquire)) {
+                if (retries >= AWAIT_MAX_RETRIES) return error.CommitTimeout;
+                retries += 1;
+                try the_io.sleep(.{ .nanoseconds = 1_000_000 }, .awake);
+            }
+        } else {
+            var spins: u32 = 0;
+            while (!self.pending.done.load(.acquire)) {
+                if (spins >= AWAIT_MAX_SPINS) return error.CommitTimeout;
+                spins += 1;
+                _ = std.os.linux.sched_yield();
+            }
         }
         if (self.pending.err) |e| return e;
         return self.pending.result;

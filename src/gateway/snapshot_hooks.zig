@@ -31,5 +31,5 @@ pub fn writeSnapshotToLog(ptr: *anyopaque, manifest_key: []const u8, seq: u64, p
         ctx.client_id,
         ctx.client_seq,
         .snapshot_marker,
-    ).awaitCommit();
+    ).awaitCommit(null);
 }

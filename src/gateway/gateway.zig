@@ -85,6 +85,8 @@ pub const Gateway = struct {
     recon_strategy: ReconStrategy,
     alloc: std.mem.Allocator,
     metrics: observability_mod.GatewayMetrics = .{},
+    /// I/O context for async awaitCommit on the fiber scheduler. Null in tests.
+    io: ?std.Io = null,
     /// Heap-allocated S3 store; non-null when S3 is configured. Freed in deinit.
     s3_store: ?*storage_mod.S3ObjectStore = null,
     /// Per-partition context structs for snapshot log writers. Freed in deinit.
@@ -110,6 +112,9 @@ pub const Gateway = struct {
         election_timeout_max_ms: u32 = 300,
         heartbeat_interval_ms: u32 = 50,
         peers: []const sequencer_mod.PeerAddr = &.{},
+        /// I/O context for the fiber scheduler. When set, awaitCommit suspends
+        /// the fiber during Raft round-trips instead of busy-spinning.
+        io: ?std.Io = null,
         // S3 / object storage (all optional — zero values disable tiering).
         /// Required when S3 credentials are provided; used for hostname resolution and connection.
         s3_io: ?std.Io = null,
@@ -211,6 +216,7 @@ pub const Gateway = struct {
             }
         }
 
+        gw.io = opts.io;
         gw.schema = sql_mod.SchemaRegistry.init(alloc);
         gw.registry = sql_mod.SqlRegistry.init(alloc, &gw.schema);
         gw.sql_exec = sql_mod.SqlExecutor.init(&gw.partitioned, &gw.registry, &gw.schema, alloc);
@@ -376,7 +382,7 @@ pub const Gateway = struct {
             self.client_id,
             self.client_seq,
             .schema_change,
-        ).awaitCommit();
+        ).awaitCommit(self.io);
         return .{
             .hash = hash,
             .schema_version = self.registry.schema_seq,
@@ -422,7 +428,7 @@ pub const Gateway = struct {
         const handle = self.sequencer.submitBytes(
             &pending, intent_bytes, self.client_id, op_seq, .txn_intent,
         );
-        const result = try handle.awaitCommit();
+        const result = try handle.awaitCommit(self.io);
 
         // Drain committed log entries up to result.seq. This runs on the gateway thread
         // after awaitCommit() guarantees the entry is durable — commit precedes execution.
@@ -767,7 +773,7 @@ pub const Gateway = struct {
             self.client_id,
             self.client_seq,
             .schema_change,
-        ).awaitCommit();
+        ).awaitCommit(self.io);
     }
 
     /// Apply DDL during log replay (does not write to log).

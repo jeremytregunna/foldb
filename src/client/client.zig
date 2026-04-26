@@ -54,8 +54,8 @@ pub const Client = struct {
     last_error: [256]u8 = undefined,
     last_error_len: u32 = 0,
 
-    pub fn init(io: std.Io, stream: net.Stream, alloc: std.mem.Allocator) Client {
-        var c: Client = .{
+    fn init(io: std.Io, stream: net.Stream, alloc: std.mem.Allocator) Client {
+        return .{
             .io = io,
             .stream = stream,
             .reader = undefined,
@@ -65,9 +65,6 @@ pub const Client = struct {
             .alloc = alloc,
             .stream_id_next = 1,
         };
-        c.reader = stream.reader(io, &c.read_buf);
-        c.writer = stream.writer(io, &c.write_buf);
-        return c;
     }
 
     pub fn deinit(self: *Client) void {
@@ -334,6 +331,8 @@ pub fn connect(io: std.Io, host: []const u8, port: u16, alloc: std.mem.Allocator
     assert(port > 0);
     const stream = try connect_stream(io, host, port);
     var client = Client.init(io, stream, alloc);
+    client.reader = stream.reader(io, &client.read_buf);
+    client.writer = stream.writer(io, &client.write_buf);
     errdefer client.deinit();
     try client.handshake();
     return client;

@@ -228,13 +228,6 @@ pub const Conn = struct {
         // protocol error is detected. Each iteration reads one complete frame from
         // the wire, so progress is guaranteed — we never spin without I/O.
         while (true) {
-            // Drain any committed partition log entries before handling each
-            // request. On the leader this is a no-op (entries are applied inline
-            // in execute() after each commit). On followers this brings schema,
-            // registry, and storage up to date before serving reads. Running apply
-            // here on the I/O thread means schema/registry are never mutated from
-            // a background thread concurrently with connection reads — no lock needed.
-            self.gw.applyNewEntries() catch {};
             const hdr = frame.readHeader(&self.reader.interface) catch return;
             if (hdr.payload_len > self.cap()) {
                 self.sendFatalError(.frame_too_large, "frame exceeds cap");
@@ -505,7 +498,7 @@ pub const Conn = struct {
                     &hdr_buf,
                     .{ .duration = .{ .raw = .{ .nanoseconds = DRAIN_POLL_SLEEP_NS }, .clock = .awake } },
                 ) catch |e| switch (e) {
-                    error.Timeout => { self.gw.applyNewEntries() catch {}; continue; },
+                    error.Timeout => continue,
                     error.Canceled => return,
                     else => return,
                 };

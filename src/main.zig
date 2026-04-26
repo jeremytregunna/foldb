@@ -304,6 +304,7 @@ fn cmdServe(io: std.Io, alloc: std.mem.Allocator, it: *std.process.Args.Iterator
     }
 
     const gw = try gateway_mod.Gateway.init(storage_dir, alloc, .{
+        .io = io,
         .partition_count = cfg.partition_count,
         .node_id = cfg.node_id,
         .tick_interval_ms = 10,

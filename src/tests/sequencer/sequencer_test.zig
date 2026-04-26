@@ -90,13 +90,13 @@ test "Sequencer: submit assigns dense increasing seqs" {
     defer testing.allocator.free(payload);
 
     var p1: PendingSubmit = undefined;
-    const r1 = try seq.submitBytes(&p1, payload, 1, 1, .txn_intent).awaitCommit();
+    const r1 = try seq.submitBytes(&p1, payload, 1, 1, .txn_intent).awaitCommit(null);
 
     var p2: PendingSubmit = undefined;
-    const r2 = try seq.submitBytes(&p2, payload, 1, 2, .txn_intent).awaitCommit();
+    const r2 = try seq.submitBytes(&p2, payload, 1, 2, .txn_intent).awaitCommit(null);
 
     var p3: PendingSubmit = undefined;
-    const r3 = try seq.submitBytes(&p3, payload, 1, 3, .txn_intent).awaitCommit();
+    const r3 = try seq.submitBytes(&p3, payload, 1, 3, .txn_intent).awaitCommit(null);
 
     try testing.expectEqual(@as(u64, 1), r1.seq);
     try testing.expectEqual(@as(u64, 2), r2.seq);
@@ -119,10 +119,10 @@ test "Sequencer: idempotent submit returns same seq" {
     defer testing.allocator.free(payload);
 
     var p1: PendingSubmit = undefined;
-    const r1 = try seq.submitBytes(&p1, payload, 42, 7, .txn_intent).awaitCommit();
+    const r1 = try seq.submitBytes(&p1, payload, 42, 7, .txn_intent).awaitCommit(null);
 
     var p2: PendingSubmit = undefined;
-    const r2 = try seq.submitBytes(&p2, payload, 42, 7, .txn_intent).awaitCommit();
+    const r2 = try seq.submitBytes(&p2, payload, 42, 7, .txn_intent).awaitCommit(null);
 
     try testing.expectEqual(r1.seq, r2.seq);
     try testing.expectEqual(r1.partition, r2.partition);
@@ -144,16 +144,16 @@ test "Sequencer: multi-partition routing distributes round-robin" {
     defer testing.allocator.free(payload);
 
     var p1: PendingSubmit = undefined;
-    const r1 = try seq.submitBytes(&p1, payload, 1, 1, .txn_intent).awaitCommit();
+    const r1 = try seq.submitBytes(&p1, payload, 1, 1, .txn_intent).awaitCommit(null);
 
     var p2: PendingSubmit = undefined;
-    const r2 = try seq.submitBytes(&p2, payload, 1, 2, .txn_intent).awaitCommit();
+    const r2 = try seq.submitBytes(&p2, payload, 1, 2, .txn_intent).awaitCommit(null);
 
     var p3: PendingSubmit = undefined;
-    const r3 = try seq.submitBytes(&p3, payload, 1, 3, .txn_intent).awaitCommit();
+    const r3 = try seq.submitBytes(&p3, payload, 1, 3, .txn_intent).awaitCommit(null);
 
     var p4: PendingSubmit = undefined;
-    const r4 = try seq.submitBytes(&p4, payload, 1, 4, .txn_intent).awaitCommit();
+    const r4 = try seq.submitBytes(&p4, payload, 1, 4, .txn_intent).awaitCommit(null);
 
     // seq 1 → 1%2=1, seq 2 → 2%2=0, seq 3 → 3%2=1, seq 4 → 4%2=0
     try testing.expectEqual(@as(u32, 1), r1.partition);
@@ -177,7 +177,7 @@ test "Sequencer: committed entry readable from partition log" {
     defer testing.allocator.free(payload);
 
     var pending: PendingSubmit = undefined;
-    const result = try seq.submitBytes(&pending, payload, 1, 1, .txn_intent).awaitCommit();
+    const result = try seq.submitBytes(&pending, payload, 1, 1, .txn_intent).awaitCommit(null);
 
     const partition_log = seq.partitionLog(result.partition);
     const entries = try partition_log.read(result.seq, 1, testing.allocator);

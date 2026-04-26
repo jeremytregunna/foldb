@@ -209,7 +209,7 @@ test "3-node actor cluster: submitBytes commits and is readable" {
         1,
         1,
         .txn_intent,
-    ).awaitCommit();
+    ).awaitCommit(null);
 
     try testing.expect(result.seq >= 1);
 
@@ -240,7 +240,7 @@ test "3-node actor cluster: majority commits ordering decision" {
         1,
         1,
         .txn_intent,
-    ).awaitCommit();
+    ).awaitCommit(null);
 
     // awaitCommit returned — the leader committed. Give followers a moment to catch up.
     const sleep_ts = std.os.linux.timespec{ .sec = 0, .nsec = 100_000_000 }; // 100ms
@@ -271,7 +271,7 @@ test "3-node actor cluster: multiple sequential commits" {
             1,
             @intCast(i),
             .txn_intent,
-        ).awaitCommit();
+        ).awaitCommit(null);
 
         try testing.expect(result.seq > last_seq);
         last_seq = result.seq;

@@ -1,53 +1,43 @@
-/// TCP server: bind, listen, accept loop with per-connection async tasks.
+/// TCP server: async accept loop with per-connection fibers and apply coroutine.
 const std = @import("std");
-const frame = @import("frame.zig");
 const conn_mod = @import("conn.zig");
 const gateway_mod = @import("gateway.zig");
 const config_mod = @import("config.zig");
 
 const assert = std.debug.assert;
 
-// ---- socket / syscall constants ----
+const LISTEN_BACKLOG: u31 = 128;
 
-const AF_INET: u32 = 2;
-const SOCK_STREAM: u32 = 1;
-const SOCK_CLOEXEC: u32 = 0o2000000;
-const SOL_SOCKET: u32 = 1;
-const SO_REUSEADDR: u32 = 2;
+/// Apply interval for the applyEntriesLoop coroutine (5 ms).
+const APPLY_INTERVAL_NS: u64 = 5_000_000;
+
+/// POSIX shutdown(2) how=SHUT_RDWR, for the signal handler.
 const SHUT_RDWR: i32 = 2;
-const LISTEN_BACKLOG: u32 = 128;
-
-// ---- server constants ----
-
-/// Maximum number of concurrently tracked client connections.
-const MAX_CONNECTIONS: u32 = 4096;
-
-/// Sleep between accept attempts when no connection is pending (nanoseconds).
-/// Keeps the accept loop from busy-spinning and provides a regular window for
-/// followers to drain committed log entries with no client actively connected.
-const ACCEPT_IDLE_NS: u64 = 5_000_000; // 5 ms
 
 comptime {
-    assert(MAX_CONNECTIONS > 0);
-    assert(ACCEPT_IDLE_NS > 0);
     assert(LISTEN_BACKLOG > 0);
+    assert(APPLY_INTERVAL_NS > 0);
 }
 
-/// Set by SIGINT/SIGTERM/SIGHUP handlers; polled in the accept loop to trigger clean shutdown.
+/// Set by SIGINT/SIGTERM/SIGHUP handlers; checked after accept returns.
 var shutdown_requested = std.atomic.Value(bool).init(false);
+
+/// Listening socket handle stored so the signal handler can shut it down,
+/// interrupting any in-progress listener.accept() call.
+var listener_handle = std.atomic.Value(std.Io.net.Socket.Handle).init(-1);
 
 fn handleShutdown(_: std.os.linux.SIG) callconv(.c) void {
     shutdown_requested.store(true, .release);
+    const h = listener_handle.load(.acquire);
+    if (h >= 0) _ = std.os.linux.shutdown(@intCast(h), SHUT_RDWR);
 }
 
 /// Install signal handlers for clean shutdown and safe socket I/O.
 ///
 ///   SIGINT  — Ctrl+C; SA_RESETHAND so a second ^C kills immediately.
 ///   SIGTERM — systemd/Docker/Kubernetes stop; same clean shutdown path.
-///   SIGHUP  — terminal hangup / daemon reload signal; treat as shutdown
-///             (no hot-reload config yet).
-///   SIGPIPE — broken client socket mid-write; ignored so the write syscall
-///             returns EPIPE instead of killing the process.
+///   SIGHUP  — terminal hangup / daemon reload signal; treat as shutdown.
+///   SIGPIPE — broken client socket mid-write; ignored so writes return EPIPE.
 fn installSignalHandlers() void {
     const linux = std.os.linux;
     const empty = linux.sigemptyset();
@@ -58,7 +48,6 @@ fn installSignalHandlers() void {
         .flags = linux.SA.RESETHAND,
     };
     _ = linux.sigaction(linux.SIG.INT, &sa_shutdown, null);
-    // SIGTERM and SIGHUP don't need RESETHAND — a second signal is fine.
     sa_shutdown.flags = 0;
     _ = linux.sigaction(linux.SIG.TERM, &sa_shutdown, null);
     _ = linux.sigaction(linux.SIG.HUP, &sa_shutdown, null);
@@ -71,132 +60,29 @@ fn installSignalHandlers() void {
     _ = linux.sigaction(linux.SIG.PIPE, &sa_ignore, null);
 }
 
-/// Bind + listen on port. Returns the server fd.
-pub fn bindListen(port: u16) !std.posix.fd_t {
-    assert(port > 0);
-
-    const raw_fd = std.os.linux.socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    const fd_i: isize = @bitCast(raw_fd);
-    if (fd_i < 0) return error.SocketError;
-    const fd: std.posix.fd_t = @intCast(fd_i);
-    errdefer _ = std.os.linux.close(@intCast(fd));
-
-    const opt: u32 = 1;
-    _ = std.os.linux.setsockopt(
-        @intCast(fd),
-        SOL_SOCKET,
-        SO_REUSEADDR,
-        @ptrCast(&opt),
-        @sizeOf(u32),
-    );
-
-    // sockaddr_in: family(2) + port BE(2) + addr(4) + padding(8) = 16 bytes.
-    var addr_buf: [16]u8 align(2) = std.mem.zeroes([16]u8);
-    std.mem.writeInt(u16, addr_buf[0..2], AF_INET, .little);
-    std.mem.writeInt(u16, addr_buf[2..4], port, .big); // port is always BE in sockaddr
-    // addr = INADDR_ANY (0.0.0.0) — already zeroed.
-
-    const bind_rc = std.os.linux.bind(fd, @ptrCast(@alignCast(&addr_buf)), 16);
-    const bind_i: isize = @bitCast(bind_rc);
-    if (bind_i < 0) return error.BindError;
-
-    const listen_rc = std.os.linux.listen(@intCast(fd), LISTEN_BACKLOG);
-    const listen_i: isize = @bitCast(listen_rc);
-    if (listen_i < 0) return error.ListenError;
-
-    assert(fd >= 0);
-    return fd;
+/// Cooperative coroutine that calls applyNewEntries every APPLY_INTERVAL_NS.
+/// Runs as a group task alongside connection fibers, so schema/registry updates
+/// happen on the same cooperative thread — no locks needed.
+fn applyEntriesLoop(io: std.Io, gw: *gateway_mod.Gateway) !void {
+    while (true) {
+        gw.applyNewEntries() catch {};
+        try io.sleep(.{ .nanoseconds = APPLY_INTERVAL_NS }, .awake);
+    }
 }
 
-/// Accept one connection. Returns the client fd.
-fn acceptOne(server_fd: std.posix.fd_t) !std.posix.fd_t {
-    assert(server_fd >= 0);
-    const n = std.os.linux.accept4(@intCast(server_fd), null, null, SOCK_CLOEXEC);
-    const ni: isize = @bitCast(n);
-    if (ni < 0) return error.AcceptError;
-    return @intCast(ni);
-}
-
-/// Spinlock-protected registry of active client fds.
-/// On shutdown we shut them all down to unblock any blocking reads, which lets the
-/// connection tasks return errors and exit — allowing the accept loop to drain.
-const ConnRegistry = struct {
-    fds: [MAX_CONNECTIONS]std.posix.fd_t = undefined,
-    len: u32 = 0,
-    lock: std.atomic.Value(bool) = .init(false),
-
-    fn acquire(self: *ConnRegistry) void {
-        while (self.lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {}
-    }
-
-    fn release(self: *ConnRegistry) void {
-        self.lock.store(false, .release);
-    }
-
-    fn add(self: *ConnRegistry, fd: std.posix.fd_t) void {
-        self.acquire();
-        defer self.release();
-        assert(self.len < MAX_CONNECTIONS); // capacity exhausted — increase MAX_CONNECTIONS
-        self.fds[self.len] = fd;
-        self.len += 1;
-    }
-
-    fn remove(self: *ConnRegistry, fd: std.posix.fd_t) void {
-        self.acquire();
-        defer self.release();
-        for (0..self.len) |i| {
-            if (self.fds[i] == fd) {
-                self.len -= 1;
-                self.fds[i] = self.fds[self.len];
-                return;
-            }
-        }
-    }
-
-    /// Shutdown all tracked socket fds (SHUT_RDWR). This interrupts any blocking
-    /// read/write in each connection task, causing it to return an error and exit.
-    /// The actual close() remains in each task's own defer — calling close() here
-    /// from a different thread does NOT interrupt a blocking read on Linux; only
-    /// shutdown() reliably does.
-    fn closeAll(self: *ConnRegistry) void {
-        self.acquire();
-        defer self.release();
-        for (0..self.len) |i| {
-            _ = std.os.linux.shutdown(@intCast(self.fds[i]), SHUT_RDWR);
-        }
-        // Do NOT reset len here. Tasks call remove() when they finish (after
-        // conn.deinit()), so the caller can spin on isEmpty() to know when all
-        // gw access has ceased and gw.deinit() is safe to call.
-    }
-
-    fn isEmpty(self: *ConnRegistry) bool {
-        self.acquire();
-        defer self.release();
-        return self.len == 0;
-    }
-};
-
-/// Connection task: runs the full connection lifecycle for a single client.
+/// Connection task: runs the full lifecycle for one client.
 fn handleConn(
     io: std.Io,
-    client_fd: std.posix.fd_t,
+    stream: std.Io.net.Stream,
     gw: *gateway_mod.Gateway,
     users: []const config_mod.UserEntry,
     alloc: std.mem.Allocator,
-    registry: *ConnRegistry,
 ) !void {
-    assert(client_fd >= 0);
-    registry.add(client_fd);
-    defer registry.remove(client_fd);
-    const stream: std.Io.net.Stream = .{ .socket = .{
-        .handle = client_fd,
-        .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } },
-    } };
     try conn_mod.Conn.run(io, stream, gw, users, alloc);
 }
 
-/// Main server loop. Accepts connections and spawns a concurrent task per connection.
-/// Returns cleanly when SIGINT is received so deferred cleanup (flush, deinit) runs.
+/// Main server loop. Accepts connections and spawns a cooperative fiber per
+/// connection. Returns cleanly when a shutdown signal is received.
 pub fn serve(
     io: std.Io,
     port: u16,
@@ -208,42 +94,27 @@ pub fn serve(
 
     installSignalHandlers();
 
-    const server_fd = try bindListen(port);
-    defer _ = std.os.linux.close(@intCast(server_fd));
+    const address = try std.Io.net.IpAddress.parse("0.0.0.0", port);
+    var listener = try address.listen(io, .{ .reuse_address = true, .kernel_backlog = LISTEN_BACKLOG });
+    defer listener.deinit(io);
+    listener_handle.store(listener.socket.handle, .release);
+    defer listener_handle.store(-1, .release);
 
-    var registry: ConnRegistry = .{};
-    var group: std.Io.Group = .{ .token = .init(null), .state = 0 };
+    var group: std.Io.Group = .init;
+    group.async(io, applyEntriesLoop, .{ io, gw });
 
-    while (!shutdown_requested.load(.acquire)) {
-        const client_fd = acceptOne(server_fd) catch {
-            // accept4 returns EINTR when interrupted by a signal; check for shutdown.
-            if (shutdown_requested.load(.acquire)) break;
-            // No pending connection — drain any committed log entries on this thread
-            // so followers stay current, then sleep before trying again.
-            gw.applyNewEntries() catch {};
-            const ts = std.os.linux.timespec{ .sec = 0, .nsec = ACCEPT_IDLE_NS };
-            _ = std.os.linux.nanosleep(&ts, null);
-            continue;
+    while (true) {
+        const stream = listener.accept(io) catch |e| switch (e) {
+            error.Canceled, error.SocketNotListening => break,
+            else => {
+                if (shutdown_requested.load(.acquire)) break;
+                continue;
+            },
         };
-        group.async(io, handleConn, .{ io, client_fd, gw, users, alloc, &registry });
+        group.async(io, handleConn, .{ io, stream, gw, users, alloc });
     }
 
-    // Close all active client fds to unblock their blocking reads.
-    registry.closeAll();
-
-    // Spin until all tasks have finished conn.deinit() — the last point where
-    // they access gw. registry.remove() is called inside handleConn's defer,
-    // which runs after conn.deinit(), so isEmpty() guarantees no concurrent gw
-    // access remains before we return to the caller's gw.deinit().
-    //
-    // Note: group.cancel(io) is intentionally NOT called. It blocks until tasks
-    // acknowledge cancellation via io.checkCancel(), which connection handlers
-    // never call (they use raw syscalls). Tasks have already exited by the time
-    // registry is empty; the group futures are abandoned and the OS reclaims
-    // thread resources on process exit.
-    while (!registry.isEmpty()) {
-        _ = std.os.linux.sched_yield();
-    }
-
+    group.cancel(io);
+    group.await(io) catch {};
     std.log.info("foldb: shutting down cleanly", .{});
 }

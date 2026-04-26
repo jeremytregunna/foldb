@@ -86,7 +86,7 @@ test "follower submitBytes: returns NotLeader, does not panic" {
     try testing.expect(!seq.isLeader());
 
     var pending: PendingSubmit = undefined;
-    const result = seq.submitBytes(&pending, "test_payload", 1, 1, .txn_intent).awaitCommit();
+    const result = seq.submitBytes(&pending, "test_payload", 1, 1, .txn_intent).awaitCommit(null);
     try testing.expectError(SequencerError.NotLeader, result);
 }
 
@@ -111,7 +111,7 @@ test "follower submitBytes: next_seq unchanged after NotLeader return" {
     const epoch_before = seq.next_epoch;
 
     var pending: PendingSubmit = undefined;
-    _ = seq.submitBytes(&pending, "test_payload", 1, 1, .txn_intent).awaitCommit() catch {};
+    _ = seq.submitBytes(&pending, "test_payload", 1, 1, .txn_intent).awaitCommit(null) catch {};
 
     // Counters must be identical — the failed proposal must not advance them.
     try testing.expectEqual(seq_before, seq.next_seq);
@@ -136,7 +136,7 @@ test "follower submitBytes: multiple submissions all return NotLeader" {
 
     for (1..4) |i| {
         var pending: PendingSubmit = undefined;
-        const result = seq.submitBytes(&pending, "payload", 1, @intCast(i), .txn_intent).awaitCommit();
+        const result = seq.submitBytes(&pending, "payload", 1, @intCast(i), .txn_intent).awaitCommit(null);
         try testing.expectError(SequencerError.NotLeader, result);
     }
 
