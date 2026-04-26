@@ -14,6 +14,7 @@ pub const ClockSource = struct {
     }
 
     fn realNowMicros(_: ?*anyopaque) i64 {
+        // SAFETY: clock_gettime fills ts before any field is read.
         var ts: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
         const sec_us: i64 = @as(i64, @intCast(ts.sec)) * 1_000_000;
@@ -32,6 +33,7 @@ pub const RandSource = struct {
     }
 
     fn realFill(_: ?*anyopaque, buf: []u8) void {
+        // SAFETY: clock_gettime fills ts before any field is read.
         var ts: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
         const seed: u64 = @as(u64, @intCast(ts.sec)) * 1_000_000_000 +

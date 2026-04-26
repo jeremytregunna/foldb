@@ -90,10 +90,10 @@ pub const Gateway = struct {
     /// Highest seq for which a snapshot has been durably uploaded. Updated by postSnapshotImpl.
     durable_snapshot_seq: sequencer_mod.Seq = 0,
     /// Stable context for the post-snapshot truncation hook. Initialized in init.
-    truncate_ctx: TruncateCtx = undefined,
+    truncate_ctx: TruncateCtx,
     /// Last error detail set by gateway operations (table/column context).
     /// Reset at the start of each operation that may set it.
-    error_detail: [256]u8 = undefined,
+    error_detail: [256]u8,
     error_detail_len: usize = 0,
 
     pub const Options = struct {
@@ -183,6 +183,8 @@ pub const Gateway = struct {
         gw.snapshot_writer_ctxs = &.{};
         gw.durable_snapshot_seq = 0;
         gw.truncate_ctx = .{ .gateway = gw };
+        gw.error_detail = undefined;
+        gw.error_detail_len = 0;
 
         // Wire S3 tiered storage when credentials are provided.
         if (opts.s3_access_key.len > 0) {
@@ -369,7 +371,7 @@ pub const Gateway = struct {
                 var arena = std.heap.ArenaAllocator.init(self.alloc);
                 defer arena.deinit();
                 var p = sql_mod.parser.Parser.init(sql, arena.allocator());
-                _ = p.parseQuery() catch {};
+                _ = p.parseQuery() catch |err| std.log.debug("parse probe: {}", .{err});
                 if (p.err_msg) |msg| {
                     const pos = p.err_pos;
                     if (pos < sql.len) {
@@ -388,6 +390,7 @@ pub const Gateway = struct {
         };
         self.metrics.queries_registered.inc();
         self.client_seq += 1;
+        // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
         var pending: sequencer_mod.PendingSubmit = undefined;
         const result = try self.sequencer.submitBytes(
             &pending,
@@ -435,14 +438,27 @@ pub const Gateway = struct {
         buf: *std.ArrayList(u8),
     ) !void {
         var hints = try recon_mod.reconnaissanceScan(
-            plan, &self.partitioned, params, &self.fold_executors[0].schema,
-            recon_seq, self.partition_count, self.recon_strategy, self.alloc,
+            plan,
+            &self.partitioned,
+            params,
+            &self.fold_executors[0].schema,
+            recon_seq,
+            self.partition_count,
+            self.recon_strategy,
+            self.alloc,
         );
         defer hints.deinit();
         try executor_mod.serialize_txn_intent(
-            hash, self.client_id, op_seq, recon_seq,
-            hints.read, hints.write, params_bytes, all_nondet,
-            buf, self.alloc,
+            hash,
+            self.client_id,
+            op_seq,
+            recon_seq,
+            hints.read,
+            hints.write,
+            params_bytes,
+            all_nondet,
+            buf,
+            self.alloc,
         );
     }
 
@@ -452,7 +468,11 @@ pub const Gateway = struct {
         // SAFETY: submitBytes writes to pending synchronously before the handle is used.
         var pending: sequencer_mod.PendingSubmit = undefined;
         const handle = self.sequencer.submitBytes(
-            &pending, intent_bytes, self.client_id, op_seq, .txn_intent,
+            &pending,
+            intent_bytes,
+            self.client_id,
+            op_seq,
+            .txn_intent,
         );
         const result = try handle.awaitCommit(self.io);
 
@@ -559,7 +579,14 @@ pub const Gateway = struct {
 
             intent_buf.clearRetainingCapacity();
             try self.buildTxnIntent(
-                &hash, rq.plan, op_seq, hint_seq, params, params_bytes, all_nondet, &intent_buf,
+                &hash,
+                rq.plan,
+                op_seq,
+                hint_seq,
+                params,
+                params_bytes,
+                all_nondet,
+                &intent_buf,
             );
             switch (try self.submitAndDrain(intent_buf.items, op_seq)) {
                 .done => |r| return r,
@@ -593,7 +620,6 @@ pub const Gateway = struct {
         return self.fold_executors[0].readAt(hash, params, seq, self.alloc);
     }
 
-
     /// Set a human-readable detail string for the last error (table/column context).
     fn setDetail(self: *Gateway, comptime fmt: []const u8, args: anytype) void {
         const s = std.fmt.bufPrint(&self.error_detail, fmt, args) catch &self.error_detail;
@@ -611,6 +637,7 @@ pub const Gateway = struct {
         self.error_detail_len = 0;
         try self.fold_executors[0].applyDdlLocal(sql);
         self.client_seq += 1;
+        // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
         var pending: sequencer_mod.PendingSubmit = undefined;
         const result = try self.sequencer.submitBytes(
             &pending,
@@ -679,5 +706,3 @@ pub const Gateway = struct {
         return self.fold_executors[0].tableIdExists(id);
     }
 };
-
-

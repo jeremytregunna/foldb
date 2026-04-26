@@ -23,7 +23,7 @@ const ColumnValue = storage_mod.ColumnValue;
 // ---------------------------------------------------------------------------
 
 fn makeMutation(alloc: std.mem.Allocator, seq: u64) !Mutation {
-    const key = try alloc.dupe(u8, &[_]u8{ @intCast(seq & 0xFF) });
+    const key = try alloc.dupe(u8, &[_]u8{@intCast(seq & 0xFF)});
     const vals = try alloc.alloc(ColumnValue, 1);
     vals[0] = .{ .int64 = @intCast(seq) };
     return .{ .table_id = 1, .key = key, .kind = .insert, .values = vals };
@@ -53,9 +53,15 @@ const ProducerCtx = struct {
 
 fn producerThread(ctx: *ProducerCtx) void {
     for (1..ctx.n_events + 1) |seq| {
-        const m = makeMutation(ctx.alloc, seq) catch |e| { ctx.err = e; return; };
+        const m = makeMutation(ctx.alloc, seq) catch |e| {
+            ctx.err = e;
+            return;
+        };
         defer freeMutation(m, ctx.alloc);
-        var before = makeBeforeImages(&.{m}, ctx.alloc) catch |e| { ctx.err = e; return; };
+        var before = makeBeforeImages(&.{m}, ctx.alloc) catch |e| {
+            ctx.err = e;
+            return;
+        };
         defer before.deinit();
         ctx.mgr.dispatch(seq, 1, .txn_intent, &.{m}, before, ctx.alloc) catch |e| {
             ctx.err = e;
@@ -120,7 +126,10 @@ const SubscribeWhileDispatchCtx = struct {
 
 fn subscribeUnsubscribeThread(ctx: *SubscribeWhileDispatchCtx) void {
     for (0..20) |_| {
-        const sub = ctx.mgr.subscribe(null, 0) catch |e| { ctx.err = e; return; };
+        const sub = ctx.mgr.subscribe(null, 0) catch |e| {
+            ctx.err = e;
+            return;
+        };
         // Spin briefly so dispatch has a chance to run with this subscriber present.
         var i: usize = 0;
         while (i < 100) : (i += 1) std.atomic.spinLoopHint();

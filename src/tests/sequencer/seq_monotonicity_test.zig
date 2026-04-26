@@ -20,6 +20,7 @@ const PendingSubmit = sequencer_mod.PendingSubmit;
 // ---------------------------------------------------------------------------
 
 fn makeTempDir(seed: u64, alloc: std.mem.Allocator) ![]const u8 {
+    // SAFETY: clock_gettime fills ts before any field is read.
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
@@ -109,6 +110,7 @@ fn runMonotonicityCheck(seed: u64, n_entries: usize, alloc: std.mem.Allocator) !
         defer alloc.free(payload);
         rand.bytes(payload);
 
+        // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
         var pending: PendingSubmit = undefined;
         const result = try seq.submitBytes(
             &pending,

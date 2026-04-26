@@ -24,6 +24,7 @@ pub fn writeSnapshotToLog(ptr: *anyopaque, manifest_key: []const u8, seq: u64, p
     const bytes = try payload.serialize(alloc);
     defer alloc.free(bytes);
     ctx.client_seq += 1;
+    // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
     var pending: sequencer_mod.PendingSubmit = undefined;
     _ = try ctx.sequencer.submitBytes(
         &pending,

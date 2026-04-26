@@ -326,11 +326,14 @@ fn evalBinaryArith(op: ast.BinOp, lv: plan_mod.Value, rv: plan_mod.Value) SqlExe
     assert(op == .add or op == .sub or op == .mul or op == .div or op == .mod);
     return switch (op) {
         .add => switch (lv) {
-            .int_val => |a| switch (rv) { .int_val => |b| .{ .int_val = a + b }, else => decimalArith: {
-                const ld = toDecimal(lv) orelse break :decimalArith error.TypeMismatch;
-                const rd = toDecimal(rv) orelse break :decimalArith error.TypeMismatch;
-                break :decimalArith .{ .decimal_val = decimalAdd(ld, rd) };
-            }},
+            .int_val => |a| switch (rv) {
+                .int_val => |b| .{ .int_val = a + b },
+                else => decimalArith: {
+                    const ld = toDecimal(lv) orelse break :decimalArith error.TypeMismatch;
+                    const rd = toDecimal(rv) orelse break :decimalArith error.TypeMismatch;
+                    break :decimalArith .{ .decimal_val = decimalAdd(ld, rd) };
+                },
+            },
             .decimal_val => |a| switch (rv) {
                 .decimal_val => |b| .{ .decimal_val = decimalAdd(a, b) },
                 .int_val => |b| .{ .decimal_val = decimalAdd(a, intToDecimal(b)) },
@@ -339,11 +342,14 @@ fn evalBinaryArith(op: ast.BinOp, lv: plan_mod.Value, rv: plan_mod.Value) SqlExe
             else => error.TypeMismatch,
         },
         .sub => switch (lv) {
-            .int_val => |a| switch (rv) { .int_val => |b| .{ .int_val = a - b }, else => decimalArith: {
-                const ld = toDecimal(lv) orelse break :decimalArith error.TypeMismatch;
-                const rd = toDecimal(rv) orelse break :decimalArith error.TypeMismatch;
-                break :decimalArith .{ .decimal_val = decimalSub(ld, rd) };
-            }},
+            .int_val => |a| switch (rv) {
+                .int_val => |b| .{ .int_val = a - b },
+                else => decimalArith: {
+                    const ld = toDecimal(lv) orelse break :decimalArith error.TypeMismatch;
+                    const rd = toDecimal(rv) orelse break :decimalArith error.TypeMismatch;
+                    break :decimalArith .{ .decimal_val = decimalSub(ld, rd) };
+                },
+            },
             .decimal_val => |a| switch (rv) {
                 .decimal_val => |b| .{ .decimal_val = decimalSub(a, b) },
                 .int_val => |b| .{ .decimal_val = decimalSub(a, intToDecimal(b)) },
@@ -352,11 +358,14 @@ fn evalBinaryArith(op: ast.BinOp, lv: plan_mod.Value, rv: plan_mod.Value) SqlExe
             else => error.TypeMismatch,
         },
         .mul => switch (lv) {
-            .int_val => |a| switch (rv) { .int_val => |b| .{ .int_val = a * b }, else => decimalArith: {
-                const ld = toDecimal(lv) orelse break :decimalArith error.TypeMismatch;
-                const rd = toDecimal(rv) orelse break :decimalArith error.TypeMismatch;
-                break :decimalArith .{ .decimal_val = decimalMul(ld, rd) };
-            }},
+            .int_val => |a| switch (rv) {
+                .int_val => |b| .{ .int_val = a * b },
+                else => decimalArith: {
+                    const ld = toDecimal(lv) orelse break :decimalArith error.TypeMismatch;
+                    const rd = toDecimal(rv) orelse break :decimalArith error.TypeMismatch;
+                    break :decimalArith .{ .decimal_val = decimalMul(ld, rd) };
+                },
+            },
             .decimal_val => |a| switch (rv) {
                 .decimal_val => |b| .{ .decimal_val = decimalMul(a, b) },
                 .int_val => |b| .{ .decimal_val = decimalMul(a, intToDecimal(b)) },
@@ -397,15 +406,24 @@ fn evalBinaryBitwise(op: ast.BinOp, lv: plan_mod.Value, rv: plan_mod.Value) SqlE
     assert(op == .bit_and or op == .bit_or or op == .bit_xor or op == .shl or op == .shr);
     return switch (op) {
         .bit_and => switch (lv) {
-            .int_val => |a| switch (rv) { .int_val => |b| .{ .int_val = a & b }, else => error.TypeMismatch },
+            .int_val => |a| switch (rv) {
+                .int_val => |b| .{ .int_val = a & b },
+                else => error.TypeMismatch,
+            },
             else => error.TypeMismatch,
         },
         .bit_or => switch (lv) {
-            .int_val => |a| switch (rv) { .int_val => |b| .{ .int_val = a | b }, else => error.TypeMismatch },
+            .int_val => |a| switch (rv) {
+                .int_val => |b| .{ .int_val = a | b },
+                else => error.TypeMismatch,
+            },
             else => error.TypeMismatch,
         },
         .bit_xor => switch (lv) {
-            .int_val => |a| switch (rv) { .int_val => |b| .{ .int_val = a ^ b }, else => error.TypeMismatch },
+            .int_val => |a| switch (rv) {
+                .int_val => |b| .{ .int_val = a ^ b },
+                else => error.TypeMismatch,
+            },
             else => error.TypeMismatch,
         },
         .shl => switch (lv) {

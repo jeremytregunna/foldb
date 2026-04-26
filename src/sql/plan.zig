@@ -547,6 +547,7 @@ pub const Planner = struct {
             const cte_node = try self.planSelect(cte.query.*);
             try self.cte_stack.append(self.arena, .{ .name = cte.name, .node = cte_node, .items = cte.query.items });
         }
+        // SAFETY: node is assigned in both branches of the if/else below before it is used.
         var node: *PlanNode = undefined;
         if (q.from) |tbl_ref| {
             node = try self.planTableRef(tbl_ref);
@@ -595,10 +596,16 @@ pub const Planner = struct {
             var left_pos: ?u32 = null;
             var right_pos: ?u32 = null;
             for (self.scope.items[0..right_scope_start]) |e| {
-                if (std.ascii.eqlIgnoreCase(e.col_name, col_name)) { left_pos = e.position; break; }
+                if (std.ascii.eqlIgnoreCase(e.col_name, col_name)) {
+                    left_pos = e.position;
+                    break;
+                }
             }
             for (self.scope.items[right_scope_start..]) |e| {
-                if (std.ascii.eqlIgnoreCase(e.col_name, col_name)) { right_pos = e.position; break; }
+                if (std.ascii.eqlIgnoreCase(e.col_name, col_name)) {
+                    right_pos = e.position;
+                    break;
+                }
             }
             if (left_pos == null or right_pos == null) return error.ColumnNotFound;
             const lc = try self.arena.create(PlanExpr);
@@ -631,15 +638,27 @@ pub const Planner = struct {
                 else => break :ann_blk false,
             };
             if (!std.ascii.eqlIgnoreCase(fc.name, "ANN") or fc.args.len != 3) break :ann_blk false;
-            const scan = switch (node.*) { .scan => |s| s, else => break :ann_blk false };
-            const param_idx: u32 = switch (fc.args[1].*) { .param => |p| p, else => break :ann_blk false };
-            const k_raw: i128 = switch (fc.args[2].*) { .lit_int => |v| v, else => break :ann_blk false };
+            const scan = switch (node.*) {
+                .scan => |s| s,
+                else => break :ann_blk false,
+            };
+            const param_idx: u32 = switch (fc.args[1].*) {
+                .param => |p| p,
+                else => break :ann_blk false,
+            };
+            const k_raw: i128 = switch (fc.args[2].*) {
+                .lit_int => |v| v,
+                else => break :ann_blk false,
+            };
             if (k_raw <= 0) break :ann_blk false;
             const idx_id = scan.index_hint orelse break :ann_blk false;
             const ann_node = try self.arena.create(PlanNode);
             ann_node.* = .{ .ann_scan = .{
-                .table_id = scan.table_id, .index_id = idx_id, .columns = scan.columns,
-                .query_param = param_idx, .k = @intCast(k_raw),
+                .table_id = scan.table_id,
+                .index_id = idx_id,
+                .columns = scan.columns,
+                .query_param = param_idx,
+                .k = @intCast(k_raw),
             } };
             node = ann_node;
             break :ann_blk true;
@@ -682,11 +701,17 @@ pub const Planner = struct {
                 .expr => |ei| if (extractAggFn(ei.expr)) |fn_call| {
                     const arg: ?*PlanExpr = if (fn_call.args.len > 0) try self.planExpr(fn_call.args[0]) else null;
                     const sep: ?*PlanExpr = if (fn_call.args.len > 1 and std.ascii.eqlIgnoreCase(fn_call.name, "string_agg"))
-                        try self.planExpr(fn_call.args[1]) else null;
+                        try self.planExpr(fn_call.args[1])
+                    else
+                        null;
                     const filt: ?*PlanExpr = if (fn_call.filter) |f| try self.planExpr(f) else null;
                     try agg_exprs.append(self.arena, .{
-                        .fn_name = fn_call.name, .arg = arg, .distinct = fn_call.distinct,
-                        .alias = ei.alias orelse fn_call.name, .filter = filt, .separator = sep,
+                        .fn_name = fn_call.name,
+                        .arg = arg,
+                        .distinct = fn_call.distinct,
+                        .alias = ei.alias orelse fn_call.name,
+                        .filter = filt,
+                        .separator = sep,
                     });
                 },
             }
@@ -727,14 +752,20 @@ pub const Planner = struct {
                         try ob_keys.append(self.arena, .{ .expr = try self.planExpr(ob.expr), .asc = ob.asc, .nulls_first = ob.nulls_first orelse !ob.asc });
                     }
                     const frame: ?FrameSpec = if (wf.window.frame) |f| .{
-                        .mode = switch (f.mode) { .rows => .rows, .range => .range },
+                        .mode = switch (f.mode) {
+                            .rows => .rows,
+                            .range => .range,
+                        },
                         .start = try self.planFrameBound(f.start),
                         .end = try self.planFrameBound(f.end),
                     } else null;
                     try win_specs.append(self.arena, .{
-                        .fn_name = wf.call.name, .args = try args_pe.toOwnedSlice(self.arena),
-                        .partition_by = try pb_pe.toOwnedSlice(self.arena), .order_by = try ob_keys.toOwnedSlice(self.arena),
-                        .result_col = pos, .frame = frame,
+                        .fn_name = wf.call.name,
+                        .args = try args_pe.toOwnedSlice(self.arena),
+                        .partition_by = try pb_pe.toOwnedSlice(self.arena),
+                        .order_by = try ob_keys.toOwnedSlice(self.arena),
+                        .result_col = pos,
+                        .frame = frame,
                     });
                     try self.window_fn_cols.append(self.arena, .{ .fn_name = wf.call.name, .position = pos });
                 },

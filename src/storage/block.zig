@@ -235,7 +235,12 @@ fn flushBuildNullSection(w: *const BlockWriter, row_count: u32, alloc: std.mem.A
     errdefer section.deinit(alloc);
     var has_nulls = false;
     outer: for (w.null_bits) |nb| {
-        for (nb.items) |b| { if (b) { has_nulls = true; break :outer; } }
+        for (nb.items) |b| {
+            if (b) {
+                has_nulls = true;
+                break :outer;
+            }
+        }
     }
     if (!has_nulls) return section;
     for (w.null_bits) |nb| {

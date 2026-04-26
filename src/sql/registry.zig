@@ -211,17 +211,24 @@ pub const SqlRegistry = struct {
             var tmp_arena = std.heap.ArenaAllocator.init(self.alloc);
             defer tmp_arena.deinit();
             const parsed = parser_mod.parse(rq.sql_text, tmp_arena.allocator()) catch {
-                if (evict_broken) { try to_evict.append(self.alloc, entry.key_ptr.*); continue; }
+                if (evict_broken) {
+                    try to_evict.append(self.alloc, entry.key_ptr.*);
+                    continue;
+                }
                 return error.SchemaBreakingChange;
             };
             var checker = tc_mod.TypeChecker.init(tmp_arena.allocator(), self.schema);
             var broken = false;
             for (parsed.stmts) |s| {
-                checker.checkStmt(s, rq.param_types, true) catch { broken = true; break; };
+                checker.checkStmt(s, rq.param_types, true) catch {
+                    broken = true;
+                    break;
+                };
             }
             if (broken) {
-                if (evict_broken) { try to_evict.append(self.alloc, entry.key_ptr.*); }
-                else return error.SchemaBreakingChange;
+                if (evict_broken) {
+                    try to_evict.append(self.alloc, entry.key_ptr.*);
+                } else return error.SchemaBreakingChange;
             }
         }
         for (to_evict.items) |h| {
@@ -273,8 +280,7 @@ fn extractPlanColumnNames(
             const names = try alloc.alloc([]const u8, s.columns.len);
             for (s.columns, 0..) |col_id, i| {
                 const col = tbl.columnById(col_id);
-                names[i] = if (col) |c| try alloc.dupe(u8, c.name)
-                            else try std.fmt.allocPrint(alloc, "col{d}", .{i});
+                names[i] = if (col) |c| try alloc.dupe(u8, c.name) else try std.fmt.allocPrint(alloc, "col{d}", .{i});
             }
             return names;
         },
@@ -283,8 +289,7 @@ fn extractPlanColumnNames(
             const names = try alloc.alloc([]const u8, s.columns.len);
             for (s.columns, 0..) |col_id, i| {
                 const col = tbl.columnById(col_id);
-                names[i] = if (col) |c| try alloc.dupe(u8, c.name)
-                            else try std.fmt.allocPrint(alloc, "col{d}", .{i});
+                names[i] = if (col) |c| try alloc.dupe(u8, c.name) else try std.fmt.allocPrint(alloc, "col{d}", .{i});
             }
             return names;
         },
@@ -293,8 +298,7 @@ fn extractPlanColumnNames(
             const names = try alloc.alloc([]const u8, pk.columns.len);
             for (pk.columns, 0..) |col_id, i| {
                 const col = tbl.columnById(col_id);
-                names[i] = if (col) |c| try alloc.dupe(u8, c.name)
-                            else try std.fmt.allocPrint(alloc, "col{d}", .{i});
+                names[i] = if (col) |c| try alloc.dupe(u8, c.name) else try std.fmt.allocPrint(alloc, "col{d}", .{i});
             }
             return names;
         },

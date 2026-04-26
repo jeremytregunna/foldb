@@ -28,6 +28,7 @@ fn toNullZ(path: []const u8, allocator: std.mem.Allocator) ![:0]u8 {
 }
 
 fn makeTempDir(prefix: []const u8) ![]const u8 {
+    // SAFETY: clock_gettime fills ts before any field is read.
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
@@ -129,6 +130,7 @@ test "Linearizability: sequential appends produce dense gap-free seqs" {
     _ = try waitForLeader(&cluster, 50);
 
     const N = 10;
+    // SAFETY: all N elements of seqs are written by the for loop before seqs is read.
     var seqs: [N]u64 = undefined;
     for (0..N) |i| {
         const payload = try std.fmt.allocPrint(testing.allocator, "entry_{d}", .{i});

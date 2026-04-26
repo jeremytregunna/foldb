@@ -163,6 +163,7 @@ const Fixture = struct {
 
 var ts_seed: u64 = 0;
 fn nextDir(alloc: std.mem.Allocator) ![]const u8 {
+    // SAFETY: clock_gettime fills ts before any field is read.
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     ts_seed += 1;

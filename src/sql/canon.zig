@@ -20,6 +20,7 @@ pub const CanonWriter = struct {
     }
 
     pub fn hash(self: *const CanonWriter) QueryHash {
+        // SAFETY: Blake3.hash writes all bytes of h before it is returned.
         var h: QueryHash = undefined;
         std.crypto.hash.Blake3.hash(self.buf.items, &h, .{});
         return h;

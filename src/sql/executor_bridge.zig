@@ -112,7 +112,7 @@ pub const SqlExecutor = struct {
     /// When non-null, only mutations whose key hashes to this partition are applied.
     /// Set by FoldExecutor at init time; null means apply all (single-partition or direct).
     filter_partition: ?u32 = null,
-    error_detail: [256]u8 = undefined,
+    error_detail: [256]u8,
     error_detail_len: usize = 0,
 
     pub fn lastDetail(self: *const SqlExecutor) []const u8 {
@@ -138,6 +138,7 @@ pub const SqlExecutor = struct {
             .committed_seq = .init(0),
             .results = [1]ResultSlot{empty} ** result_ring_size,
             .alloc = alloc,
+            .error_detail = undefined,
         };
     }
 
@@ -154,7 +155,7 @@ pub const SqlExecutor = struct {
     /// the stored ExecResult. Called by the gateway thread after awaitCommit().
     pub fn waitFor(self: *SqlExecutor, target: Seq) ExecResult {
         while (self.committed_seq.load(.acquire) < target) {
-            std.Thread.yield() catch {};
+            _ = std.os.linux.nanosleep(&.{ .sec = 0, .nsec = 100 }, null);
         }
         const slot = &self.results[target % result_ring_size];
         std.debug.assert(slot.seq == target);
@@ -334,8 +335,8 @@ pub const SqlExecutor = struct {
         plan: plan_mod.ExecutionPlan,
         params: []const ColumnValue,
         nondet: []const ResolvedValue,
-        read_seq: Seq,   // ctx.seq — reads use ctx.seq -| 1 (MVCC snapshot before txn)
-        write_seq: Seq,  // for storage.apply and CDC versioning
+        read_seq: Seq, // ctx.seq — reads use ctx.seq -| 1 (MVCC snapshot before txn)
+        write_seq: Seq, // for storage.apply and CDC versioning
         epoch: log_mod.Epoch,
         entry_kind: log_mod.EntryKind,
         returning_rows: ?*std.ArrayList([]const ?ColumnValue),
@@ -806,7 +807,10 @@ pub const SqlExecutor = struct {
             }
             var found_group: ?*GroupRow = null;
             for (groups.items) |*g| {
-                if (aggKeyEquals(g.key, key)) { found_group = g; break; }
+                if (aggKeyEquals(g.key, key)) {
+                    found_group = g;
+                    break;
+                }
             }
             if (found_group) |g| {
                 freeRowValues(key, ctx.alloc);

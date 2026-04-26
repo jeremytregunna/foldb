@@ -337,7 +337,9 @@ pub const RaftNode = struct {
         const our_head = try log.head();
         if (our_head < args.prev_log_index) {
             try out.append(self.allocator, .{ .send = .{ .to = args.leader_id, .msg = .{ .append_entries_result = .{
-                .term = self.current_term, .success = false, .match_index = our_head,
+                .term = self.current_term,
+                .success = false,
+                .match_index = our_head,
             } } } });
             return false;
         }
@@ -347,7 +349,9 @@ pub const RaftNode = struct {
             // Conflict: truncate back to prev_log_index so leader can retry.
             try log.truncate_suffix(args.prev_log_index);
             try out.append(self.allocator, .{ .send = .{ .to = args.leader_id, .msg = .{ .append_entries_result = .{
-                .term = self.current_term, .success = false, .match_index = (try log.head()),
+                .term = self.current_term,
+                .success = false,
+                .match_index = (try log.head()),
             } } } });
             return false;
         }

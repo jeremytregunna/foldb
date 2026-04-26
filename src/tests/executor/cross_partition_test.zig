@@ -48,6 +48,7 @@ const HASH_TRANSFER: [32]u8 = [_]u8{0x20} ++ [_]u8{0} ** 31;
 // --- Temp dir helpers (copied from executor_test.zig) ---
 
 fn makeTempDir(alloc: std.mem.Allocator, suffix: []const u8) ![]const u8 {
+    // SAFETY: clock_gettime fills ts before any field is read.
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));

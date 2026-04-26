@@ -6,6 +6,7 @@ const Mutation = storage.Mutation;
 const ColumnValue = storage.ColumnValue;
 
 fn makeTempDir(alloc: std.mem.Allocator) ![]u8 {
+    // SAFETY: clock_gettime fills ts before any field is read.
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));

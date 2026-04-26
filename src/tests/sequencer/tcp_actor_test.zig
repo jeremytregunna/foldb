@@ -17,6 +17,8 @@ const PendingSubmit = sequencer_mod.PendingSubmit;
 // ---------------------------------------------------------------------------
 
 fn makeTempDir(suffix: []const u8) ![]const u8 {
+    // SAFETY: clock_gettime fills ts before any field is read.
+
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
@@ -98,12 +100,14 @@ fn initCluster(tag: []const u8, alloc: std.mem.Allocator) !TestCluster {
         _ = std.os.linux.mkdir(basez.ptr, 0o755);
     }
 
+    // SAFETY: tc.nodes is populated in the for loop below before any node is accessed.
     var tc = TestCluster{ .nodes = undefined, .inited = 0, .base = base, .alloc = alloc };
 
     for (0..3) |i| {
         const dir = try std.fmt.allocPrint(alloc, "{s}/node{d}", .{ base, i });
         defer alloc.free(dir);
 
+        // SAFETY: peer_slice entries are written by the for loop before the slice is used.
         var peer_slice: [2]PeerAddr = undefined;
         var pi: usize = 0;
         for (NODE_IDS) |pid| {
@@ -145,6 +149,8 @@ fn initCluster(tag: []const u8, alloc: std.mem.Allocator) !TestCluster {
 /// Poll until one node is leader or timeout_ms elapses. Returns the leader index.
 fn waitForLeader(ps: [3]*Sequencer, timeout_ms: u64) !usize {
     const deadline_ns = blk: {
+        // SAFETY: clock_gettime fills ts before any field is read.
+
         var ts: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.MONOTONIC, &ts);
         break :blk @as(u64, @intCast(ts.sec)) * 1_000_000_000 +
@@ -153,6 +159,8 @@ fn waitForLeader(ps: [3]*Sequencer, timeout_ms: u64) !usize {
 
     const sleep_ts = std.os.linux.timespec{ .sec = 0, .nsec = 5_000_000 }; // 5ms
     while (true) {
+        // SAFETY: clock_gettime fills ts before any field is read.
+
         var ts: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.MONOTONIC, &ts);
         const now = @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));

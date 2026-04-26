@@ -129,7 +129,7 @@ pub const FoldExecutor = struct {
                         std.log.warn("FoldExecutor: DDL replay err={}", .{err});
                     };
                 } else {
-                    _ = self.registry.register(entry.payload) catch {};
+                    _ = self.registry.register(entry.payload) catch |err| std.log.warn("registry register: {}", .{err});
                 }
                 self.sql_exec.advanceSeq(entry.header.seq);
             },
@@ -178,7 +178,7 @@ pub const FoldExecutor = struct {
             error.TableAlreadyExists,
             error.IndexAlreadyExists,
             error.ColumnAlreadyExists,
-            error.ColumnNotFound,  // DROP COLUMN replay when already applied locally
+            error.ColumnNotFound, // DROP COLUMN replay when already applied locally
             error.TableNotFound,
             => {},
             else => return e,
@@ -277,7 +277,7 @@ pub const FoldExecutor = struct {
             if (io) |the_io| {
                 try the_io.sleep(.{ .nanoseconds = 100_000 }, .awake);
             } else {
-                std.Thread.yield() catch {};
+                _ = std.os.linux.nanosleep(&.{ .sec = 0, .nsec = 100 }, null);
             }
         }
     }
@@ -461,7 +461,10 @@ pub const FoldExecutor = struct {
         for (tbl.columns, 0..) |col, i| {
             var is_pk = false;
             for (tbl.primary_key) |pk_id| {
-                if (pk_id == col.id) { is_pk = true; break; }
+                if (pk_id == col.id) {
+                    is_pk = true;
+                    break;
+                }
             }
             const type_str = try sqlTypeStr(col.typ, alloc);
             const row = try alloc.alloc(?storage_mod.ColumnValue, 4);
@@ -567,4 +570,3 @@ fn sqlTypeStr(t: sql_mod.ast.SqlType, alloc: std.mem.Allocator) ![]u8 {
         .null_type => alloc.dupe(u8, "null"),
     };
 }
-

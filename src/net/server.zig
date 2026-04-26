@@ -100,6 +100,6 @@ pub fn serve(
     }
 
     group.cancel(io);
-    group.await(io) catch {};
+    group.await(io) catch |err| std.log.warn("shutdown: {}", .{err});
     std.log.info("foldb: shutting down cleanly", .{});
 }

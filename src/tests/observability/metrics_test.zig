@@ -98,14 +98,14 @@ test "GatewayMetrics: zero init" {
 // ---------------------------------------------------------------------------
 
 test "Tracer: new trace ids are unique" {
-    var t: obs.DefaultTracer = .{};
+    var t = obs.DefaultTracer.init();
     const id1 = t.newTrace();
     const id2 = t.newTrace();
     try testing.expect(id2 > id1);
 }
 
 test "Tracer: record and snapshot latest-first" {
-    var t: obs.DefaultTracer = .{};
+    var t = obs.DefaultTracer.init();
     t.record(.{ .trace_id = 1, .kind = .gateway, .start_tick = 0, .end_tick = 5, .seq = 1, .status = .ok });
     t.record(.{ .trace_id = 1, .kind = .executor, .start_tick = 4, .end_tick = 8, .seq = 1, .status = .ok });
 

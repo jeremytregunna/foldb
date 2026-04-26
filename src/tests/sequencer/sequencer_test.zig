@@ -8,6 +8,7 @@ const Config = sequencer_mod.Config;
 const PendingSubmit = sequencer_mod.PendingSubmit;
 
 fn makeTempDir(suffix: []const u8) ![]const u8 {
+    // SAFETY: clock_gettime fills ts before any field is read.
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
@@ -89,11 +90,17 @@ test "Sequencer: submit assigns dense increasing seqs" {
     const payload = try minimalIntentPayload(testing.allocator);
     defer testing.allocator.free(payload);
 
+    // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
+
     var p1: PendingSubmit = undefined;
     const r1 = try seq.submitBytes(&p1, payload, 1, 1, .txn_intent).awaitCommit(null);
 
+    // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
+
     var p2: PendingSubmit = undefined;
     const r2 = try seq.submitBytes(&p2, payload, 1, 2, .txn_intent).awaitCommit(null);
+
+    // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
 
     var p3: PendingSubmit = undefined;
     const r3 = try seq.submitBytes(&p3, payload, 1, 3, .txn_intent).awaitCommit(null);
@@ -118,8 +125,12 @@ test "Sequencer: idempotent submit returns same seq" {
     const payload = try minimalIntentPayload(testing.allocator);
     defer testing.allocator.free(payload);
 
+    // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
+
     var p1: PendingSubmit = undefined;
     const r1 = try seq.submitBytes(&p1, payload, 42, 7, .txn_intent).awaitCommit(null);
+
+    // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
 
     var p2: PendingSubmit = undefined;
     const r2 = try seq.submitBytes(&p2, payload, 42, 7, .txn_intent).awaitCommit(null);
@@ -143,14 +154,22 @@ test "Sequencer: multi-partition broadcast creates N entries per txn" {
     const payload = try minimalIntentPayload(testing.allocator);
     defer testing.allocator.free(payload);
 
+    // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
+
     var p1: PendingSubmit = undefined;
     const r1 = try seq.submitBytes(&p1, payload, 1, 1, .txn_intent).awaitCommit(null);
+
+    // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
 
     var p2: PendingSubmit = undefined;
     const r2 = try seq.submitBytes(&p2, payload, 1, 2, .txn_intent).awaitCommit(null);
 
+    // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
+
     var p3: PendingSubmit = undefined;
     const r3 = try seq.submitBytes(&p3, payload, 1, 3, .txn_intent).awaitCommit(null);
+
+    // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
 
     var p4: PendingSubmit = undefined;
     const r4 = try seq.submitBytes(&p4, payload, 1, 4, .txn_intent).awaitCommit(null);
@@ -181,6 +200,8 @@ test "Sequencer: committed entry readable from partition log" {
 
     const payload = try minimalIntentPayload(testing.allocator);
     defer testing.allocator.free(payload);
+
+    // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
 
     var pending: PendingSubmit = undefined;
     const result = try seq.submitBytes(&pending, payload, 1, 1, .txn_intent).awaitCommit(null);

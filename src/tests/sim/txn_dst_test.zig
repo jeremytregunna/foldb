@@ -184,8 +184,8 @@ fn runTxnDeterminismTest(seed: u64, n_transfers: usize, alloc: std.mem.Allocator
         const amount: i64 = @intCast(rng.random().intRangeAtMost(u32, 1, 200));
 
         // Transfers may abort (ASSERT) — that's expected and both gateways see the same abort.
-        _ = gw_a.execute(xfer_a, &.{ .{ .int64 = from }, .{ .int64 = to }, .{ .int64 = amount } }, &.{}) catch {};
-        _ = gw_b.execute(xfer_b, &.{ .{ .int64 = from }, .{ .int64 = to }, .{ .int64 = amount } }, &.{}) catch {};
+        if (gw_a.execute(xfer_a, &.{ .{ .int64 = from }, .{ .int64 = to }, .{ .int64 = amount } }, &.{})) |_| {} else |err| std.log.debug("execute chaos: {}", .{err});
+        if (gw_b.execute(xfer_b, &.{ .{ .int64 = from }, .{ .int64 = to }, .{ .int64 = amount } }, &.{})) |_| {} else |err| std.log.debug("execute chaos: {}", .{err});
         clock.advance(1);
     }
 
@@ -232,8 +232,8 @@ test "dst: txn crash recovery — committed transaction blocks survive log repla
         try gw.flushAll();
 
         // Transfer blocks committed to log but NOT flushed to SSTables.
-        _ = gw.execute(xfer, &.{ .{ .int64 = 1 }, .{ .int64 = 2 }, .{ .int64 = 100 } }, &.{}) catch {};
-        _ = gw.execute(xfer, &.{ .{ .int64 = 3 }, .{ .int64 = 4 }, .{ .int64 = 200 } }, &.{}) catch {};
+        if (gw.execute(xfer, &.{ .{ .int64 = 1 }, .{ .int64 = 2 }, .{ .int64 = 100 } }, &.{})) |_| {} else |err| std.log.debug("execute chaos: {}", .{err});
+        if (gw.execute(xfer, &.{ .{ .int64 = 3 }, .{ .int64 = 4 }, .{ .int64 = 200 } }, &.{})) |_| {} else |err| std.log.debug("execute chaos: {}", .{err});
 
         // Crash — no deinit.
     }

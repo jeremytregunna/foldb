@@ -328,6 +328,7 @@ fn buildSignUri(alloc: std.mem.Allocator, cfg: *const S3Config, key: []const u8)
 }
 
 fn getTimestamp(ts_out: *[16]u8, date_out: *[8]u8) void {
+    // SAFETY: clock_gettime fills ts before any field is read.
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
     const unix_secs: i64 = ts.sec;

@@ -18,7 +18,7 @@ fn writeAll(data: []const u8) !void {
 }
 
 const Out = struct {
-    buf: [4096]u8 = undefined,
+    buf: [4096]u8,
 
     pub fn print(self: *Out, comptime fmt: []const u8, args: anytype) !void {
         const s = try std.fmt.bufPrint(&self.buf, fmt, args);
@@ -27,6 +27,7 @@ const Out = struct {
 };
 
 fn readByte() ?u8 {
+    // SAFETY: linux.read fills byte with 1 byte before it is returned.
     var byte: u8 = undefined;
     const n = std.os.linux.read(0, @as([*]u8, @ptrCast(&byte)), 1);
     if (@as(isize, @bitCast(n)) <= 0) return null;
@@ -51,7 +52,7 @@ fn rawEnter() !std.posix.termios {
 }
 
 fn rawLeave(orig: std.posix.termios) void {
-    std.posix.tcsetattr(0, .FLUSH, orig) catch {};
+    std.posix.tcsetattr(0, .FLUSH, orig) catch |err| std.log.warn("rawLeave: {}", .{err});
 }
 
 // ---- History ----
@@ -63,7 +64,7 @@ fn historyPush(history: *std.ArrayListUnmanaged([]u8), entry: []const u8, alloc:
     if (history.items.len > 0 and std.mem.eql(u8, history.items[history.items.len - 1], entry)) return;
     if (history.items.len >= MAX_HISTORY) {
         alloc.free(history.items[0]);
-        std.mem.copyForwards([]u8, history.items[0..history.items.len - 1], history.items[1..]);
+        std.mem.copyForwards([]u8, history.items[0 .. history.items.len - 1], history.items[1..]);
         history.items.len -= 1;
     }
     try history.append(alloc, try alloc.dupe(u8, entry));
@@ -78,8 +79,9 @@ fn lineDraw(prompt: []const u8, line: []const u8, cursor: u32) !void {
     try writeAll(line);
     try writeAll("\x1b[K"); // clear to end of line
     if (cursor < line.len) {
+        // SAFETY: bufPrint writes to seq_buf before seq is used; buffer is large enough.
         var seq_buf: [16]u8 = undefined;
-        const seq = std.fmt.bufPrint(&seq_buf, "\x1b[{d}D", .{line.len - cursor}) catch unreachable;
+        const seq = std.fmt.bufPrint(&seq_buf, "\x1b[{d}D", .{line.len - cursor}) catch |err| std.debug.panic("unexpected: {}", .{err});
         try writeAll(seq);
     }
 }
@@ -137,8 +139,14 @@ fn handleEscape(
     switch (b2) {
         'A' => try histNav(line, cursor, hist_pos, saved, history, prompt, alloc, .up),
         'B' => try histNav(line, cursor, hist_pos, saved, history, prompt, alloc, .down),
-        'C' => if (cursor.* < line.items.len) { cursor.* += 1; try writeAll("\x1b[C"); },
-        'D' => if (cursor.* > 0) { cursor.* -= 1; try writeAll("\x1b[D"); },
+        'C' => if (cursor.* < line.items.len) {
+            cursor.* += 1;
+            try writeAll("\x1b[C");
+        },
+        'D' => if (cursor.* > 0) {
+            cursor.* -= 1;
+            try writeAll("\x1b[D");
+        },
         else => {},
     }
 }
@@ -175,7 +183,10 @@ fn readLineRaw(
                 return error.Interrupted;
             },
             0x04 => { // Ctrl-D: EOF if line empty, else delete-forward
-                if (line.items.len == 0) { try writeAll("\r\n"); return null; }
+                if (line.items.len == 0) {
+                    try writeAll("\r\n");
+                    return null;
+                }
                 if (cursor < line.items.len) {
                     _ = line.orderedRemove(cursor);
                     try lineDraw(prompt, line.items, cursor);
@@ -204,7 +215,10 @@ fn readLinePlain(alloc: std.mem.Allocator) !?[]u8 {
     errdefer buf.deinit(alloc);
     while (true) {
         const byte = readByte() orelse {
-            if (buf.items.len == 0) { buf.deinit(alloc); return null; }
+            if (buf.items.len == 0) {
+                buf.deinit(alloc);
+                return null;
+            }
             return try buf.toOwnedSlice(alloc);
         };
         if (byte == '\n') return try buf.toOwnedSlice(alloc);
@@ -250,7 +264,6 @@ fn classify(sql: []const u8) SqlKind {
 
 // ---- Result display ----
 
-
 fn renderDecimal(d: anytype, alloc: std.mem.Allocator) ![]u8 {
     if (d.scale == 0) return std.fmt.allocPrint(alloc, "{d}", .{d.coefficient});
     const neg = d.coefficient < 0;
@@ -260,9 +273,11 @@ fn renderDecimal(d: anytype, alloc: std.mem.Allocator) ![]u8 {
     while (sc < d.scale) : (sc += 1) pow *= 10;
     const int_part = abs_c / pow;
     const frac_part = abs_c % pow;
+    // SAFETY: bufPrint writes to tmp before frac_str is used; buffer is large enough.
     var tmp: [40]u8 = undefined;
-    const frac_str = std.fmt.bufPrint(&tmp, "{d}", .{frac_part}) catch unreachable;
+    const frac_str = std.fmt.bufPrint(&tmp, "{d}", .{frac_part}) catch |err| std.debug.panic("unexpected: {}", .{err});
     const leading: usize = d.scale - frac_str.len;
+    // SAFETY: @memset and @memcpy fill frac_buf up to leading+frac_str.len before it is sliced.
     var frac_buf: [40]u8 = undefined;
     @memset(frac_buf[0..leading], '0');
     @memcpy(frac_buf[leading .. leading + frac_str.len], frac_str);
@@ -388,7 +403,7 @@ fn dispatch(c: *client_mod.Client, sql_with_semi: []const u8, alloc: std.mem.All
                 return;
             };
             defer rs.deinit();
-            printTable(&rs, alloc, out) catch {};
+            printTable(&rs, alloc, out) catch |err| std.log.warn("printTable: {}", .{err});
         },
     }
 }
@@ -426,7 +441,7 @@ fn tryReconnect(
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
-    var out = Out{};
+    var out = Out{ .buf = undefined };
 
     var host: []const u8 = "127.0.0.1";
     var port: u16 = 7432;
@@ -446,6 +461,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     };
 
+    // SAFETY: ioctl fills ws before its fields are used; if ioctl fails, is_tty is false and ws is not read.
     var ws: std.posix.winsize = undefined;
     const is_tty = @as(isize, @bitCast(std.os.linux.ioctl(0, std.os.linux.T.IOCGWINSZ, @intFromPtr(&ws)))) >= 0;
     const orig_termios: ?std.posix.termios = if (is_tty) rawEnter() catch null else null;
@@ -465,7 +481,10 @@ pub fn main(init: std.process.Init) !void {
 
         const line_or_null: ?[]u8 = if (is_tty and orig_termios != null)
             readLineRaw(prompt, history.items, alloc) catch |e| {
-                if (e == error.Interrupted) { buf.clearRetainingCapacity(); continue; }
+                if (e == error.Interrupted) {
+                    buf.clearRetainingCapacity();
+                    continue;
+                }
                 return e;
             }
         else blk: {
@@ -492,7 +511,7 @@ pub fn main(init: std.process.Init) !void {
             if (tname.len > 0) {
                 const sql = try std.fmt.allocPrint(alloc, "describe {s};", .{tname});
                 defer alloc.free(sql);
-                historyPush(&history, sql, alloc) catch {};
+                historyPush(&history, sql, alloc) catch |err| std.log.warn("historyPush: {}", .{err});
                 dispatch(&c, sql, alloc, &out) catch |e| try out.print("error: {}\n", .{e});
                 continue;
             }
@@ -502,7 +521,7 @@ pub fn main(init: std.process.Init) !void {
         try buf.appendSlice(alloc, trimmed);
 
         if (std.mem.endsWith(u8, buf.items, ";")) {
-            if (buf.items.len > 1) historyPush(&history, buf.items, alloc) catch {};
+            if (buf.items.len > 1) historyPush(&history, buf.items, alloc) catch |err| std.log.warn("historyPush: {}", .{err});
 
             var disconnected = false;
             dispatch(&c, buf.items, alloc, &out) catch |e| {
@@ -513,7 +532,7 @@ pub fn main(init: std.process.Init) !void {
                     c.deinit();
                     if (tryReconnect(io, host, port, alloc, &out)) |new_c| {
                         c = new_c;
-                        dispatch(&c, buf.items, alloc, &out) catch {};
+                        dispatch(&c, buf.items, alloc, &out) catch |err| std.log.warn("dispatch on reconnect: {}", .{err});
                     } else {
                         disconnected = true;
                     }

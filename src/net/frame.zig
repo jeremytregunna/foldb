@@ -76,6 +76,7 @@ pub const Kind = enum(u8) {
 
 /// Read and return the 16-byte base header. Does NOT read trace extension or payload.
 pub fn readHeader(r: *Reader) !FrameHeader {
+    // SAFETY: readSliceAll fills all bytes of hdr before it is returned.
     var hdr: FrameHeader = undefined;
     try r.readSliceAll(std.mem.asBytes(&hdr));
     return hdr;

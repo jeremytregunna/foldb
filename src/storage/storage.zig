@@ -33,6 +33,7 @@ pub const PostSnapshotHook = struct {
 // Callers that do not need a log writer or post-snapshot callback use the
 // no-op defaults below; the core calls them unconditionally.
 fn noopPostSnapshotImpl(_: *anyopaque, _: Seq) void {}
+// SAFETY: ptr is never dereferenced by noopPostSnapshotImpl; it ignores its *anyopaque argument.
 pub const noop_post_snapshot_hook = PostSnapshotHook{
     .ptr = undefined,
     .hookFn = &noopPostSnapshotImpl,
@@ -402,7 +403,7 @@ pub const Storage = struct {
             const row_seq: Seq = if (result) |row| row.seq else 0;
             // Best-effort: OOM here causes a false negative (no retry trigger).
             // The tracker is advisory; correctness does not depend on it.
-            tracker.record(table_id, key, row_seq) catch {};
+            tracker.record(table_id, key, row_seq) catch |err| std.log.warn("read tracker record: {}", .{err});
         }
         return result;
     }
@@ -424,7 +425,10 @@ pub const Storage = struct {
         for (mutations) |m| {
             var found = false;
             for (table_ids.items) |t| {
-                if (t == m.table_id) { found = true; break; }
+                if (t == m.table_id) {
+                    found = true;
+                    break;
+                }
             }
             if (!found) try table_ids.append(self.alloc, m.table_id);
         }

@@ -109,8 +109,9 @@ pub const Log = struct {
         std.mem.sort(Segment, segments.items, {}, segment_comparator);
 
         const base_seq = max_seq + 1;
+        // SAFETY: bufPrint writes to name_buf before seg_name is used; buffer is large enough.
         var name_buf: [32]u8 = undefined;
-        const seg_name = std.fmt.bufPrint(&name_buf, "{d:0>16}.seg", .{base_seq}) catch unreachable;
+        const seg_name = std.fmt.bufPrint(&name_buf, "{d:0>16}.seg", .{base_seq}) catch |err| std.debug.panic("unexpected: {}", .{err});
         const current_path = try build_path(path, seg_name, alloc);
         errdefer alloc.free(current_path);
 
@@ -137,7 +138,7 @@ pub const Log = struct {
 
     pub fn deinit(self: *Log) void {
         if (self.current_segment.entry_count > 0) {
-            _ = self.current_segment.seal() catch {};
+            _ = self.current_segment.seal() catch |err| std.log.warn("segment seal on deinit: {}", .{err});
         }
         self.current_segment.deinit();
 
@@ -152,8 +153,9 @@ pub const Log = struct {
         try self.current_segment.seal();
 
         const new_base_seq = self.current_seq + 1;
+        // SAFETY: bufPrint writes to name_buf before seg_name is used; buffer is large enough.
         var name_buf: [32]u8 = undefined;
-        const seg_name = std.fmt.bufPrint(&name_buf, "{d:0>16}.seg", .{new_base_seq}) catch unreachable;
+        const seg_name = std.fmt.bufPrint(&name_buf, "{d:0>16}.seg", .{new_base_seq}) catch |err| std.debug.panic("unexpected: {}", .{err});
         const new_path = try build_path(self.path, seg_name, self.alloc);
         errdefer self.alloc.free(new_path);
 
@@ -362,8 +364,9 @@ pub const Log = struct {
             self.current_seq = self.current_segment.last_seq;
         } else {
             const base: Seq = if (from_seq > 0) from_seq else 1;
+            // SAFETY: bufPrint writes to name_buf before seg_name is used; buffer is large enough.
             var name_buf: [32]u8 = undefined;
-            const seg_name = std.fmt.bufPrint(&name_buf, "{d:0>16}.seg", .{base}) catch unreachable;
+            const seg_name = std.fmt.bufPrint(&name_buf, "{d:0>16}.seg", .{base}) catch |err| std.debug.panic("unexpected: {}", .{err});
             const new_path = try build_path(self.path, seg_name, self.alloc);
             errdefer self.alloc.free(new_path);
             self.current_segment = try Segment.init(new_path, base, self.node_id, segment.real_time_sec(), self.alloc);

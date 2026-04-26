@@ -62,6 +62,7 @@ pub const Conn = struct {
     users: []const config_mod.UserEntry,
 
     fn init(io: std.Io, stream: net.Stream, gw: *gateway_mod.Gateway, users: []const config_mod.UserEntry, alloc: std.mem.Allocator) Conn {
+        // SAFETY: reader, writer, read_buf, and write_buf are all initialized in run() before use.
         return .{
             .io = io,
             .stream = stream,
@@ -101,7 +102,7 @@ pub const Conn = struct {
         defer out.deinit(self.alloc);
         msg.encodeError(&out, self.alloc, code, severity, text, "") catch return;
         const flags: Flags = if (stream_id != 0) .final_only else .none;
-        frame.sendFrame(&self.writer.interface, stream_id, .err, flags, null, out.items) catch {};
+        frame.sendFrame(&self.writer.interface, stream_id, .err, flags, null, out.items) catch |err| std.log.warn("sendError: {}", .{err});
     }
 
     fn sendFatalError(self: *Conn, code: msg.ErrorCode, text: []const u8) void {
@@ -217,10 +218,10 @@ pub const Conn = struct {
         conn.writer = stream.writer(io, &conn.write_buf);
         defer conn.deinit();
         defer conn.stream.close(conn.io);
-        conn.handleTlsNegotiation() catch {};
+        conn.handleTlsNegotiation() catch |err| std.log.warn("TLS negotiation: {}", .{err});
         conn.sendHello() catch return;
         conn.receiveAuth() catch return;
-        conn.loop() catch {};
+        conn.loop() catch |err| std.log.warn("conn loop: {}", .{err});
     }
 
     fn loop(self: *Conn) !void {
@@ -594,7 +595,7 @@ pub const Conn = struct {
             .ping => {
                 var cur = Cursor.init(client_payload);
                 const ping = msg.decodePing(&cur) catch return false;
-                self.sendPong(ping.client_wall_micros) catch {};
+                self.sendPong(ping.client_wall_micros) catch |err| std.log.warn("sendPong: {}", .{err});
                 return false;
             },
             .goodbye => return true,
@@ -622,9 +623,15 @@ pub const Conn = struct {
                 .delete => .delete,
             };
             const before = if (effect.before) |b| try self.columnValuesToTypedValues(b) else try self.alloc.alloc(TypedValue, 0);
-            errdefer { for (before) |v| v.deinit(self.alloc); self.alloc.free(before); }
+            errdefer {
+                for (before) |v| v.deinit(self.alloc);
+                self.alloc.free(before);
+            }
             const after = if (effect.after) |a| try self.columnValuesToTypedValues(a) else try self.alloc.alloc(TypedValue, 0);
-            errdefer { for (after) |v| v.deinit(self.alloc); self.alloc.free(after); }
+            errdefer {
+                for (after) |v| v.deinit(self.alloc);
+                self.alloc.free(after);
+            }
             try wire_effects.append(self.alloc, .{ .table_id = effect.table_id, .key = effect.key, .op = op, .before = before, .after = after });
         }
         try msg.encodeCdcEvent(&out, self.alloc, ev.seq, ev.epoch, wire_effects.items);
@@ -776,6 +783,7 @@ fn columnValueToTypedValue(v: gateway_mod.ColumnValue) TypedValue {
     };
 }
 
+// SAFETY: undefined here is a comptime-only type probe; no runtime value is left uninitialized.
 fn decimalFromF64(f: f64) @TypeOf(@as(gateway_mod.ColumnValue, undefined).decimal) {
     const scale: u8 = 10;
     const factor: f64 = 1e10;

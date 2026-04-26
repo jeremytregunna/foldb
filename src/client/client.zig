@@ -51,10 +51,12 @@ pub const Client = struct {
     write_buf: [8192]u8,
     alloc: std.mem.Allocator,
     stream_id_next: u64,
-    last_error: [256]u8 = undefined,
+    last_error: [256]u8,
     last_error_len: u32 = 0,
 
     fn init(io: std.Io, stream: net.Stream, alloc: std.mem.Allocator) Client {
+        // SAFETY: reader, writer, read_buf, write_buf, and last_error are all initialized
+        // in connect() before any method that reads them is called.
         return .{
             .io = io,
             .stream = stream,
@@ -64,6 +66,7 @@ pub const Client = struct {
             .write_buf = undefined,
             .alloc = alloc,
             .stream_id_next = 1,
+            .last_error = undefined,
         };
     }
 
@@ -96,7 +99,7 @@ pub const Client = struct {
     }
 
     pub fn close(self: *Client) void {
-        frame.sendFrame(&self.writer.interface, 0, .goodbye, frame.Flags.final_only, null, &.{}) catch {};
+        frame.sendFrame(&self.writer.interface, 0, .goodbye, frame.Flags.final_only, null, &.{}) catch |err| std.log.warn("close goodbye: {}", .{err});
         self.stream.close(self.io);
     }
 

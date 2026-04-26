@@ -50,7 +50,7 @@ pub const SubmitResult = struct {
 /// The done flag is the handoff point — the Sequencer sets it only after result/err are written.
 pub const PendingSubmit = struct {
     submit: ValidatedSubmit,
-    result: SubmitResult = undefined,
+    result: SubmitResult,
     err: ?anyerror = null,
     done: std.atomic.Value(bool) = .init(false),
     /// Intrusive MPSC queue link. Written by the queue; callers must not touch this field.

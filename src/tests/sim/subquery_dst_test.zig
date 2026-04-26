@@ -184,14 +184,14 @@ fn runSubqueryDeterminismTest(seed: u64, n_ops: usize, alloc: std.mem.Allocator)
         const amount: i64 = @intCast(rng.random().intRangeAtMost(u32, 10, 500));
         const cap: i64 = 2;
 
-        _ = gw_a.execute(ins_a, &.{
+        if (gw_a.execute(ins_a, &.{
             .{ .int64 = order_id }, .{ .int64 = user_id },
             .{ .int64 = amount },   .{ .int64 = cap },
-        }, &.{}) catch {};
-        _ = gw_b.execute(ins_b, &.{
+        }, &.{})) |_| {} else |err| std.log.debug("execute chaos: {}", .{err});
+        if (gw_b.execute(ins_b, &.{
             .{ .int64 = order_id }, .{ .int64 = user_id },
             .{ .int64 = amount },   .{ .int64 = cap },
-        }, &.{}) catch {};
+        }, &.{})) |_| {} else |err| std.log.debug("execute chaos: {}", .{err});
         clock.advance(1);
     }
 
@@ -306,7 +306,7 @@ test "dst: subquery ASSERT abort leaves no state after crash recovery" {
         _ = try gw.execute(ins, &.{ .{ .int64 = 1 }, .{ .int64 = 1 }, .{ .int64 = 100 }, .{ .int64 = 1 } }, &.{});
 
         // This must abort: cap=1 and user 1 already has 1 order.
-        _ = gw.execute(ins, &.{ .{ .int64 = 2 }, .{ .int64 = 1 }, .{ .int64 = 50 }, .{ .int64 = 1 } }, &.{}) catch {};
+        if (gw.execute(ins, &.{ .{ .int64 = 2 }, .{ .int64 = 1 }, .{ .int64 = 50 }, .{ .int64 = 1 } }, &.{})) |_| {} else |err| std.log.debug("execute chaos: {}", .{err});
 
         // Crash — no deinit.
     }

@@ -7,6 +7,7 @@ const Gateway = gateway_mod.Gateway;
 const ColumnValue = gateway_mod.ColumnValue;
 
 fn makeTempDir() ![]const u8 {
+    // SAFETY: clock_gettime fills ts before any field is read.
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));

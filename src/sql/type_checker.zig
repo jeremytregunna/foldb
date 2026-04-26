@@ -479,7 +479,7 @@ pub const TypeChecker = struct {
                 // Integer literals are untyped — allow coercion to any integer column type.
                 if (!lt.eql(rt) and lt != .null_type and rt != .null_type) {
                     if (!((isIntLiteral(left) and rt.isInteger()) or
-                          (isIntLiteral(right) and lt.isInteger())))
+                        (isIntLiteral(right) and lt.isInteger())))
                         return error.ImplicitTypeCoercion;
                 }
                 return .bool;

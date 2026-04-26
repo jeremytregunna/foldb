@@ -49,7 +49,7 @@ pub const Span = struct {
 pub fn Tracer(comptime capacity: usize) type {
     return struct {
         // Fields first, then types, then methods.
-        spans: [capacity]Span = undefined,
+        spans: [capacity]Span,
         head: usize = 0,
         total: u64 = 0,
         next_trace_id: TraceId = 1,
@@ -60,6 +60,15 @@ pub fn Tracer(comptime capacity: usize) type {
             assert(capacity > 0);
             // head is usize; capacity must fit so ring arithmetic is always safe.
             assert(capacity <= std.math.maxInt(u32));
+        }
+
+        pub fn init() Self {
+            return .{
+                .spans = undefined,
+                .head = 0,
+                .total = 0,
+                .next_trace_id = 1,
+            };
         }
 
         /// Allocate and return a new TraceId. IDs are monotonically increasing
@@ -119,14 +128,14 @@ pub const DefaultTracer = Tracer(4096);
 // ---------------------------------------------------------------------------
 
 test "Tracer: new trace ids are unique and monotonic" {
-    var t: DefaultTracer = .{};
+    var t = DefaultTracer.init();
     const id1 = t.newTrace();
     const id2 = t.newTrace();
     try std.testing.expect(id2 > id1);
 }
 
 test "Tracer: record and snapshot" {
-    var t: Tracer(8) = .{};
+    var t = Tracer(8).init();
     t.record(.{ .trace_id = 1, .kind = .gateway, .start_tick = 0, .end_tick = 10, .seq = 1, .status = .ok });
     t.record(.{ .trace_id = 1, .kind = .executor, .start_tick = 5, .end_tick = 15, .seq = 1, .status = .ok });
 
@@ -139,7 +148,7 @@ test "Tracer: record and snapshot" {
 }
 
 test "Tracer: ring buffer wraps" {
-    var t: Tracer(4) = .{};
+    var t = Tracer(4).init();
     for (0..6) |i| {
         t.record(.{
             .trace_id = @as(u64, @intCast(i)) + 1, // trace_id must be non-zero
@@ -159,7 +168,7 @@ test "Tracer: ring buffer wraps" {
 }
 
 test "Tracer: findByTrace" {
-    var t: Tracer(16) = .{};
+    var t = Tracer(16).init();
     t.record(.{ .trace_id = 42, .kind = .gateway, .start_tick = 0, .end_tick = 1, .seq = 10, .status = .ok });
     t.record(.{ .trace_id = 99, .kind = .gateway, .start_tick = 0, .end_tick = 1, .seq = 11, .status = .ok });
     t.record(.{ .trace_id = 42, .kind = .executor, .start_tick = 1, .end_tick = 2, .seq = 10, .status = .ok });

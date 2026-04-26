@@ -49,7 +49,6 @@ const Section = enum(u8) {
 };
 
 /// Opcodes forbidden for determinism.
-
 /// Allowed host import modules.
 const ALLOWED_IMPORT_MODULES = [_][]const u8{
     "foldb", // foldb's own host API

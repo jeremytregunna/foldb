@@ -73,7 +73,7 @@ pub const Message = union(MessageKind) {
 // sum of its field widths so layout bugs are caught before any packet is sent.
 comptime {
     assert(32 == 4 * 8); // RequestVoteArgs: 4 × u64
-    assert(9 == 8 + 1);  // RequestVoteResult: u64 + bool(u8)
+    assert(9 == 8 + 1); // RequestVoteResult: u64 + bool(u8)
     assert(17 == 8 + 1 + 8); // AppendEntriesResult: u64 + bool(u8) + u64
     assert(40 == 5 * 8); // AppendEntriesHeader: 5 × u64
 }

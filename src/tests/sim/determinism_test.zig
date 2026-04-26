@@ -101,15 +101,15 @@ fn applyOp(
     switch (op.kind) {
         .insert => {
             const params = [_]ColumnValue{ .{ .int64 = op.id }, .{ .int64 = op.value } };
-            _ = gw.execute(insert_hash, &params, &.{}) catch {};
+            if (gw.execute(insert_hash, &params, &.{})) |_| {} else |err| std.log.debug("execute chaos: {}", .{err});
         },
         .update => {
             const params = [_]ColumnValue{ .{ .int64 = op.id }, .{ .int64 = op.value } };
-            _ = gw.execute(update_hash, &params, &.{}) catch {};
+            if (gw.execute(update_hash, &params, &.{})) |_| {} else |err| std.log.debug("execute chaos: {}", .{err});
         },
         .delete => {
             const params = [_]ColumnValue{.{ .int64 = op.id }};
-            _ = gw.execute(delete_hash, &params, &.{}) catch {};
+            if (gw.execute(delete_hash, &params, &.{})) |_| {} else |err| std.log.debug("execute chaos: {}", .{err});
         },
         .select => {}, // selects don't mutate state; skip for determinism test
     }

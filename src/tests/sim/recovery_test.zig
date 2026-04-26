@@ -80,15 +80,15 @@ fn runWorkload(
         switch (op.kind) {
             .insert => {
                 const params = [_]ColumnValue{ .{ .int64 = op.id }, .{ .int64 = op.value } };
-                _ = gw.execute(insert_hash, &params, &.{}) catch {};
+                if (gw.execute(insert_hash, &params, &.{})) |_| {} else |err| std.log.debug("execute chaos: {}", .{err});
             },
             .update => {
                 const params = [_]ColumnValue{ .{ .int64 = op.id }, .{ .int64 = op.value } };
-                _ = gw.execute(update_hash, &params, &.{}) catch {};
+                if (gw.execute(update_hash, &params, &.{})) |_| {} else |err| std.log.debug("execute chaos: {}", .{err});
             },
             .delete => {
                 const params = [_]ColumnValue{.{ .int64 = op.id }};
-                _ = gw.execute(delete_hash, &params, &.{}) catch {};
+                if (gw.execute(delete_hash, &params, &.{})) |_| {} else |err| std.log.debug("execute chaos: {}", .{err});
             },
             .select => {},
         }
@@ -190,7 +190,7 @@ test "sim: recovery — schema and flushed data survive crash" {
         // Unflushed batch — lost on crash.
         while (i <= 20) : (i += 1) {
             const params = [_]ColumnValue{ .{ .int64 = i }, .{ .int64 = i * 100 } };
-            _ = gw.execute(ins, &params, &.{}) catch {};
+            if (gw.execute(ins, &params, &.{})) |_| {} else |err| std.log.debug("execute chaos: {}", .{err});
         }
 
         // Simulate crash: abandon gateway without deinit.

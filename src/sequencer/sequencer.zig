@@ -94,7 +94,7 @@ pub const Sequencer = struct {
     transport: raft_mod.TcpTransport,
     /// Owner thread fields.
     tick_interval_ms: u32,
-    queue: mpsc_mod.MpscQueue(types_mod.PendingSubmit) = undefined,
+    queue: mpsc_mod.MpscQueue(types_mod.PendingSubmit),
     shutdown: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
     /// Highest Raft log index whose committed output has been fully applied to
@@ -164,6 +164,8 @@ pub const Sequencer = struct {
             .transport = transport,
             .tick_interval_ms = cfg.tick_interval_ms,
             .last_applied = persisted_last_applied,
+            // queue is intentionally left undefined here; start() calls queue.init() before use.
+            .queue = undefined,
         };
     }
 
@@ -400,6 +402,7 @@ pub const Sequencer = struct {
         entry_kind: log_mod.EntryKind,
     ) types_mod.SubmitHandle {
         assert(!self.shutdown.load(.acquire));
+        // SAFETY: result is written by the Sequencer thread before done is set to true.
         pending.* = .{
             .submit = .{
                 .client_id = client_id,
@@ -517,7 +520,7 @@ fn runLoop(self: *Sequencer) void {
             self.queue.waitForWork(seq, tick_ns);
         }
 
-        self.tickOnce(self.alloc) catch {};
+        self.tickOnce(self.alloc) catch |err| std.log.warn("tick: {}", .{err});
     }
 }
 
@@ -580,7 +583,10 @@ fn commitBroadcast(self: *Sequencer, client_id: u64, client_seq_num: u64, submit
     var outputs: std.ArrayList(raft_mod.Output) = .empty;
     defer outputs.deinit(self.alloc);
     const ordering_seq = try self.raft.propose(
-        &self.raft_log, .epoch_decision, payload_buf.items, &outputs,
+        &self.raft_log,
+        .epoch_decision,
+        payload_buf.items,
+        &outputs,
     ) orelse {
         self.metrics.not_leader_errors.inc();
         return SequencerError.NotLeader;

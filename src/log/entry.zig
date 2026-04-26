@@ -147,6 +147,7 @@ pub const TxnIntent = struct {
         if (payload.len < header_size) return error.InvalidPayload;
         const payload_ptr = payload.ptr;
 
+        // SAFETY: @memcpy writes all 32 bytes of query_hash before it is read.
         var query_hash: QueryHash = undefined;
         @memcpy(&query_hash, payload_ptr[0..32]);
 
@@ -381,7 +382,10 @@ pub const LogEntry = struct {
     pub fn deserialize_pread(fd: std.posix.fd_t, offset: *i64, alloc: std.mem.Allocator) !LogEntry {
         var header_buf: [LogEntryHeader.header_size]u8 = undefined;
         const n = std.os.linux.pread(
-            @intCast(fd), &header_buf, LogEntryHeader.header_size, offset.*,
+            @intCast(fd),
+            &header_buf,
+            LogEntryHeader.header_size,
+            offset.*,
         );
         if (n != LogEntryHeader.header_size) return error.EndOfStream;
         offset.* += @intCast(n);
@@ -394,7 +398,10 @@ pub const LogEntry = struct {
 
         if (log_header.payload_len > 0) {
             const pn = std.os.linux.pread(
-                @intCast(fd), payload.ptr, log_header.payload_len, offset.*,
+                @intCast(fd),
+                payload.ptr,
+                log_header.payload_len,
+                offset.*,
             );
             if (pn != log_header.payload_len) return error.EndOfStream;
             offset.* += @intCast(pn);

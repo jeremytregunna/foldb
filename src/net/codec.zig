@@ -347,29 +347,83 @@ fn encodeValue(
 ) !void {
     switch (v) {
         .null_val => try appendU8(out, alloc, TAG_NULL),
-        .bool_val => |b| { try appendU8(out, alloc, TAG_BOOL); try appendU8(out, alloc, if (b) 1 else 0); },
-        .int8 => |n| { try appendU8(out, alloc, TAG_INT8); try appendI8(out, alloc, n); },
-        .int16 => |n| { try appendU8(out, alloc, TAG_INT16); try appendI16Le(out, alloc, n); },
-        .int32 => |n| { try appendU8(out, alloc, TAG_INT32); try appendI32Le(out, alloc, n); },
-        .int64 => |n| { try appendU8(out, alloc, TAG_INT64); try appendI64Le(out, alloc, n); },
-        .uint8 => |n| { try appendU8(out, alloc, TAG_UINT8); try appendU8(out, alloc, n); },
-        .uint16 => |n| { try appendU8(out, alloc, TAG_UINT16); try appendU16Le(out, alloc, n); },
-        .uint32 => |n| { try appendU8(out, alloc, TAG_UINT32); try appendU32Le(out, alloc, n); },
-        .uint64 => |n| { try appendU8(out, alloc, TAG_UINT64); try appendU64Le(out, alloc, n); },
-        .float32 => |f| { try appendU8(out, alloc, TAG_FLOAT32); try appendF32Le(out, alloc, f); },
-        .float64 => |f| { try appendU8(out, alloc, TAG_FLOAT64); try appendF64Le(out, alloc, f); },
+        .bool_val => |b| {
+            try appendU8(out, alloc, TAG_BOOL);
+            try appendU8(out, alloc, if (b) 1 else 0);
+        },
+        .int8 => |n| {
+            try appendU8(out, alloc, TAG_INT8);
+            try appendI8(out, alloc, n);
+        },
+        .int16 => |n| {
+            try appendU8(out, alloc, TAG_INT16);
+            try appendI16Le(out, alloc, n);
+        },
+        .int32 => |n| {
+            try appendU8(out, alloc, TAG_INT32);
+            try appendI32Le(out, alloc, n);
+        },
+        .int64 => |n| {
+            try appendU8(out, alloc, TAG_INT64);
+            try appendI64Le(out, alloc, n);
+        },
+        .uint8 => |n| {
+            try appendU8(out, alloc, TAG_UINT8);
+            try appendU8(out, alloc, n);
+        },
+        .uint16 => |n| {
+            try appendU8(out, alloc, TAG_UINT16);
+            try appendU16Le(out, alloc, n);
+        },
+        .uint32 => |n| {
+            try appendU8(out, alloc, TAG_UINT32);
+            try appendU32Le(out, alloc, n);
+        },
+        .uint64 => |n| {
+            try appendU8(out, alloc, TAG_UINT64);
+            try appendU64Le(out, alloc, n);
+        },
+        .float32 => |f| {
+            try appendU8(out, alloc, TAG_FLOAT32);
+            try appendF32Le(out, alloc, f);
+        },
+        .float64 => |f| {
+            try appendU8(out, alloc, TAG_FLOAT64);
+            try appendF64Le(out, alloc, f);
+        },
         .decimal => |d| {
             try appendU8(out, alloc, TAG_DECIMAL);
             try appendU8(out, alloc, d.scale);
             try appendI128Le(out, alloc, d.coefficient);
         },
-        .string => |s| { try appendU8(out, alloc, TAG_STRING); try appendU32LenPrefixed(out, alloc, s); },
-        .bytes => |b| { try appendU8(out, alloc, TAG_BYTES); try appendU32LenPrefixed(out, alloc, b); },
-        .uuid => |u| { try appendU8(out, alloc, TAG_UUID); try out.appendSlice(alloc, &u); },
-        .timestamp => |ts| { try appendU8(out, alloc, TAG_TIMESTAMP); try appendI64Le(out, alloc, ts); },
-        .interval_months => |m| { try appendU8(out, alloc, TAG_INTERVAL_MONTHS); try appendI32Le(out, alloc, m); },
-        .interval_micros => |us| { try appendU8(out, alloc, TAG_INTERVAL_MICROS); try appendI64Le(out, alloc, us); },
-        .json => |j| { try appendU8(out, alloc, TAG_JSON); try appendU32LenPrefixed(out, alloc, j); },
+        .string => |s| {
+            try appendU8(out, alloc, TAG_STRING);
+            try appendU32LenPrefixed(out, alloc, s);
+        },
+        .bytes => |b| {
+            try appendU8(out, alloc, TAG_BYTES);
+            try appendU32LenPrefixed(out, alloc, b);
+        },
+        .uuid => |u| {
+            try appendU8(out, alloc, TAG_UUID);
+            try out.appendSlice(alloc, &u);
+        },
+        .timestamp => |ts| {
+            try appendU8(out, alloc, TAG_TIMESTAMP);
+            try appendI64Le(out, alloc, ts);
+        },
+        .interval_months => |m| {
+            try appendU8(out, alloc, TAG_INTERVAL_MONTHS);
+            try appendI32Le(out, alloc, m);
+        },
+        .interval_micros => |us| {
+            try appendU8(out, alloc, TAG_INTERVAL_MICROS);
+            try appendI64Le(out, alloc, us);
+        },
+        .json => |j| {
+            try appendU8(out, alloc, TAG_JSON);
+            try appendU32LenPrefixed(out, alloc, j);
+        },
         .vector => |vec| {
             try appendU8(out, alloc, TAG_VECTOR);
             try appendU8(out, alloc, @intFromEnum(vec.element_type));
@@ -482,19 +536,28 @@ fn deinitOne(
         .string, .bytes, .json => |s| alloc.free(s),
         .vector => |vec| alloc.free(vec.data),
         .array => |arr| {
-            if (arr.len == 0) { alloc.free(arr); return; }
+            if (arr.len == 0) {
+                alloc.free(arr);
+                return;
+            }
             assert(depth.* < MAX_DECODE_DEPTH);
             frames[depth.*] = .{ .content = .{ .array = arr }, .pos = 0, .map_doing_value = false };
             depth.* += 1;
         },
         .struct_val => |fields| {
-            if (fields.len == 0) { alloc.free(fields); return; }
+            if (fields.len == 0) {
+                alloc.free(fields);
+                return;
+            }
             assert(depth.* < MAX_DECODE_DEPTH);
             frames[depth.*] = .{ .content = .{ .struct_fields = fields }, .pos = 0, .map_doing_value = false };
             depth.* += 1;
         },
         .map => |entries| {
-            if (entries.len == 0) { alloc.free(entries); return; }
+            if (entries.len == 0) {
+                alloc.free(entries);
+                return;
+            }
             assert(depth.* < MAX_DECODE_DEPTH);
             frames[depth.*] = .{ .content = .{ .map = entries }, .pos = 0, .map_doing_value = false };
             depth.* += 1;

@@ -9,6 +9,7 @@ const Seq = entry_mod.Seq;
 const NodeId = entry_mod.NodeId;
 
 pub fn real_time_sec() i64 {
+    // SAFETY: clock_gettime fills ts before any field is read.
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     return ts.sec;

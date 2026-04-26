@@ -22,6 +22,7 @@ pub const SnapshotLogWriter = struct {
 // This is the domain boundary — callers that do not need log write-back pass
 // noop_snapshot_log_writer instead of null. The core always calls write unconditionally.
 fn noopSnapshotWriteImpl(_: *anyopaque, _: []const u8, _: u64, _: u32, _: std.mem.Allocator) anyerror!void {}
+// SAFETY: ptr is never dereferenced by noopSnapshotWriteImpl; it ignores its *anyopaque argument.
 pub const noop_snapshot_log_writer = SnapshotLogWriter{
     .ptr = undefined,
     .writeFn = &noopSnapshotWriteImpl,

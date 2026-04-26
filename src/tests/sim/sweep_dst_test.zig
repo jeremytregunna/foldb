@@ -105,11 +105,11 @@ fn applyOp(
         .insert, .update => {
             const hash = if (op.kind == .insert) ins else upd;
             const params = [_]ColumnValue{ .{ .int64 = op.id }, .{ .int64 = op.value } };
-            _ = gw.execute(hash, &params, &.{}) catch {};
+            if (gw.execute(hash, &params, &.{})) |_| {} else |err| std.log.debug("execute chaos: {}", .{err});
         },
         .delete => {
             const params = [_]ColumnValue{.{ .int64 = op.id }};
-            _ = gw.execute(del, &params, &.{}) catch {};
+            if (gw.execute(del, &params, &.{})) |_| {} else |err| std.log.debug("execute chaos: {}", .{err});
         },
         .select => {},
     }

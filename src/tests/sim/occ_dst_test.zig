@@ -209,11 +209,13 @@ fn runOccDst(seed: u64, alloc: std.mem.Allocator) !void {
     // Phase 1: insert rows with no OCC checking (recon_seq=0).
     // Generate N_ROWS distinct keys and insert them.
     const N_ROWS = 8;
+    // SAFETY: all N_ROWS entries of keys are written by the for loop before keys is read.
     var keys: [N_ROWS][8]u8 = undefined;
     for (&keys, 0..) |*k, i| {
+        // SAFETY: raw is filled by sched.random().bytes before it is used.
         var raw: [8]u8 = undefined;
         sched.random().bytes(&raw);
-        _ = std.fmt.bufPrint(k, "key{d:0>4}", .{i}) catch unreachable;
+        _ = std.fmt.bufPrint(k, "key{d:0>4}", .{i}) catch |err| std.debug.panic("unexpected: {}", .{err});
     }
 
     var seq: Seq = 1;

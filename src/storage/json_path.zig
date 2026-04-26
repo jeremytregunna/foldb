@@ -152,7 +152,10 @@ fn scanValueObject(data: []const u8, pos: *u32) JsonPathError!void {
     while (true) {
         skipWs(data, pos);
         if (pos.* >= data.len) return error.InvalidJson;
-        if (data[pos.*] == '}') { pos.* += 1; return; }
+        if (data[pos.*] == '}') {
+            pos.* += 1;
+            return;
+        }
         if (!first) {
             if (data[pos.*] != ',') return error.InvalidJson;
             pos.* += 1;
@@ -175,7 +178,10 @@ fn scanValueArray(data: []const u8, pos: *u32) JsonPathError!void {
     while (true) {
         skipWs(data, pos);
         if (pos.* >= data.len) return error.InvalidJson;
-        if (data[pos.*] == ']') { pos.* += 1; return; }
+        if (data[pos.*] == ']') {
+            pos.* += 1;
+            return;
+        }
         if (!first) {
             if (data[pos.*] != ',') return error.InvalidJson;
             pos.* += 1;
