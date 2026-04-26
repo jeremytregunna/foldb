@@ -222,7 +222,7 @@ test "multinode: DDL replicates to all followers" {
 
     // Wait for FoldExecutor on each follower to apply the replicated entries.
     for (gc.gws, 0..) |gw, i| {
-        if (i != leader_idx) try gw.fold_executor.wait_for(committed_seq, null);
+        if (i != leader_idx) try gw.fold_executors[0].wait_for(committed_seq, null);
     }
 
     // All three nodes must resolve the table — proving DDL was replicated.
@@ -287,7 +287,7 @@ test "multinode: DML on leader is visible on follower after applyNewEntries" {
 
     // Wait for FoldExecutor on the follower to apply all replicated entries.
     const follower_idx: usize = if (leader_idx == 0) 1 else 0;
-    try gc.gws[follower_idx].fold_executor.wait_for(committed_seq, null);
+    try gc.gws[follower_idx].fold_executors[0].wait_for(committed_seq, null);
 
     // The follower must be able to serve the SELECT from local storage.
     var rs = try gc.gws[follower_idx].querySelect(

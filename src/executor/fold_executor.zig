@@ -23,8 +23,12 @@ pub const FoldExecutor = struct {
     storage_schema_arena: std.heap.ArenaAllocator,
     /// Routing layer over storage partitions. Borrowed from Gateway.
     partitioned: *storage_mod.PartitionedStorage,
-    /// Partition logs. Borrowed from Sequencer (stable pointer). Slice is owned by Sequencer.
-    logs: []log_mod.Log,
+    /// Partition log for this executor. Borrowed from Sequencer (stable pointer).
+    log: *log_mod.Log,
+    /// Which partition this executor services.
+    partition_id: u32,
+    /// CPU to pin this executor's thread to.
+    cpu_id: u32,
     shutdown: std.atomic.Value(bool),
     thread: ?std.Thread,
     alloc: std.mem.Allocator,
@@ -32,7 +36,9 @@ pub const FoldExecutor = struct {
     pub fn init(
         partitioned: *storage_mod.PartitionedStorage,
         cdc: *cdc_mod.CdcManager,
-        logs: []log_mod.Log,
+        log: *log_mod.Log,
+        partition_id: u32,
+        cpu_id: u32,
         alloc: std.mem.Allocator,
     ) !*FoldExecutor {
         const fe = try alloc.create(FoldExecutor);
@@ -40,7 +46,9 @@ pub const FoldExecutor = struct {
         fe.alloc = alloc;
         fe.storage_schema_arena = std.heap.ArenaAllocator.init(alloc);
         fe.partitioned = partitioned;
-        fe.logs = logs;
+        fe.log = log;
+        fe.partition_id = partition_id;
+        fe.cpu_id = cpu_id;
         fe.shutdown = .init(false);
         fe.thread = null;
         fe.schema = sql_mod.SchemaRegistry.init(alloc);
@@ -64,7 +72,7 @@ pub const FoldExecutor = struct {
 
     pub fn stop(self: *FoldExecutor) void {
         self.shutdown.store(true, .release);
-        for (self.logs) |*log| log.notifyAppend();
+        self.log.notifyAppend();
         if (self.thread) |t| {
             t.join();
             self.thread = null;
@@ -72,37 +80,35 @@ pub const FoldExecutor = struct {
     }
 
     fn threadLoop(self: *FoldExecutor) void {
+        pinToCpu(self.cpu_id);
         const batch = 64;
         while (!self.shutdown.load(.acquire)) {
             const from = self.sql_exec.current_seq() + 1;
-            const entries = self.readMerged(from, batch) catch continue;
+            const entries = self.log.read(from, batch, self.alloc) catch continue;
             defer {
                 for (entries) |*e| e.deinit(self.alloc);
                 self.alloc.free(entries);
             }
             if (entries.len == 0) {
                 if (self.shutdown.load(.acquire)) break;
-                // Single-partition: block efficiently on the log's append epoch.
-                // Multi-partition: poll — log[0]'s epoch won't change when entries land on
-                // a different partition log, so we can't block on a single log's epoch.
-                if (self.logs.len == 1) {
-                    self.logs[0].waitForEntries(from);
-                } else {
-                    var any_ready = false;
-                    for (self.logs) |*log| {
-                        if (log.current_seq >= from) { any_ready = true; break; }
-                    }
-                    if (!any_ready) {
-                        const sleep_ns = std.os.linux.timespec{ .sec = 0, .nsec = 100_000 };
-                        _ = std.os.linux.nanosleep(&sleep_ns, null);
-                    }
-                }
+                self.log.waitForEntries(from);
                 continue;
             }
             for (entries) |e| {
                 self.applyEntry(e);
             }
         }
+    }
+
+    fn pinToCpu(cpu_id: u32) void {
+        var cpu_set = std.mem.zeroes(std.os.linux.cpu_set_t);
+        const elem = cpu_id / @bitSizeOf(usize);
+        if (elem < cpu_set.len) {
+            cpu_set[elem] |= @as(usize, 1) << @intCast(cpu_id % @bitSizeOf(usize));
+        }
+        std.os.linux.sched_setaffinity(0, &cpu_set) catch |err| {
+            std.log.warn("FoldExecutor[{d}]: CPU pin to {d} failed: {}", .{ cpu_id, cpu_id, err });
+        };
     }
 
     fn applyEntry(self: *FoldExecutor, entry: LogEntry) void {
@@ -357,7 +363,7 @@ pub const FoldExecutor = struct {
         // Pass 1: schema — DDL and query registration only.
         var from_seq: Seq = 1;
         while (true) {
-            const entries = try self.logs[0].read(from_seq, batch, self.alloc);
+            const entries = try self.log.read(from_seq, batch, self.alloc);
             defer {
                 for (entries) |*e| e.deinit(self.alloc);
                 self.alloc.free(entries);
@@ -379,7 +385,7 @@ pub const FoldExecutor = struct {
         // Pass 2: DML — apply txn_intent entries to rebuild storage state.
         from_seq = 1;
         while (true) {
-            const entries = try self.readMerged(from_seq, batch);
+            const entries = try self.log.read(from_seq, batch, self.alloc);
             defer {
                 for (entries) |*e| e.deinit(self.alloc);
                 self.alloc.free(entries);
@@ -393,32 +399,11 @@ pub const FoldExecutor = struct {
                 }
                 from_seq = e.header.seq + 1;
             }
-            if (entries.len < batch * self.logs.len) break;
+            if (entries.len < batch) break;
         }
     }
 
     // ---- Private helpers ----
-
-    fn readMerged(self: *FoldExecutor, from_seq: Seq, batch: usize) ![]LogEntry {
-        if (self.logs.len == 1) return self.logs[0].read(from_seq, batch, self.alloc);
-        var list: std.ArrayList(LogEntry) = .empty;
-        errdefer {
-            for (list.items) |*e| e.deinit(self.alloc);
-            list.deinit(self.alloc);
-        }
-        for (self.logs) |*log| {
-            const slice = try log.read(from_seq, batch, self.alloc);
-            defer self.alloc.free(slice);
-            try list.appendSlice(self.alloc, slice);
-        }
-        const merged = try list.toOwnedSlice(self.alloc);
-        std.sort.block(LogEntry, merged, {}, struct {
-            fn lt(_: void, a: LogEntry, b: LogEntry) bool {
-                return a.header.seq < b.header.seq;
-            }
-        }.lt);
-        return merged;
-    }
 
     fn buildDescribeResult(self: *FoldExecutor, table_name: []const u8, alloc: std.mem.Allocator) !sql_mod.ResultSet {
         assert(table_name.len > 0);

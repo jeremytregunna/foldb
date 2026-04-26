@@ -65,8 +65,8 @@ fn onSnapshotComplete(ptr: *anyopaque, snapshot_seq: sequencer_mod.Seq) void {
 /// The main Gateway struct.
 /// Always heap-allocated via `init`; internal pointers remain stable.
 pub const Gateway = struct {
-    /// FoldExecutor owns schema, registry, sql_exec and runs the apply loop on its own thread.
-    fold_executor: *fold_executor_mod.FoldExecutor,
+    /// One FoldExecutor per partition; each runs on its own thread pinned to a CPU.
+    fold_executors: []*fold_executor_mod.FoldExecutor,
     /// One Storage per data partition. Heap-allocated; owned by this gateway.
     storages: []*storage_mod.Storage,
     /// Routing wrapper over storages — used by fold_executor and reconnaissance.
@@ -231,17 +231,28 @@ pub const Gateway = struct {
 
         gw.cdc = try cdc_mod.CdcManager.init(alloc);
 
-        // Create FoldExecutor — owns schema/registry/sql_exec; borrows partitioned and logs.
-        gw.fold_executor = try fold_executor_mod.FoldExecutor.init(
-            &gw.partitioned,
-            &gw.cdc,
-            gw.sequencer.partition_logs,
-            alloc,
-        );
-        errdefer {
-            gw.fold_executor.stop();
-            gw.fold_executor.deinit();
+        // Create one FoldExecutor per partition, each pinned to a CPU (round-robin if CPUs < partitions).
+        const cpu_count: u32 = @intCast(std.Thread.getCpuCount() catch 1);
+        const fold_executors = try alloc.alloc(*fold_executor_mod.FoldExecutor, pc);
+        errdefer alloc.free(fold_executors);
+        var n_fe_inited: usize = 0;
+        errdefer for (fold_executors[0..n_fe_inited]) |fe| {
+            fe.stop();
+            fe.deinit();
+        };
+        for (0..pc) |i| {
+            const cpu_id: u32 = @intCast(i % cpu_count);
+            fold_executors[i] = try fold_executor_mod.FoldExecutor.init(
+                &gw.partitioned,
+                &gw.cdc,
+                &gw.sequencer.partition_logs[i],
+                @intCast(i),
+                cpu_id,
+                alloc,
+            );
+            n_fe_inited += 1;
         }
+        gw.fold_executors = fold_executors;
 
         // Wire snapshot scheduling if an object store is available and interval is set.
         const snap_obj: ?storage_mod.ObjectStore = blk: {
@@ -284,10 +295,10 @@ pub const Gateway = struct {
         // Replay log to rebuild schema and storage state after restart.
         // Pass 1 reconstructs DDL/query registry; pass 2 replays DML into storage,
         // recovering rows that were in the memtable and not flushed before a crash.
-        try gw.fold_executor.replayFromLog();
+        for (gw.fold_executors) |fe| try fe.replayFromLog();
 
-        // Start the FoldExecutor OS thread — continuously applies committed entries.
-        try gw.fold_executor.start();
+        // Start FoldExecutor OS threads — each continuously applies committed entries for its partition.
+        for (gw.fold_executors) |fe| try fe.start();
 
         // Derive a stable client_id from the storage path hash
         gw.client_id = blk: {
@@ -305,8 +316,8 @@ pub const Gateway = struct {
     }
 
     pub fn deinit(self: *Gateway) void {
-        self.fold_executor.stop();
-        // Flush memtables BEFORE freeing fold_executor's storage_schema_arena.
+        for (self.fold_executors) |fe| fe.stop();
+        // Flush memtables BEFORE freeing fold_executor storage_schema_arenas.
         // Block.append() dereferences schema.columns; freeing the arena first causes a segfault.
         for (self.storages) |s| {
             const dir = s.dir;
@@ -316,7 +327,8 @@ pub const Gateway = struct {
             self.alloc.free(dir);
         }
         self.alloc.free(self.storages);
-        self.fold_executor.deinit();
+        for (self.fold_executors) |fe| fe.deinit();
+        self.alloc.free(self.fold_executors);
         self.cdc.deinit();
         self.sequencer.deinit();
         if (self.s3_store) |s3| self.alloc.destroy(s3);
@@ -340,7 +352,7 @@ pub const Gateway = struct {
 
     /// Returns true if the registered query is a pure SELECT (no mutations).
     pub fn isSelectQuery(self: *Gateway, hash: QueryHash) bool {
-        return self.fold_executor.isSelectQuery(hash);
+        return self.fold_executors[0].isSelectQuery(hash);
     }
 
     /// Register a SQL query and return its hash with schema version.
@@ -351,7 +363,7 @@ pub const Gateway = struct {
         // Validate SQL against the current schema before committing to Raft.
         // registerLocal does full parse+typecheck+plan — returns ColumnNotFound etc.
         // if the query references columns/tables that don't exist in the current schema.
-        const hash = self.fold_executor.registerLocal(sql) catch |e| {
+        const hash = self.fold_executors[0].registerLocal(sql) catch |e| {
             if (e == error.UnexpectedToken or e == error.UnsupportedSyntax) {
                 var arena = std.heap.ArenaAllocator.init(self.alloc);
                 defer arena.deinit();
@@ -383,11 +395,24 @@ pub const Gateway = struct {
             self.client_seq,
             .schema_change,
         ).awaitCommit(self.io);
-        try self.fold_executor.wait_for(result.seq, self.io);
+        try self.waitAllFoldExecutors(result.seq);
         return .{
             .hash = hash,
-            .schema_version = self.fold_executor.schemaVersion(),
+            .schema_version = self.fold_executors[0].schemaVersion(),
         };
+    }
+
+    /// Wait for all FoldExecutors to process their respective schema_change entries.
+    /// The sequencer returns last_seq (highest seq assigned); N entries have seqs
+    /// last_seq-(N-1)..last_seq, routed round-robin. For partition P its seq is
+    /// first_seq + ((P + N - first_seq % N) % N).
+    fn waitAllFoldExecutors(self: *Gateway, last_seq: Seq) !void {
+        const n = @as(Seq, self.fold_executors.len);
+        const first_seq = last_seq - n + 1;
+        for (self.fold_executors, 0..) |fe, p| {
+            const offset = (@as(u64, p) + n - first_seq % n) % n;
+            try fe.wait_for(first_seq + offset, self.io);
+        }
     }
 
     /// Outcome of a single submit-and-drain attempt.
@@ -411,7 +436,7 @@ pub const Gateway = struct {
         buf: *std.ArrayList(u8),
     ) !void {
         var hints = try recon_mod.reconnaissanceScan(
-            plan, &self.partitioned, params, &self.fold_executor.schema,
+            plan, &self.partitioned, params, &self.fold_executors[0].schema,
             recon_seq, self.partition_count, self.recon_strategy, self.alloc,
         );
         defer hints.deinit();
@@ -431,10 +456,10 @@ pub const Gateway = struct {
         );
         const result = try handle.awaitCommit(self.io);
 
-        // Wait for FoldExecutor to process up to result.seq; suspends the fiber.
-        try self.fold_executor.wait_for(result.seq, self.io);
-        const exec_result = self.fold_executor.waitFor(result.seq);
-        const exec_detail = self.fold_executor.lastExecDetail();
+        // Wait for the FoldExecutor for this partition to process up to result.seq; suspends the fiber.
+        try self.fold_executors[result.partition].wait_for(result.seq, self.io);
+        const exec_result = self.fold_executors[result.partition].waitFor(result.seq);
+        const exec_detail = self.fold_executors[result.partition].lastExecDetail();
         if (exec_detail.len > 0) self.setDetail("{s}", .{exec_detail});
 
         switch (exec_result) {
@@ -469,7 +494,7 @@ pub const Gateway = struct {
         params: []const ColumnValue,
         nondet: []const ResolvedValue,
     ) !ExecResult {
-        const rq = self.fold_executor.lookupQuery(hash) orelse return error.QueryNotFound;
+        const rq = self.fold_executors[0].lookupQuery(hash) orelse return error.QueryNotFound;
         self.metrics.queries_executed.inc();
 
         // Assign a stable client_seq for this logical operation ONCE, before any retry.
@@ -490,7 +515,14 @@ pub const Gateway = struct {
 
         // On retry, re-run reconnaissance at the seq the executor assigned to the
         // conflicting entry so hints reflect state as of that point.
-        var hint_seq: Seq = self.fold_executor.current_seq();
+        var hint_seq: Seq = blk: {
+            var max: Seq = 0;
+            for (self.fold_executors) |fe| {
+                const cs = fe.current_seq();
+                if (cs > max) max = cs;
+            }
+            break :blk max;
+        };
 
         const max_retries: usize = 3;
         std.debug.assert(max_retries > 0);
@@ -522,7 +554,7 @@ pub const Gateway = struct {
         params: []const ColumnValue,
         nondet: []const ResolvedValue,
     ) !ResultSet {
-        return self.fold_executor.querySelect(hash, params, nondet, self.alloc);
+        return self.fold_executors[0].querySelect(hash, params, nondet, self.alloc);
     }
 
     /// Read data at a specific sequence number (historical read).
@@ -533,7 +565,7 @@ pub const Gateway = struct {
         params: []const ColumnValue,
         seq: Seq,
     ) !ResultSet {
-        return self.fold_executor.readAt(hash, params, seq, self.alloc);
+        return self.fold_executors[0].readAt(hash, params, seq, self.alloc);
     }
 
 
@@ -552,7 +584,7 @@ pub const Gateway = struct {
     /// Validates and applies locally first so the connection sees errors before committing.
     pub fn applyDdl(self: *Gateway, sql: []const u8) !void {
         self.error_detail_len = 0;
-        try self.fold_executor.applyDdlLocal(sql);
+        try self.fold_executors[0].applyDdlLocal(sql);
         self.client_seq += 1;
         var pending: sequencer_mod.PendingSubmit = undefined;
         const result = try self.sequencer.submitBytes(
@@ -562,7 +594,7 @@ pub const Gateway = struct {
             self.client_seq,
             .schema_change,
         ).awaitCommit(self.io);
-        try self.fold_executor.wait_for(result.seq, self.io);
+        try self.waitAllFoldExecutors(result.seq);
     }
 
     /// Get the current committed sequence number.
@@ -614,12 +646,12 @@ pub const Gateway = struct {
     /// Resolve a table name to its numeric ID via the schema registry.
     /// Returns null if the table is not found.
     pub fn resolveTableName(self: *Gateway, name: []const u8) ?u32 {
-        return self.fold_executor.resolveTableName(name);
+        return self.fold_executors[0].resolveTableName(name);
     }
 
     /// Returns true if a table with this numeric ID exists in the schema.
     pub fn tableIdExists(self: *Gateway, id: u32) bool {
-        return self.fold_executor.tableIdExists(id);
+        return self.fold_executors[0].tableIdExists(id);
     }
 };
 

@@ -548,6 +548,13 @@ fn commitInner(self: *Sequencer, submit: ValidatedSubmit) !SubmitResult {
         return .{ .seq = existing_seq, .partition = partition };
     }
 
+    // Schema changes broadcast to all partition logs so every FoldExecutor
+    // maintains an independent consistent schema copy.
+    if (submit.entry_kind == .schema_change) {
+        return commitSchemaChange(self, client_id, client_seq_num, submit);
+    }
+
+    // txn_intent: existing batcher path
     try self.batcher.submit(client_id, client_seq_num);
 
     var decision = try self.batcher.closeEpoch(
@@ -607,4 +614,55 @@ fn commitInner(self: *Sequencer, submit: ValidatedSubmit) !SubmitResult {
     self.metrics.current_seq.set(@intCast(entry.seq));
 
     return .{ .seq = entry.seq, .partition = entry.partition };
+}
+
+/// Broadcast a schema_change entry to all partition logs so every FoldExecutor
+/// maintains an independent consistent schema copy.
+fn commitSchemaChange(self: *Sequencer, client_id: u64, client_seq_num: u64, submit: ValidatedSubmit) !SubmitResult {
+    const n = self.partition_logs.len;
+    const entries = try self.alloc.alloc(OrderingEntry, n);
+    defer self.alloc.free(entries);
+    for (0..n) |i| {
+        const seq = self.next_seq + @as(Seq, i);
+        entries[i] = .{
+            .seq = seq,
+            .partition = @intCast(seq % @as(Seq, n)),
+            .client_id = client_id,
+            .client_seq = client_seq_num,
+        };
+    }
+    const decision = types_mod.EpochDecision{
+        .epoch_num = self.next_epoch,
+        .entries = entries,
+        .entry_kind = submit.entry_kind,
+        .payload = submit.intent_payload,
+    };
+    var payload_buf: std.ArrayList(u8) = .empty;
+    defer payload_buf.deinit(self.alloc);
+    try types_mod.serializeEpochDecision(decision, &payload_buf, self.alloc);
+    var outputs: std.ArrayList(raft_mod.Output) = .empty;
+    defer outputs.deinit(self.alloc);
+    const ordering_seq = try self.raft.propose(
+        &self.raft_log, .epoch_decision, payload_buf.items, &outputs,
+    ) orelse {
+        self.metrics.not_leader_errors.inc();
+        return SequencerError.NotLeader;
+    };
+    self.next_epoch += 1;
+    self.next_seq += @intCast(n);
+    self.metrics.epochs_closed.inc();
+    self.metrics.last_epoch_size.set(@intCast(n));
+    try self.flushOutputs(outputs.items, self.alloc);
+    const wait_ts: std.os.linux.timespec = .{ .sec = 0, .nsec = COMMIT_WAIT_SLEEP_NS };
+    var wait_ticks: u32 = 0;
+    while (self.raft.commit_index < ordering_seq) {
+        assert(wait_ticks < COMMIT_WAIT_MAX_TICKS);
+        wait_ticks += 1;
+        try self.tickOnce(self.alloc);
+        _ = std.os.linux.nanosleep(&wait_ts, null);
+    }
+    const last_entry = entries[n - 1];
+    try self.idempotency.record(client_id, client_seq_num, last_entry.seq);
+    self.metrics.current_seq.set(@intCast(last_entry.seq));
+    return .{ .seq = last_entry.seq, .partition = last_entry.partition };
 }
