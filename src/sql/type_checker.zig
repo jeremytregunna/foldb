@@ -7,7 +7,6 @@ pub const TypeCheckError = error{
     // §10.2 violations
     SelectStarInRegisteredQuery,
     ImplicitTypeCoercion,
-    NullableColumnWithoutGuard, // = on nullable column without IS NULL guard
     UnqualifiedJoinColumnRef,
     SideEffectingFunctionInWhere,
     IsolationLevelClause,
@@ -476,25 +475,6 @@ pub const TypeChecker = struct {
                 return error.ImplicitTypeCoercion;
             },
             .eq, .neq, .lt, .gt, .lte, .gte => {
-                // §10.2: = on nullable column is an error unless IS NULL guard used.
-                // Exception: JOIN ON conditions — NULL propagation (NULL = x → NULL/false)
-                // is correct SQL semantics and correctly excludes non-matching rows.
-                if ((op == .eq or op == .neq) and !ctx.in_join) {
-                    if (left.* == .column_ref) {
-                        if (self.resolveColumnNullable(left.column_ref, ctx)) |nullability| {
-                            if (nullability == .nullable) {
-                                return error.NullableColumnWithoutGuard;
-                            }
-                        }
-                    }
-                    if (right.* == .column_ref) {
-                        if (self.resolveColumnNullable(right.column_ref, ctx)) |nullability| {
-                            if (nullability == .nullable) {
-                                return error.NullableColumnWithoutGuard;
-                            }
-                        }
-                    }
-                }
                 // Types must match (or one is null_type).
                 // Integer literals are untyped — allow coercion to any integer column type.
                 if (!lt.eql(rt) and lt != .null_type and rt != .null_type) {

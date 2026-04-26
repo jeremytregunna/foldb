@@ -82,32 +82,24 @@ test "§10.2 allows explicit column list" {
 
 // ─── §10.2: nullable column without IS NULL guard ─────────────────────────────
 
-test "§10.2 rejects = on nullable column" {
+test "allows = on nullable column (NULL rows simply don't match)" {
     const alloc = std.testing.allocator;
     var sr = try makeSchema(alloc);
     defer sr.deinit();
     var r = reg(alloc, &sr);
     defer r.deinit();
 
-    try expectErr(
-        &r,
-        "SELECT id FROM users WHERE score = $1",
-        error.NullableColumnWithoutGuard,
-    );
+    _ = try r.register("SELECT id FROM users WHERE score = $1");
 }
 
-test "§10.2 rejects != on nullable column" {
+test "allows != on nullable column" {
     const alloc = std.testing.allocator;
     var sr = try makeSchema(alloc);
     defer sr.deinit();
     var r = reg(alloc, &sr);
     defer r.deinit();
 
-    try expectErr(
-        &r,
-        "SELECT id FROM users WHERE score != 0.0",
-        error.NullableColumnWithoutGuard,
-    );
+    _ = try r.register("SELECT id FROM users WHERE score != 0.0");
 }
 
 test "§10.2 allows IS NULL check on nullable column" {
