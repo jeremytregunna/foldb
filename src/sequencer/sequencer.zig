@@ -556,7 +556,7 @@ fn commitInner(self: *Sequencer, submit: ValidatedSubmit) !SubmitResult {
 /// Broadcast an entry to all partition logs using sequential routing: entry i → partition i.
 /// Used for both schema_change and txn_intent so every FoldExecutor processes every txn.
 fn commitBroadcast(self: *Sequencer, client_id: u64, client_seq_num: u64, submit: ValidatedSubmit) !SubmitResult {
-    const n = self.partition_logs.len;
+    const n: u32 = @intCast(self.partition_logs.len);
     const entries = try self.alloc.alloc(OrderingEntry, n);
     defer self.alloc.free(entries);
     for (0..n) |i| {

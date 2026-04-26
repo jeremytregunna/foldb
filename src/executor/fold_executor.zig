@@ -154,13 +154,14 @@ pub const FoldExecutor = struct {
     /// broadcast batch. This ensures reads at first_seq-1 see a consistent snapshot.
     /// Formula: executor[Q] must have current_seq >= first_seq - N + Q.
     fn waitForSiblings(self: *FoldExecutor, first_seq: Seq) void {
-        const n = self.all_executors.len;
+        const n: u32 = @intCast(self.all_executors.len);
         if (n <= 1 or first_seq < @as(Seq, n)) return; // first batch or single partition
+        const sleep_ns: std.os.linux.timespec = .{ .sec = 0, .nsec = 100 };
         for (self.all_executors, 0..) |fe, q| {
-            if (q == self.partition_id) continue;
+            if (@as(u32, @intCast(q)) == self.partition_id) continue;
             const threshold = first_seq - @as(Seq, n) + @as(Seq, q);
             while (fe.sql_exec.current_seq() < threshold) {
-                std.Thread.yield() catch {};
+                _ = std.os.linux.nanosleep(&sleep_ns, null);
             }
         }
     }

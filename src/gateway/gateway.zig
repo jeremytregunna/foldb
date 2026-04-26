@@ -1,13 +1,11 @@
 /// Foldb Gateway: client-facing entry point for query registration, execution, and CDC.
 const std = @import("std");
-const errors = @import("errors.zig");
 
 const sql_mod = @import("sql.zig");
 const storage_mod = @import("storage.zig");
 const executor_mod = @import("executor.zig");
 const fold_executor_mod = @import("fold_executor.zig");
 const sequencer_mod = @import("sequencer.zig");
-const log_mod = @import("log.zig");
 const observability_mod = @import("observability.zig");
 const cdc_mod = @import("cdc.zig");
 const nondet_mod = @import("nondet.zig");
@@ -409,8 +407,8 @@ pub const Gateway = struct {
     /// The sequencer returns last_seq (highest seq assigned); N entries have seqs
     /// first_seq..last_seq with sequential routing: entry i → partition i.
     fn waitAllFoldExecutors(self: *Gateway, last_seq: Seq) !void {
-        const n = @as(Seq, self.fold_executors.len);
-        const first_seq = last_seq - n + 1;
+        const n: u32 = @intCast(self.fold_executors.len);
+        const first_seq = last_seq - @as(Seq, n) + 1;
         for (self.fold_executors, 0..) |fe, p| {
             try fe.wait_for(first_seq + @as(Seq, p), self.io);
         }
@@ -451,6 +449,7 @@ pub const Gateway = struct {
     /// Submit serialized intent bytes to the sequencer, wait for all FoldExecutors to apply,
     /// and aggregate results. Returns .done on success or .retry with conflict seq.
     fn submitAndDrain(self: *Gateway, intent_bytes: []const u8, op_seq: u64) !SubmitOutcome {
+        // SAFETY: submitBytes writes to pending synchronously before the handle is used.
         var pending: sequencer_mod.PendingSubmit = undefined;
         const handle = self.sequencer.submitBytes(
             &pending, intent_bytes, self.client_id, op_seq, .txn_intent,
@@ -459,8 +458,8 @@ pub const Gateway = struct {
 
         // Txn is broadcast: last_seq = result.seq, first_seq = last_seq - N + 1.
         // Each partition P gets seq first_seq + P.
-        const n = @as(Seq, self.fold_executors.len);
-        const first_seq = result.seq - n + 1;
+        const n: u32 = @intCast(self.fold_executors.len);
+        const first_seq = result.seq - @as(Seq, n) + 1;
 
         var total_rows: u64 = 0;
         var combined_result_set: ?ResultSet = null;
