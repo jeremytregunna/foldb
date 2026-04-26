@@ -216,6 +216,14 @@ fn readLinePlain(alloc: std.mem.Allocator) !?[]u8 {
 
 const SqlKind = enum { ddl, dml, select, unknown };
 
+fn containsWordIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
+}
+
 fn classify(sql: []const u8) SqlKind {
     const s = std.mem.trimStart(u8, sql, " \t\r\n");
     var end: usize = 0;
@@ -228,7 +236,12 @@ fn classify(sql: []const u8) SqlKind {
     if (std.ascii.eqlIgnoreCase(kw, "insert") or
         std.ascii.eqlIgnoreCase(kw, "update") or
         std.ascii.eqlIgnoreCase(kw, "delete") or
-        std.ascii.eqlIgnoreCase(kw, "merge")) return .dml;
+        std.ascii.eqlIgnoreCase(kw, "merge"))
+    {
+        // DML with RETURNING produces a result set — route through the query path
+        if (containsWordIgnoreCase(s, "returning")) return .select;
+        return .dml;
+    }
     if (std.ascii.eqlIgnoreCase(kw, "create") or
         std.ascii.eqlIgnoreCase(kw, "drop") or
         std.ascii.eqlIgnoreCase(kw, "alter")) return .ddl;

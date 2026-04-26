@@ -393,7 +393,12 @@ pub const FoldExecutor = struct {
             if (entries.len == 0) break;
             for (entries) |e| {
                 if (e.header.kind == .txn_intent) {
-                    _ = try self.sql_exec.run(e);
+                    const r = try self.sql_exec.run(e);
+                    // Free any RETURNING result set — nobody reads it during replay
+                    if (r == .ok) if (r.ok.result_set) |rs| {
+                        var mutable = rs;
+                        mutable.deinit();
+                    };
                 } else {
                     self.sql_exec.advanceSeq(e.header.seq);
                 }

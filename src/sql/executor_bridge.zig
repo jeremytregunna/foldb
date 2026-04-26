@@ -953,6 +953,7 @@ pub const SqlExecutor = struct {
             var existing = self.storage.get(ins.table_id, key, ctx.seq -| 1) catch return error.StorageReadError;
             if (existing) |*ex| {
                 ex.deinit(ctx.alloc);
+                self.setDetail("duplicate key value violates uniqueness constraint on table \"{s}\"", .{tbl.name});
                 return error.ConstraintViolation;
             }
         }
