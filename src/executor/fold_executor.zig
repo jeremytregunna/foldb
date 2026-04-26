@@ -29,6 +29,8 @@ pub const FoldExecutor = struct {
     partition_id: u32,
     /// CPU to pin this executor's thread to.
     cpu_id: u32,
+    /// All executors (including self). Set via setSiblings after all are created.
+    all_executors: []*FoldExecutor,
     shutdown: std.atomic.Value(bool),
     thread: ?std.Thread,
     alloc: std.mem.Allocator,
@@ -49,13 +51,21 @@ pub const FoldExecutor = struct {
         fe.log = log;
         fe.partition_id = partition_id;
         fe.cpu_id = cpu_id;
+        fe.all_executors = &.{};
         fe.shutdown = .init(false);
         fe.thread = null;
         fe.schema = sql_mod.SchemaRegistry.init(alloc);
         fe.registry = sql_mod.SqlRegistry.init(alloc, &fe.schema);
         fe.sql_exec = sql_mod.SqlExecutor.init(partitioned, &fe.registry, &fe.schema, alloc);
         fe.sql_exec.initCdc(cdc);
+        fe.sql_exec.filter_partition = partition_id;
         return fe;
+    }
+
+    /// Wire all sibling executors (including self). Must be called after all FoldExecutors
+    /// are created and before start().
+    pub fn setSiblings(self: *FoldExecutor, executors: []*FoldExecutor) void {
+        self.all_executors = executors;
     }
 
     pub fn deinit(self: *FoldExecutor) void {
@@ -124,8 +134,9 @@ pub const FoldExecutor = struct {
                 self.sql_exec.advanceSeq(entry.header.seq);
             },
             .txn_intent => {
-                // Run always advances committed_seq, even on error, to prevent infinite retry.
-                _ = self.sql_exec.run(entry) catch |err| {
+                const first_seq = entry.header.seq -| self.partition_id;
+                self.waitForSiblings(first_seq);
+                _ = self.sql_exec.runWithFirstSeq(entry, first_seq) catch |err| {
                     std.log.warn("FoldExecutor: run seq={d} err={}", .{ entry.header.seq, err });
                     self.sql_exec.advanceSeq(entry.header.seq);
                 };
@@ -136,6 +147,21 @@ pub const FoldExecutor = struct {
                 std.log.warn("FoldExecutor: run seq={d} err={}", .{ entry.header.seq, err });
                 self.sql_exec.advanceSeq(entry.header.seq);
             },
+        }
+    }
+
+    /// Block until all sibling executors have processed their entry from the previous
+    /// broadcast batch. This ensures reads at first_seq-1 see a consistent snapshot.
+    /// Formula: executor[Q] must have current_seq >= first_seq - N + Q.
+    fn waitForSiblings(self: *FoldExecutor, first_seq: Seq) void {
+        const n = self.all_executors.len;
+        if (n <= 1 or first_seq < @as(Seq, n)) return; // first batch or single partition
+        for (self.all_executors, 0..) |fe, q| {
+            if (q == self.partition_id) continue;
+            const threshold = first_seq - @as(Seq, n) + @as(Seq, q);
+            while (fe.sql_exec.current_seq() < threshold) {
+                std.Thread.yield() catch {};
+            }
         }
     }
 
@@ -393,7 +419,10 @@ pub const FoldExecutor = struct {
             if (entries.len == 0) break;
             for (entries) |e| {
                 if (e.header.kind == .txn_intent) {
-                    const r = try self.sql_exec.run(e);
+                    // Use runWithFirstSeq so partition filtering is applied correctly.
+                    // No sibling wait during replay — executors replay sequentially.
+                    const first_seq = e.header.seq -| self.partition_id;
+                    const r = try self.sql_exec.runWithFirstSeq(e, first_seq);
                     // Free any RETURNING result set — nobody reads it during replay
                     if (r == .ok) if (r.ok.result_set) |rs| {
                         var mutable = rs;

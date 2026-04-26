@@ -143,7 +143,7 @@ pub const PartitionedStorage = struct {
     partitions: []*Storage,
     alloc: std.mem.Allocator,
 
-    fn partitionIdx(self: *const PartitionedStorage, key: []const u8) usize {
+    pub fn partitionIdx(self: *const PartitionedStorage, key: []const u8) usize {
         if (self.partitions.len <= 1) return 0;
         return std.hash.Wyhash.hash(0, key) % self.partitions.len;
     }

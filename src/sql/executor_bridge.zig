@@ -118,6 +118,9 @@ pub const SqlExecutor = struct {
     alloc: std.mem.Allocator,
     /// Optional CDC manager. When set, mutations are captured and fanned out to subscribers.
     cdc: ?*cdc_mod.CdcManager = null,
+    /// When non-null, only mutations whose key hashes to this partition are applied.
+    /// Set by FoldExecutor at init time; null means apply all (single-partition or direct).
+    filter_partition: ?u32 = null,
     error_detail: [256]u8 = undefined,
     error_detail_len: usize = 0,
 
@@ -206,6 +209,33 @@ pub const SqlExecutor = struct {
     /// validation here; only business invariants (missing_query, constraint_violation).
     /// committed_seq is updated by the caller (run) after this returns.
     pub fn run_validated(self: *SqlExecutor, validated: executor_mod.ValidatedTxnEntry) !ExecResult {
+        return self.run_validated_inner(validated, validated.seq);
+    }
+
+    /// Like run, but uses first_seq as the read snapshot (reads at first_seq-1) while
+    /// writing mutations at entry.seq. Called by FoldExecutor for multi-partition txns.
+    pub fn runWithFirstSeq(self: *SqlExecutor, entry: LogEntry, first_seq: Seq) !ExecResult {
+        if (entry.header.kind != .txn_intent) {
+            self.advanceSeq(entry.header.seq);
+            return .{ .ok = .{ .rows_affected = 0 } };
+        }
+        var validated = executor_mod.validate_txn_entry(entry, self.alloc) catch |e| {
+            const r: ExecResult = switch (e) {
+                error.CrcMismatch => .{ .abort = .{ .code = .bad_params, .detail = "crc mismatch" } },
+                else => .{ .abort = .{ .code = .bad_params, .detail = "invalid payload" } },
+            };
+            self.results[entry.header.seq % result_ring_size] = .{ .seq = entry.header.seq, .result = r };
+            self.committed_seq.store(entry.header.seq, .release);
+            return r;
+        };
+        defer validated.decoded.deinit();
+        const result = try self.run_validated_inner(validated, first_seq);
+        self.results[validated.seq % result_ring_size] = .{ .seq = validated.seq, .result = result };
+        self.committed_seq.store(validated.seq, .release);
+        return result;
+    }
+
+    fn run_validated_inner(self: *SqlExecutor, validated: executor_mod.ValidatedTxnEntry, read_seq: Seq) !ExecResult {
         const decoded = validated.decoded;
 
         const rq = self.registry.lookup(decoded.query_hash.*) orelse {
@@ -245,6 +275,7 @@ pub const SqlExecutor = struct {
             rq.plan,
             params,
             decoded.nondet,
+            read_seq,
             validated.seq,
             validated.epoch,
             .txn_intent,
@@ -304,7 +335,7 @@ pub const SqlExecutor = struct {
         nondet: []const ResolvedValue,
         seq: Seq,
     ) SqlExecError!u64 {
-        return self.executePlan(plan, params, nondet, seq, 0, .txn_intent, null);
+        return self.executePlan(plan, params, nondet, seq, seq, 0, .txn_intent, null);
     }
 
     fn executePlan(
@@ -312,7 +343,8 @@ pub const SqlExecutor = struct {
         plan: plan_mod.ExecutionPlan,
         params: []const ColumnValue,
         nondet: []const ResolvedValue,
-        seq: Seq,
+        read_seq: Seq,   // ctx.seq — reads use ctx.seq -| 1 (MVCC snapshot before txn)
+        write_seq: Seq,  // for storage.apply and CDC versioning
         epoch: log_mod.Epoch,
         entry_kind: log_mod.EntryKind,
         returning_rows: ?*std.ArrayList([]const ?ColumnValue),
@@ -334,7 +366,7 @@ pub const SqlExecutor = struct {
             .executor_ctx = self,
             .params = params,
             .nondet = nondet,
-            .seq = seq,
+            .seq = read_seq,
             .row = null,
             .schema = self.schema,
             .alloc = self.alloc,
@@ -344,11 +376,28 @@ pub const SqlExecutor = struct {
             try self.executeStmt(stmt, ctx, &mutations, returning_rows);
         }
 
+        // Filter mutations to own partition in multi-partition mode.
+        if (self.filter_partition) |fp| {
+            var i: usize = 0;
+            while (i < mutations.items.len) {
+                if (self.storage.partitionIdx(mutations.items[i].key) != fp) {
+                    const m = mutations.orderedRemove(i);
+                    self.alloc.free(m.key);
+                    if (m.values) |vs| {
+                        for (vs) |v| v.freeIfOwned(self.alloc);
+                        self.alloc.free(vs);
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
         // Capture before-images for CDC (before storage.apply).
         var before: ?cdc_mod.BeforeImages = null;
         if (self.cdc) |cdc| {
             if (mutations.items.len > 0) {
-                before = cdc.capture_before_images(mutations.items, self.storage, seq, self.alloc) catch |e| blk: {
+                before = cdc.capture_before_images(mutations.items, self.storage, write_seq, self.alloc) catch |e| blk: {
                     // Before-image capture failed; record the error but continue — the
                     // transaction must still commit. CDC dispatch is skipped below to avoid
                     // emitting an incomplete change event.
@@ -360,13 +409,13 @@ pub const SqlExecutor = struct {
         defer if (before) |*b| b.deinit();
 
         const count: u64 = @intCast(mutations.items.len);
-        self.storage.apply(mutations.items, seq) catch return error.TableNotFound;
+        self.storage.apply(mutations.items, write_seq) catch return error.TableNotFound;
 
         // Dispatch CDC events (after storage.apply). Only dispatch when before-images
         // were captured successfully — a null before means capture failed above.
         if (self.cdc) |cdc| {
             if (before) |b| {
-                cdc.dispatch(seq, epoch, entry_kind, mutations.items, b, self.alloc) catch |e| {
+                cdc.dispatch(write_seq, epoch, entry_kind, mutations.items, b, self.alloc) catch |e| {
                     self.setDetail("cdc dispatch failed: {}", .{e});
                 };
             }
@@ -948,13 +997,19 @@ pub const SqlExecutor = struct {
 
         // No conflict (or no on_conflict clause) — regular insert.
         // For plain INSERT (no ON CONFLICT), enforce primary-key uniqueness.
+        // Only check for keys that belong to our partition (with filter_partition set,
+        // other-partition keys will be filtered out anyway and must not cause spurious errors).
         // Cleanup of key+values on error is handled by the errdefers in executeInsert.
         if (ins.on_conflict == null) {
-            var existing = self.storage.get(ins.table_id, key, ctx.seq -| 1) catch return error.StorageReadError;
-            if (existing) |*ex| {
-                ex.deinit(ctx.alloc);
-                self.setDetail("duplicate key value violates uniqueness constraint on table \"{s}\"", .{tbl.name});
-                return error.ConstraintViolation;
+            const own_key = self.filter_partition == null or
+                self.storage.partitionIdx(key) == self.filter_partition.?;
+            if (own_key) {
+                var existing = self.storage.get(ins.table_id, key, ctx.seq -| 1) catch return error.StorageReadError;
+                if (existing) |*ex| {
+                    ex.deinit(ctx.alloc);
+                    self.setDetail("duplicate key value violates uniqueness constraint on table \"{s}\"", .{tbl.name});
+                    return error.ConstraintViolation;
+                }
             }
         }
         try mutations.append(ctx.alloc, .{

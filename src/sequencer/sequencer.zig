@@ -548,77 +548,14 @@ fn commitInner(self: *Sequencer, submit: ValidatedSubmit) !SubmitResult {
         return .{ .seq = existing_seq, .partition = partition };
     }
 
-    // Schema changes broadcast to all partition logs so every FoldExecutor
-    // maintains an independent consistent schema copy.
-    if (submit.entry_kind == .schema_change) {
-        return commitSchemaChange(self, client_id, client_seq_num, submit);
-    }
-
-    // txn_intent: existing batcher path
-    try self.batcher.submit(client_id, client_seq_num);
-
-    var decision = try self.batcher.closeEpoch(
-        self.next_epoch,
-        self.next_seq,
-        @intCast(self.partition_logs.len),
-        self.alloc,
-    );
-    defer self.alloc.free(decision.entries);
-    // Attach the payload so all nodes can write to their partition logs from the
-    // committed Raft entry — no separate data replication channel needed.
-    decision.entry_kind = submit.entry_kind;
-    decision.payload = submit.intent_payload;
-
-    var payload_buf: std.ArrayList(u8) = .empty;
-    defer payload_buf.deinit(self.alloc);
-    try types_mod.serializeEpochDecision(decision, &payload_buf, self.alloc);
-
-    var outputs: std.ArrayList(raft_mod.Output) = .empty;
-    defer outputs.deinit(self.alloc);
-
-    const ordering_seq = try self.raft.propose(
-        &self.raft_log,
-        .epoch_decision,
-        payload_buf.items,
-        &outputs,
-    ) orelse {
-        self.metrics.not_leader_errors.inc();
-        return SequencerError.NotLeader;
-    };
-
-    // Advance counters only after a successful Raft proposal. Advancing before the
-    // propose call corrupts next_seq if leadership steps down between closeEpoch and
-    // propose, causing permanent seq gaps that break the partition log invariant.
-    self.next_epoch += 1;
-    self.next_seq += @intCast(decision.entries.len);
-    self.metrics.epochs_closed.inc();
-    self.metrics.last_epoch_size.set(@intCast(decision.entries.len));
-
-    try self.flushOutputs(outputs.items, self.alloc);
-
-    // Wait for Raft commit. For single-node, commit_index already advanced (quorum=1)
-    // so this loop body never executes. For multi-node, tickOnce drives the round-trips.
-    // The .committed output handler in flushOutputs writes to all nodes' partition logs,
-    // so by the time we exit this loop the entry is already in the partition log.
-    const wait_ts: std.os.linux.timespec = .{ .sec = 0, .nsec = COMMIT_WAIT_SLEEP_NS };
-    var wait_ticks: u32 = 0;
-    while (self.raft.commit_index < ordering_seq) {
-        assert(wait_ticks < COMMIT_WAIT_MAX_TICKS);
-        wait_ticks += 1;
-        try self.tickOnce(self.alloc);
-        _ = std.os.linux.nanosleep(&wait_ts, null);
-    }
-
-    const entry = decision.entries[0];
-    try self.idempotency.record(client_id, client_seq_num, entry.seq);
-    self.metrics.current_seq.set(@intCast(entry.seq));
-
-    return .{ .seq = entry.seq, .partition = entry.partition };
+    // All txn_intent and schema_change entries broadcast to all partition logs using
+    // sequential routing so every FoldExecutor maintains a consistent view.
+    return commitBroadcast(self, client_id, client_seq_num, submit);
 }
 
-/// Broadcast a schema_change entry to all partition logs so every FoldExecutor
-/// maintains an independent consistent schema copy.
-fn commitSchemaChange(self: *Sequencer, client_id: u64, client_seq_num: u64, submit: ValidatedSubmit) !SubmitResult {
+/// Broadcast an entry to all partition logs using sequential routing: entry i → partition i.
+/// Used for both schema_change and txn_intent so every FoldExecutor processes every txn.
+fn commitBroadcast(self: *Sequencer, client_id: u64, client_seq_num: u64, submit: ValidatedSubmit) !SubmitResult {
     const n = self.partition_logs.len;
     const entries = try self.alloc.alloc(OrderingEntry, n);
     defer self.alloc.free(entries);
@@ -626,7 +563,7 @@ fn commitSchemaChange(self: *Sequencer, client_id: u64, client_seq_num: u64, sub
         const seq = self.next_seq + @as(Seq, i);
         entries[i] = .{
             .seq = seq,
-            .partition = @intCast(seq % @as(Seq, n)),
+            .partition = @intCast(i),
             .client_id = client_id,
             .client_seq = client_seq_num,
         };

@@ -129,7 +129,7 @@ test "Sequencer: idempotent submit returns same seq" {
     try testing.expectEqual(@as(u64, 1), seq.currentSeq());
 }
 
-test "Sequencer: multi-partition routing distributes round-robin" {
+test "Sequencer: multi-partition broadcast creates N entries per txn" {
     const path = try makeTempDir("multipart");
     defer {
         removeDirRecursive(path);
@@ -155,11 +155,17 @@ test "Sequencer: multi-partition routing distributes round-robin" {
     var p4: PendingSubmit = undefined;
     const r4 = try seq.submitBytes(&p4, payload, 1, 4, .txn_intent).awaitCommit(null);
 
-    // seq 1 → 1%2=1, seq 2 → 2%2=0, seq 3 → 3%2=1, seq 4 → 4%2=0
+    // Each txn broadcasts N=2 entries. last_seq = first_seq + N - 1.
+    // last_entry.partition = N-1 = 1 (sequential routing).
+    // Seqs: txn1→[1,2], txn2→[3,4], txn3→[5,6], txn4→[7,8].
+    try testing.expectEqual(@as(u64, 2), r1.seq);
     try testing.expectEqual(@as(u32, 1), r1.partition);
-    try testing.expectEqual(@as(u32, 0), r2.partition);
+    try testing.expectEqual(@as(u64, 4), r2.seq);
+    try testing.expectEqual(@as(u32, 1), r2.partition);
+    try testing.expectEqual(@as(u64, 6), r3.seq);
     try testing.expectEqual(@as(u32, 1), r3.partition);
-    try testing.expectEqual(@as(u32, 0), r4.partition);
+    try testing.expectEqual(@as(u64, 8), r4.seq);
+    try testing.expectEqual(@as(u32, 1), r4.partition);
 }
 
 test "Sequencer: committed entry readable from partition log" {

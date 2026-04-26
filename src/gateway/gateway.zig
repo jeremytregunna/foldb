@@ -254,6 +254,9 @@ pub const Gateway = struct {
         }
         gw.fold_executors = fold_executors;
 
+        // Wire sibling references so each FoldExecutor can do the cross-partition wait.
+        for (fold_executors) |fe| fe.setSiblings(fold_executors);
+
         // Wire snapshot scheduling if an object store is available and interval is set.
         const snap_obj: ?storage_mod.ObjectStore = blk: {
             if (opts.snapshot_store) |s| break :blk s;
@@ -402,16 +405,14 @@ pub const Gateway = struct {
         };
     }
 
-    /// Wait for all FoldExecutors to process their respective schema_change entries.
+    /// Wait for all FoldExecutors to process their entries from a broadcast batch.
     /// The sequencer returns last_seq (highest seq assigned); N entries have seqs
-    /// last_seq-(N-1)..last_seq, routed round-robin. For partition P its seq is
-    /// first_seq + ((P + N - first_seq % N) % N).
+    /// first_seq..last_seq with sequential routing: entry i → partition i.
     fn waitAllFoldExecutors(self: *Gateway, last_seq: Seq) !void {
         const n = @as(Seq, self.fold_executors.len);
         const first_seq = last_seq - n + 1;
         for (self.fold_executors, 0..) |fe, p| {
-            const offset = (@as(u64, p) + n - first_seq % n) % n;
-            try fe.wait_for(first_seq + offset, self.io);
+            try fe.wait_for(first_seq + @as(Seq, p), self.io);
         }
     }
 
@@ -447,8 +448,8 @@ pub const Gateway = struct {
         );
     }
 
-    /// Submit serialized intent bytes to the sequencer, wait for FoldExecutor to apply,
-    /// and dispatch the executor result. Returns .done on success or .retry with conflict seq.
+    /// Submit serialized intent bytes to the sequencer, wait for all FoldExecutors to apply,
+    /// and aggregate results. Returns .done on success or .retry with conflict seq.
     fn submitAndDrain(self: *Gateway, intent_bytes: []const u8, op_seq: u64) !SubmitOutcome {
         var pending: sequencer_mod.PendingSubmit = undefined;
         const handle = self.sequencer.submitBytes(
@@ -456,33 +457,58 @@ pub const Gateway = struct {
         );
         const result = try handle.awaitCommit(self.io);
 
-        // Wait for the FoldExecutor for this partition to process up to result.seq; suspends the fiber.
-        try self.fold_executors[result.partition].wait_for(result.seq, self.io);
-        const exec_result = self.fold_executors[result.partition].waitFor(result.seq);
-        const exec_detail = self.fold_executors[result.partition].lastExecDetail();
-        if (exec_detail.len > 0) self.setDetail("{s}", .{exec_detail});
+        // Txn is broadcast: last_seq = result.seq, first_seq = last_seq - N + 1.
+        // Each partition P gets seq first_seq + P.
+        const n = @as(Seq, self.fold_executors.len);
+        const first_seq = result.seq - n + 1;
 
-        switch (exec_result) {
-            .ok => |ok| return .{ .done = .{
-                .rows_affected = ok.rows_affected,
-                .result_set = ok.result_set,
-            } },
-            .abort => |ab| switch (ab.code) {
-                .constraint_violation => {
-                    self.metrics.queries_aborted.inc();
-                    return error.ConstraintViolation;
+        var total_rows: u64 = 0;
+        var combined_result_set: ?ResultSet = null;
+
+        for (self.fold_executors, 0..) |fe, p| {
+            const target_seq = first_seq + @as(Seq, p);
+            try fe.wait_for(target_seq, self.io);
+            const exec_result = fe.waitFor(target_seq);
+            const exec_detail = fe.lastExecDetail();
+            if (exec_detail.len > 0) self.setDetail("{s}", .{exec_detail});
+
+            switch (exec_result) {
+                .ok => |ok| {
+                    total_rows += ok.rows_affected;
+                    if (ok.result_set) |rs| {
+                        if (combined_result_set == null) {
+                            combined_result_set = rs;
+                        } else {
+                            var mutable = rs;
+                            mutable.deinit();
+                        }
+                    }
                 },
-                .missing_query => {
-                    self.metrics.queries_aborted.inc();
-                    return error.QueryNotFound;
+                .abort => |ab| {
+                    if (combined_result_set) |*rs| rs.deinit();
+                    switch (ab.code) {
+                        .constraint_violation => {
+                            self.metrics.queries_aborted.inc();
+                            return error.ConstraintViolation;
+                        },
+                        .missing_query => {
+                            self.metrics.queries_aborted.inc();
+                            return error.QueryNotFound;
+                        },
+                        .retry => return .{ .retry = result.seq },
+                        else => {
+                            self.metrics.queries_aborted.inc();
+                            return error.ExecutionError;
+                        },
+                    }
                 },
-                .retry => return .{ .retry = result.seq },
-                else => {
-                    self.metrics.queries_aborted.inc();
-                    return error.ExecutionError;
-                },
-            },
+            }
         }
+
+        return .{ .done = .{
+            .rows_affected = total_rows,
+            .result_set = combined_result_set,
+        } };
     }
 
     /// Execute a registered DML query (INSERT/UPDATE/DELETE) with the given parameters.
