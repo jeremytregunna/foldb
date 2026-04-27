@@ -14,6 +14,8 @@ const json_index_mod = @import("json_index.zig");
 const hnsw_mod = @import("hnsw.zig");
 pub const vector_codec = @import("vector_codec.zig");
 pub const json_path = @import("json_path.zig");
+const partition_util = @import("partition_util.zig");
+pub const partitionFor = partition_util.partitionFor;
 
 pub const SnapshotLogWriter = snapshot_mod.SnapshotLogWriter;
 pub const noop_snapshot_log_writer = snapshot_mod.noop_snapshot_log_writer;

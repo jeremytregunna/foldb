@@ -6,6 +6,7 @@ const storage_mod = @import("storage.zig");
 const log_mod = @import("log.zig");
 const executor_mod = @import("executor.zig");
 const fold_executor_mod = @import("fold_executor.zig");
+const exchange_bus_mod = @import("exchange_bus.zig");
 const sequencer_mod = @import("sequencer.zig");
 const observability_mod = @import("observability.zig");
 const cdc_mod = @import("cdc.zig");
@@ -81,8 +82,10 @@ pub const Gateway = struct {
     log_mux: log_mod.LogMux,
     /// One Storage per data partition. Heap-allocated; owned by this gateway.
     storages: []*storage_mod.Storage,
-    /// Routing wrapper over storages — used by fold_executor and reconnaissance.
+    /// Routing wrapper over storages — used for reconnaissance only (not by FoldExecutors).
     partitioned: storage_mod.PartitionedStorage,
+    /// Peer-to-peer SPSC exchange bus between partition executors.
+    exchange_bus: exchange_bus_mod.ExchangeBus,
     nondet_resolver: nondet_mod.NondetResolver,
     sequencer: sequencer_mod.Sequencer,
     /// CDC event fan-out for wire-protocol subscriptions.
@@ -195,6 +198,8 @@ pub const Gateway = struct {
         }
         gw.storages = storages;
         gw.partitioned = .{ .partitions = storages, .alloc = alloc };
+        gw.exchange_bus = try exchange_bus_mod.ExchangeBus.init(pc, alloc);
+        errdefer gw.exchange_bus.deinit();
         gw.s3_store = null;
         gw.snapshot_writer_ctxs = &.{};
         gw.truncate_ctxs = &.{};
@@ -275,12 +280,13 @@ pub const Gateway = struct {
         for (0..pc) |i| {
             const cpu_id: u32 = @intCast(i % cpu_count);
             fold_executors[i] = try fold_executor_mod.FoldExecutor.init(
+                storages[i],
                 &gw.partitioned,
                 &gw.cdc,
                 &gw.log_mux,
                 @intCast(i),
                 @intCast(pc),
-                null, // bus: null until Step 6 wires ExchangeBus
+                null, // exchange bus deferred — protocol needs validation before activation
                 cpu_id,
                 alloc,
             );
@@ -372,6 +378,7 @@ pub const Gateway = struct {
         self.alloc.free(self.storages);
         for (self.fold_executors) |fe| fe.deinit();
         self.alloc.free(self.fold_executors);
+        self.exchange_bus.deinit();
         self.log_mux.deinit();
         self.cdc.deinit();
         self.sequencer.deinit();

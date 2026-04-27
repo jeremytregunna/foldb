@@ -29,7 +29,9 @@ pub const FoldExecutor = struct {
     sql_exec: sql_mod.SqlExecutor,
     /// Arena for storage-layer column slice allocations during DDL. Owned.
     storage_schema_arena: std.heap.ArenaAllocator,
-    /// Routing layer over storage partitions. Borrowed from Gateway.
+    /// This partition's own Storage — used for DDL registration and exchange fetch. Borrowed.
+    storage: *storage_mod.Storage,
+    /// All-partitions routing view — passed to SqlExecutor for reads. Borrowed from Gateway.
     partitioned: *storage_mod.PartitionedStorage,
     /// Merged log stream across all log partitions. Borrowed from Gateway.
     log_mux: *log_mod.LogMux,
@@ -46,6 +48,7 @@ pub const FoldExecutor = struct {
     alloc: std.mem.Allocator,
 
     pub fn init(
+        storage: *storage_mod.Storage,
         partitioned: *storage_mod.PartitionedStorage,
         cdc: *cdc_mod.CdcManager,
         log_mux: *log_mod.LogMux,
@@ -59,6 +62,7 @@ pub const FoldExecutor = struct {
         errdefer alloc.destroy(fe);
         fe.alloc = alloc;
         fe.storage_schema_arena = std.heap.ArenaAllocator.init(alloc);
+        fe.storage = storage;
         fe.partitioned = partitioned;
         fe.log_mux = log_mux;
         fe.partition_id = partition_id;
@@ -311,7 +315,7 @@ pub const FoldExecutor = struct {
         for (req.reads) |fr| {
             if (fr.key.len == 0) {
                 // Sentinel: full scan of this table from own partition.
-                var iter = self.partitioned.scan(fr.table_id, storage_mod.KeyRange.all(), read_seq, alloc) catch continue;
+                var iter = self.storage.scan(fr.table_id, storage_mod.KeyRange.all(), read_seq, alloc) catch continue;
                 defer iter.deinit();
                 while (iter.next() catch break) |row| {
                     const key_copy = alloc.dupe(u8, row.key) catch continue;
@@ -328,7 +332,7 @@ pub const FoldExecutor = struct {
                 }
             } else {
                 // Point lookup.
-                const row_opt = self.partitioned.get(fr.table_id, fr.key, read_seq) catch null;
+                const row_opt = self.storage.get(fr.table_id, fr.key, read_seq) catch null;
                 var cloned_row: ?storage_mod.Row = null;
                 if (row_opt) |row| {
                     var r = row;
@@ -425,19 +429,16 @@ pub const FoldExecutor = struct {
 
         try self.registry.applyDdl(stmt);
 
-        // Storage is shared across all executors; only partition 0 registers/unregisters
-        // tables and indexes to avoid concurrent DDL on the same HashMap from sibling threads.
-        if (self.partition_id != 0) return;
-
+        // Each executor owns its own Storage and registers tables/indexes independently.
         switch (stmt) {
             .create_table => |ct| {
                 const tbl = self.schema.getTable(ct.name) orelse return error.TableNotFound;
-                try self.partitioned.registerTable(
+                try self.storage.registerTable(
                     try sqlTableToStorage(tbl, self.storage_schema_arena.allocator()),
                 );
             },
             .drop_table => {
-                if (drop_table_id) |id| self.partitioned.unregisterTable(id);
+                if (drop_table_id) |id| self.storage.unregisterTable(id);
             },
             .create_index => |ci| {
                 const tbl = self.schema.getTable(ci.table) orelse return error.TableNotFound;
@@ -455,7 +456,7 @@ pub const FoldExecutor = struct {
                     else => return,
                 };
                 const column_idx: u32 = if (idx.columns.len > 0) idx.columns[0] else 0;
-                try self.partitioned.registerIndex(.{
+                try self.storage.registerIndex(.{
                     .id = idx.id,
                     .table_id = tbl.id,
                     .column_idx = column_idx,

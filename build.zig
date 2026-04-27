@@ -780,6 +780,7 @@ pub fn build(b: *std.Build) void {
     gateway_module.addImport("cdc.zig", cdc_module);
     gateway_module.addImport("errors.zig", errors_module);
     gateway_module.addImport("config.zig", config_module);
+    gateway_module.addImport("exchange_bus.zig", exchange_bus_module);
 
     // SQL multi-partition tests — exercises filter_partition with partition_count=2
     const sql_partition_test_module = b.createModule(.{
