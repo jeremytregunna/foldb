@@ -664,3 +664,80 @@ test "PostSnapshotHook: called after snapshot threshold reached" {
     try testing.expect(state.called);
     try testing.expectEqual(@as(storage_mod.Seq, 2), state.last_seq);
 }
+
+test "Gateway: CREATE DATABASE and getDatabaseId" {
+    const temp_path = try makeTempDir();
+    defer {
+        removeDirRecursive(temp_path);
+        testing.allocator.free(temp_path);
+    }
+
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
+    defer gateway.deinit();
+
+    // Default database always exists.
+    try testing.expect(gateway.getDatabaseId("default") != null);
+    try testing.expect(gateway.getDatabaseId("testdb") == null);
+
+    // Create a new database.
+    try gateway.applyDdl("CREATE DATABASE testdb");
+
+    const testdb_id = gateway.getDatabaseId("testdb") orelse return error.TestUnexpectedResult;
+    try testing.expect(testdb_id != gateway_mod.default_database_id);
+}
+
+test "Gateway: db-scoped query hashes are distinct across databases" {
+    const temp_path = try makeTempDir();
+    defer {
+        removeDirRecursive(temp_path);
+        testing.allocator.free(temp_path);
+    }
+
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
+    defer gateway.deinit();
+
+    // Create the same table in both databases.
+    try gateway.applyDdl("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
+    try gateway.applyDdl("CREATE DATABASE testdb");
+    const testdb_id = gateway.getDatabaseId("testdb") orelse return error.TestUnexpectedResult;
+    try gateway.applyDdlForDb("CREATE TABLE items (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))", testdb_id);
+
+    const sql = "SELECT id, val FROM items WHERE id = $1";
+    const default_result = try gateway.register(sql);
+    const testdb_result = try gateway.registerForDb(sql, testdb_id);
+
+    // Same SQL, different databases → different hashes.
+    try testing.expect(!std.mem.eql(u8, &default_result.hash, &testdb_result.hash));
+}
+
+test "Gateway: DDL and DML scoped to non-default database" {
+    const temp_path = try makeTempDir();
+    defer {
+        removeDirRecursive(temp_path);
+        testing.allocator.free(temp_path);
+    }
+
+    const gateway = try Gateway.init(temp_path, testing.allocator, .{});
+    defer gateway.deinit();
+
+    try gateway.applyDdl("CREATE DATABASE appdb");
+    const appdb_id = gateway.getDatabaseId("appdb") orelse return error.TestUnexpectedResult;
+
+    // Create table in appdb, not in default.
+    try gateway.applyDdlForDb(
+        "CREATE TABLE products (id INT64 NOT NULL, price INT64 NOT NULL, PRIMARY KEY (id))",
+        appdb_id,
+    );
+
+    // Table should not exist in default db.
+    try testing.expectError(
+        error.TableNotFound,
+        gateway.register("SELECT id, price FROM products WHERE id = $1"),
+    );
+
+    // Table should exist in appdb.
+    const insert_sql = "INSERT INTO products (id, price) VALUES ($1, $2)";
+    const reg = try gateway.registerForDb(insert_sql, appdb_id);
+    const result = try gateway.execute(reg.hash, &.{ .{ .int64 = 1 }, .{ .int64 = 999 } }, &.{});
+    try testing.expectEqual(@as(u64, 1), result.rows_affected);
+}

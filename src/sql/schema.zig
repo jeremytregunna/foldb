@@ -597,6 +597,15 @@ pub const ClusterSchema = struct {
         }
     }
 
+    /// Look up a table by id across all databases. Returns the first match found.
+    pub fn getTableById(self: *const ClusterSchema, id: TableId) ?*const TableSchema {
+        var it = self.databases.valueIterator();
+        while (it.next()) |sr| {
+            if (sr.*.getTableById(id)) |tbl| return tbl;
+        }
+        return null;
+    }
+
     /// Allocate a globally unique TableId and create the table in the given database.
     pub fn createTableInDb(self: *ClusterSchema, db_id: DatabaseId, stmt: ast.CreateTableStmt) !*const TableSchema {
         const sr = self.databases.getPtr(db_id) orelse return error.DatabaseNotFound;

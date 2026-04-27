@@ -83,6 +83,7 @@ pub const FoldExecutor = struct {
         const default_schema = fe.cluster.getDb(sql_mod.default_database_id).?;
         fe.registry = sql_mod.SqlRegistry.init(alloc, default_schema);
         fe.sql_exec = sql_mod.SqlExecutor.init(storage, &fe.registry, default_schema, alloc);
+        fe.sql_exec.cluster = &fe.cluster;
         fe.sql_exec.initCdc(cdc);
         fe.sql_exec.filter_partition = partition_id;
         fe.sql_exec.part_count = part_count;
@@ -159,8 +160,11 @@ pub const FoldExecutor = struct {
                     switch (decoded.kind) {
                         .ddl => self.replayDdl(decoded.db_id, decoded.sql) catch |err|
                             std.log.warn("FoldExecutor: DDL replay err={}", .{err}),
-                        .query => _ = self.registry.registerForDb(decoded.sql, decoded.db_id) catch |err|
-                            std.log.warn("registry registerForDb: {}", .{err}),
+                        .query => {
+                            const schema = self.cluster.getDb(decoded.db_id) orelse self.defaultDb();
+                            _ = self.registry.registerForDb(decoded.sql, decoded.db_id, schema) catch |err|
+                                std.log.warn("registry registerForDb: {}", .{err});
+                        },
                         .cluster => self.replayClusterDdl(decoded.sql) catch |err|
                             std.log.warn("FoldExecutor: cluster DDL replay err={}", .{err}),
                     }
@@ -573,7 +577,7 @@ pub const FoldExecutor = struct {
             break :blk tbl.id;
         } else null;
 
-        try self.registry.applyDdlToSchema(stmt, db_schema);
+        try self.registry.applyDdlForDbSchema(stmt, db_id, db_schema);
 
         // Each executor owns its own Storage and registers tables/indexes independently.
         switch (stmt) {
@@ -624,7 +628,8 @@ pub const FoldExecutor = struct {
 
     /// Like validateQuery but scoped to a specific database.
     pub fn validateQueryForDb(self: *FoldExecutor, sql: []const u8, db_id: sql_mod.DatabaseId) !sql_mod.QueryHash {
-        return self.registry.validateQueryForDb(sql, db_id);
+        const schema = self.cluster.getDb(db_id) orelse self.defaultDb();
+        return self.registry.validateQueryForDb(sql, db_id, schema);
     }
 
     /// Compute the canonical hash of a SQL string without registering it.
@@ -794,8 +799,11 @@ pub const FoldExecutor = struct {
                         switch (decoded.kind) {
                             .ddl => self.replayDdl(decoded.db_id, decoded.sql) catch |err|
                                 std.log.warn("FoldExecutor: DDL replay err={}", .{err}),
-                            .query => _ = self.registry.registerForDb(decoded.sql, decoded.db_id) catch |err|
-                                std.log.warn("FoldExecutor: query replay err={}", .{err}),
+                            .query => {
+                                const schema = self.cluster.getDb(decoded.db_id) orelse self.defaultDb();
+                                _ = self.registry.registerForDb(decoded.sql, decoded.db_id, schema) catch |err|
+                                    std.log.warn("FoldExecutor: query replay err={}", .{err});
+                            },
                             .cluster => self.replayClusterDdl(decoded.sql) catch |err|
                                 std.log.warn("FoldExecutor: cluster DDL replay err={}", .{err}),
                         }

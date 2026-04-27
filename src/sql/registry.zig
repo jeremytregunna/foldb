@@ -28,6 +28,8 @@ pub const RegisteredQuery = struct {
     plan: plan_mod.ExecutionPlan,
     param_types: []const ast.SqlType,
     nondet_count: u32,
+    /// Database this query belongs to. Used to scope DDL re-validation.
+    db_id: u32,
     /// Schema version at registration time (for invalidation on DDL changes).
     schema_seq: u64,
     /// Output column names for SELECT queries, pre-computed at registration time using
@@ -68,9 +70,8 @@ pub const SqlRegistry = struct {
     }
 
     /// Validate a SQL string and return its db-scoped QueryHash without registering it.
-    /// Does the same parse → canonicalize → type-check → plan pipeline as registerForDb(),
-    /// but discards all results. Safe to call from any thread; does not mutate state.
-    pub fn validateQueryForDb(self: *SqlRegistry, sql: []const u8, db_id: u32) RegistryError!QueryHash {
+    /// target_schema is the SchemaRegistry for db_id — callers resolve this via ClusterSchema.
+    pub fn validateQueryForDb(self: *SqlRegistry, sql: []const u8, db_id: u32, target_schema: *schema_mod.SchemaRegistry) RegistryError!QueryHash {
         var arena = std.heap.ArenaAllocator.init(self.alloc);
         defer arena.deinit();
         const arena_alloc = arena.allocator();
@@ -83,12 +84,12 @@ pub const SqlRegistry = struct {
 
         const param_types = try extractParamTypes(parsed, arena_alloc);
 
-        var checker = tc_mod.TypeChecker.init(arena_alloc, self.schema);
+        var checker = tc_mod.TypeChecker.init(arena_alloc, target_schema);
         for (parsed.stmts) |stmt| {
             try checker.checkStmt(stmt, param_types, true);
         }
 
-        var planner = plan_mod.Planner.init(arena_alloc, self.schema);
+        var planner = plan_mod.Planner.init(arena_alloc, target_schema);
         if (parsed.stmts.len == 1 and parsed.stmts[0] == .transaction) {
             _ = try planner.planTransaction(parsed.stmts[0].transaction);
         } else {
@@ -102,7 +103,7 @@ pub const SqlRegistry = struct {
 
     /// Validate a SQL string using the default database scope.
     pub fn validateQuery(self: *SqlRegistry, sql: []const u8) RegistryError!QueryHash {
-        return self.validateQueryForDb(sql, schema_mod.default_database_id);
+        return self.validateQueryForDb(sql, schema_mod.default_database_id, self.schema);
     }
 
     /// Register a SQL string, returning its QueryHash.
@@ -113,7 +114,8 @@ pub const SqlRegistry = struct {
     // All data past this point is validated; the resulting ExecutionPlan is a pure domain type.
     /// Register a SQL string scoped to a database. The hash incorporates the
     /// database_id so the same SQL in two databases gets different hashes.
-    pub fn registerForDb(self: *SqlRegistry, sql: []const u8, db_id: u32) RegistryError!QueryHash {
+    /// target_schema is the SchemaRegistry for db_id — callers resolve this via ClusterSchema.
+    pub fn registerForDb(self: *SqlRegistry, sql: []const u8, db_id: u32, target_schema: *schema_mod.SchemaRegistry) RegistryError!QueryHash {
         var arena = std.heap.ArenaAllocator.init(self.alloc);
         const arena_alloc = arena.allocator();
 
@@ -125,12 +127,12 @@ pub const SqlRegistry = struct {
 
         const param_types = extractParamTypes(parsed, arena_alloc) catch |e| { arena.deinit(); return e; };
 
-        var checker = tc_mod.TypeChecker.init(arena_alloc, self.schema);
+        var checker = tc_mod.TypeChecker.init(arena_alloc, target_schema);
         for (parsed.stmts) |stmt| {
             checker.checkStmt(stmt, param_types, true) catch |e| { arena.deinit(); return e; };
         }
 
-        var planner = plan_mod.Planner.init(arena_alloc, self.schema);
+        var planner = plan_mod.Planner.init(arena_alloc, target_schema);
         const exec_plan = if (parsed.stmts.len == 1 and parsed.stmts[0] == .transaction)
             planner.planTransaction(parsed.stmts[0].transaction) catch |e| { arena.deinit(); return e; }
         else blk: {
@@ -147,7 +149,7 @@ pub const SqlRegistry = struct {
         };
 
         const output_column_names: []const []const u8 = if (exec_plan.stmts.len > 0 and exec_plan.stmts[0] == .select)
-            extractPlanColumnNames(exec_plan.stmts[0].select, self.schema, arena_alloc) catch &.{}
+            extractPlanColumnNames(exec_plan.stmts[0].select, target_schema, arena_alloc) catch &.{}
         else
             &.{};
 
@@ -158,6 +160,7 @@ pub const SqlRegistry = struct {
             .plan = exec_plan,
             .param_types = param_types,
             .nondet_count = exec_plan.nondet_count,
+            .db_id = db_id,
             .schema_seq = self.schema_seq,
             .output_column_names = output_column_names,
             .arena = arena,
@@ -172,7 +175,7 @@ pub const SqlRegistry = struct {
 
     /// Register a SQL string in the default database. Delegates to registerForDb.
     pub fn register(self: *SqlRegistry, sql: []const u8) RegistryError!QueryHash {
-        return self.registerForDb(sql, @import("schema.zig").default_database_id);
+        return self.registerForDb(sql, schema_mod.default_database_id, self.schema);
     }
 
     pub fn lookup(self: *const SqlRegistry, h: QueryHash) ?*const RegisteredQuery {
@@ -190,12 +193,18 @@ pub const SqlRegistry = struct {
     /// Apply DDL to the schema registry, bumping schema_seq.
     /// Validates that no registered queries would break.
     pub fn applyDdl(self: *SqlRegistry, stmt: ast.Stmt) RegistryError!void {
-        return self.applyDdlToSchema(stmt, self.schema);
+        return self.applyDdlForDbSchema(stmt, schema_mod.default_database_id, self.schema);
     }
 
     /// Apply DDL to a specific SchemaRegistry (may differ from self.schema for multi-db).
-    /// Bumps schema_seq and re-validates registered queries that reference the given schema.
+    /// Only re-validates queries belonging to target_db_id so cross-db DDL never incorrectly
+    /// evicts or rejects queries from other databases.
     pub fn applyDdlToSchema(self: *SqlRegistry, stmt: ast.Stmt, target: *schema_mod.SchemaRegistry) RegistryError!void {
+        return self.applyDdlForDbSchema(stmt, schema_mod.default_database_id, target);
+    }
+
+    /// Internal: apply DDL to target, re-validating only queries with matching db_id.
+    pub fn applyDdlForDbSchema(self: *SqlRegistry, stmt: ast.Stmt, target_db_id: u32, target: *schema_mod.SchemaRegistry) RegistryError!void {
         switch (stmt) {
             .create_table => |s| {
                 _ = try target.createTable(s);
@@ -216,7 +225,7 @@ pub const SqlRegistry = struct {
         }
         self.schema_seq += 1;
 
-        // Re-validate all registered queries against the changed schema.
+        // Re-validate registered queries that belong to this database against the new schema.
         // DROP TABLE evicts broken queries; other DDL rejects if queries would break.
         const evict_broken = (stmt == .drop_table);
         var to_evict: std.ArrayList(QueryHash) = .empty;
@@ -224,6 +233,7 @@ pub const SqlRegistry = struct {
         var it = self.queries.iterator();
         while (it.next()) |entry| {
             const rq = entry.value_ptr.*;
+            if (rq.db_id != target_db_id) continue; // skip queries from other databases
             var tmp_arena = std.heap.ArenaAllocator.init(self.alloc);
             defer tmp_arena.deinit();
             const parsed = parser_mod.parse(rq.sql_text, tmp_arena.allocator()) catch {

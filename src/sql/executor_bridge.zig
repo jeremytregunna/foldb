@@ -162,6 +162,8 @@ pub const SqlExecutor = struct {
     storage: SqlStorage,
     registry: *registry_mod.SqlRegistry,
     schema: *schema_mod.SchemaRegistry,
+    /// When set, table lookups search all databases. Set by FoldExecutor after init.
+    cluster: ?*schema_mod.ClusterSchema = null,
     // Written by the apply thread (release), read by the gateway thread (acquire).
     committed_seq: std.atomic.Value(Seq),
     // Result ring: slot valid iff committed_seq >= slot.seq.
@@ -179,6 +181,12 @@ pub const SqlExecutor = struct {
     pending_foreign_rows: []const ForeignRowEntry = &.{},
     error_detail: [256]u8,
     error_detail_len: usize = 0,
+
+    /// Look up a table by id, searching all databases when cluster is set.
+    fn tableById(self: *const SqlExecutor, id: storage_mod.TableId) ?*const schema_mod.TableSchema {
+        if (self.cluster) |cl| return cl.getTableById(id);
+        return self.schema.getTableById(id);
+    }
 
     pub fn lastDetail(self: *const SqlExecutor) []const u8 {
         return self.error_detail[0..self.error_detail_len];
@@ -1047,7 +1055,7 @@ pub const SqlExecutor = struct {
         mutations: *std.ArrayList(Mutation),
         returning_rows: ?*std.ArrayList([]const ?ColumnValue),
     ) SqlExecError!void {
-        const tbl = self.schema.getTableById(ins.table_id) orelse return error.TableNotFound;
+        const tbl = self.tableById(ins.table_id) orelse return error.TableNotFound;
 
         // Build a full column-id array for FK and key lookups when using full-width values.
         const all_col_ids = try ctx.alloc.alloc(schema_mod.ColumnId, tbl.columns.len);
@@ -1274,7 +1282,7 @@ pub const SqlExecutor = struct {
         mutations: *std.ArrayList(Mutation),
         returning_rows: ?*std.ArrayList([]const ?ColumnValue),
     ) SqlExecError!void {
-        const tbl = self.schema.getTableById(upd.table_id) orelse return error.TableNotFound;
+        const tbl = self.tableById(upd.table_id) orelse return error.TableNotFound;
 
         // Pre-load FROM table rows if a FROM clause was specified.
         var from_rows: std.ArrayList([]const ?ColumnValue) = .empty;
@@ -1393,7 +1401,7 @@ pub const SqlExecutor = struct {
         mutations: *std.ArrayList(Mutation),
         returning_rows: ?*std.ArrayList([]const ?ColumnValue),
     ) SqlExecError!void {
-        const tbl = self.schema.getTableById(del.table_id) orelse return error.TableNotFound;
+        const tbl = self.tableById(del.table_id) orelse return error.TableNotFound;
 
         // Pre-load each USING table's rows into memory for the nested-loop join.
         var using_rows: std.ArrayList(std.ArrayList([]const ?ColumnValue)) = .empty;
@@ -1407,7 +1415,7 @@ pub const SqlExecutor = struct {
         var using_widths: std.ArrayList(usize) = .empty;
         defer using_widths.deinit(ctx.alloc);
         for (del.using_table_ids) |uid| {
-            const using_tbl = self.schema.getTableById(uid) orelse return error.TableNotFound;
+            const using_tbl = self.tableById(uid) orelse return error.TableNotFound;
             var bucket: std.ArrayList([]const ?ColumnValue) = .empty;
             var ui = self.storage.scan(uid, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch return error.TableNotFound;
             defer ui.deinit();
@@ -1536,7 +1544,7 @@ pub const SqlExecutor = struct {
         ctx: EvalCtx,
     ) SqlExecError!void {
         for (tbl.foreign_keys) |fk| {
-            const ref_tbl = self.schema.getTableById(fk.ref_table_id) orelse return error.TableNotFound;
+            const ref_tbl = self.tableById(fk.ref_table_id) orelse return error.TableNotFound;
 
             // Collect the FK column values from the current row; skip if any column is missing
             var fk_vals = try ctx.alloc.alloc(ColumnValue, fk.columns.len);
@@ -1632,7 +1640,7 @@ pub const SqlExecutor = struct {
         ctx: EvalCtx,
     ) SqlExecError!void {
         for (inbound) |ibfk| {
-            const child_tbl = self.schema.getTableById(ibfk.source_table_id) orelse continue;
+            const child_tbl = self.tableById(ibfk.source_table_id) orelse continue;
             const fk = ibfk.fk;
 
             // Get the parent's referenced column values
@@ -1693,7 +1701,7 @@ pub const SqlExecutor = struct {
         ctx: EvalCtx,
         mutations: *std.ArrayList(Mutation),
     ) SqlExecError!void {
-        const tbl = self.schema.getTableById(m.target_id) orelse return error.TableNotFound;
+        const tbl = self.tableById(m.target_id) orelse return error.TableNotFound;
 
         // Collect source rows
         var source_rows: std.ArrayList([]const ?ColumnValue) = .empty;
