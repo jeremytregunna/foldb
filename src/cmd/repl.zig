@@ -583,6 +583,7 @@ fn tryReconnect(
     io: std.Io,
     host: []const u8,
     port: u16,
+    database_name: []const u8,
     alloc: std.mem.Allocator,
     out: *Out,
 ) ?client_mod.Client {
@@ -594,9 +595,9 @@ fn tryReconnect(
             _ = std.os.linux.nanosleep(&ts, null);
         }
         out.print("reconnecting to {s}:{d}... ({d}/{d})\n", .{ host, port, attempt + 1, max_attempts }) catch {};
-        const c = client_mod.connect(io, host, port, alloc) catch continue;
+        const rc = client_mod.connect(io, host, port, database_name, alloc) catch continue;
         out.print("reconnected\n", .{}) catch {};
-        return c;
+        return rc;
     }
     out.print("error: could not reconnect after {d} attempts\n", .{max_attempts}) catch {};
     return null;
@@ -611,6 +612,7 @@ pub fn main(init: std.process.Init) !void {
 
     var host: []const u8 = "127.0.0.1";
     var port: u16 = 7432;
+    var database: []const u8 = "";
 
     var it = std.process.Args.Iterator.init(init.minimal.args);
     _ = it.skip();
@@ -619,10 +621,12 @@ pub fn main(init: std.process.Init) !void {
             if (it.next()) |val| host = val;
         } else if (std.mem.eql(u8, arg, "--port")) {
             if (it.next()) |val| port = std.fmt.parseInt(u16, val, 10) catch 7432;
+        } else if (std.mem.eql(u8, arg, "--database") or std.mem.eql(u8, arg, "-d")) {
+            if (it.next()) |val| database = val;
         }
     }
 
-    var c = client_mod.connect(io, host, port, alloc) catch |e| {
+    var c = client_mod.connect(io, host, port, database, alloc) catch |e| {
         try out.print("error: could not connect to {s}:{d}: {}\n", .{ host, port, e });
         return;
     };
@@ -655,8 +659,17 @@ pub fn main(init: std.process.Init) !void {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(alloc);
 
+    // Track current database name locally for the prompt. Starts with "--database" value or "default".
+    var current_db_name: []u8 = try alloc.dupe(u8, if (database.len > 0) database else "default");
+    defer alloc.free(current_db_name);
+
+    var prompt_buf: [64]u8 = undefined;
+
     while (true) {
-        const prompt = if (buf.items.len == 0) "foldb> " else "   ...> ";
+        const prompt = if (buf.items.len == 0)
+            std.fmt.bufPrint(&prompt_buf, "foldb[{s}]> ", .{current_db_name}) catch "foldb> "
+        else
+            "      ...> ";
 
         const term_cols: u32 = if (is_tty and ws.col > 0) @intCast(ws.col) else 80;
         const line_or_null: ?[]u8 = if (is_tty and orig_termios != null)
@@ -695,6 +708,30 @@ pub fn main(init: std.process.Init) !void {
                 dispatch(&c, sql, &session_hashes, &session_sql, alloc, &out) catch |e| try out.print("error: {}\n", .{e});
                 continue;
             }
+        }
+
+        if (std.mem.startsWith(u8, trimmed, "\\c ")) {
+            const db_name = std.mem.trim(u8, trimmed[3..], " \t");
+            if (db_name.len > 0) {
+                const use_sql = try std.fmt.allocPrint(alloc, "USE DATABASE {s}", .{db_name});
+                defer alloc.free(use_sql);
+                const hash = c.register(use_sql) catch |e| {
+                    if (isConnError(e)) return e;
+                    const err_msg = c.last_error_msg();
+                    if (err_msg.len > 0) try out.print("error: {s}\n", .{err_msg}) else try out.print("error: {}\n", .{e});
+                    continue;
+                };
+                _ = c.execute(hash, &.{}) catch |e| {
+                    if (isConnError(e)) return e;
+                    const err_msg = c.last_error_msg();
+                    if (err_msg.len > 0) try out.print("error: {s}\n", .{err_msg}) else try out.print("error: {}\n", .{e});
+                    continue;
+                };
+                alloc.free(current_db_name);
+                current_db_name = try alloc.dupe(u8, db_name);
+                try out.print("You are now connected to database \"{s}\".\n", .{current_db_name});
+            }
+            continue;
         }
 
         if (std.mem.eql(u8, trimmed, "\\hashes")) {
@@ -782,7 +819,7 @@ pub fn main(init: std.process.Init) !void {
                 } else {
                     try out.print("connection lost\n", .{});
                     c.deinit();
-                    if (tryReconnect(io, host, port, alloc, &out)) |new_c| {
+                    if (tryReconnect(io, host, port, current_db_name, alloc, &out)) |new_c| {
                         c = new_c;
                         dispatch(&c, buf.items, &session_hashes, &session_sql, alloc, &out) catch |err| std.log.warn("dispatch on reconnect: {}", .{err});
                     } else {

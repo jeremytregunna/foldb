@@ -17,6 +17,8 @@ const snapshot_hooks_mod = @import("snapshot_hooks.zig");
 pub const QueryHash = sql_mod.QueryHash;
 pub const Seq = @import("types.zig").Seq;
 pub const ResolvedValue = fold_executor_mod.ResolvedValue;
+pub const DatabaseId = executor_mod.DatabaseId;
+pub const default_database_id = executor_mod.default_database_id;
 
 // Re-export CDC types for use by the net layer
 pub const CdcSubscription = cdc_mod.CdcSubscription;
@@ -403,6 +405,77 @@ pub const Gateway = struct {
     /// Returns true if the registered query is a pure SELECT (no mutations).
     pub fn isSelectQuery(self: *Gateway, hash: QueryHash) bool {
         return self.fold_executors[0].isSelectQuery(hash);
+    }
+
+    /// Look up a database by name. Returns null if the database doesn't exist.
+    pub fn getDatabaseId(self: *Gateway, name: []const u8) ?DatabaseId {
+        return self.fold_executors[0].cluster.getDbByName(name);
+    }
+
+    /// Register a SQL query scoped to a specific database.
+    pub fn registerForDb(self: *Gateway, sql: []const u8, db_id: DatabaseId) !RegisterResult {
+        self.error_detail_len = 0;
+        const hash = self.fold_executors[0].validateQueryForDb(sql, db_id) catch |e| {
+            if (e == error.UnexpectedToken or e == error.UnsupportedSyntax) {
+                var arena = std.heap.ArenaAllocator.init(self.alloc);
+                defer arena.deinit();
+                var p = sql_mod.parser.Parser.init(sql, arena.allocator());
+                _ = p.parseQuery() catch |err| std.log.debug("parse probe: {}", .{err});
+                if (p.err_msg) |msg| {
+                    const pos = p.err_pos;
+                    if (pos < sql.len) {
+                        var end = pos;
+                        while (end < sql.len and end - pos < 24) : (end += 1) {
+                            const c = sql[end];
+                            if (c == ' ' or c == '\t' or c == '\n' or c == ';') break;
+                        }
+                        self.setDetail("{s} '{s}'", .{ msg, sql[pos..end] });
+                    } else {
+                        self.setDetail("{s}", .{msg});
+                    }
+                }
+            }
+            return e;
+        };
+        self.metrics.queries_registered.inc();
+        self.client_seq += 1;
+        var payload_buf: std.ArrayList(u8) = .empty;
+        defer payload_buf.deinit(self.alloc);
+        try executor_mod.encodeSchemaPayload(.query, db_id, sql, self.alloc, &payload_buf);
+        var pending: sequencer_mod.PendingSubmit = undefined;
+        const result = try self.sequencer.submitBytes(
+            &pending,
+            payload_buf.items,
+            self.client_id,
+            self.client_seq,
+            .schema_change,
+        ).awaitCommit(self.io);
+        try self.waitAllFoldExecutors(result.seq);
+        return .{
+            .hash = hash,
+            .schema_version = self.fold_executors[0].schemaVersion(),
+        };
+    }
+
+    /// Apply a DDL statement scoped to a specific database.
+    pub fn applyDdlForDb(self: *Gateway, sql: []const u8, db_id: DatabaseId) !void {
+        self.error_detail_len = 0;
+        try self.fold_executors[0].validateDdl(sql);
+        self.client_seq += 1;
+        const kind: executor_mod.SchemaPayloadKind = if (isClusterDdl(sql)) .cluster else .ddl;
+        const effective_db_id: DatabaseId = if (kind == .cluster) executor_mod.default_database_id else db_id;
+        var payload_buf: std.ArrayList(u8) = .empty;
+        defer payload_buf.deinit(self.alloc);
+        try executor_mod.encodeSchemaPayload(kind, effective_db_id, sql, self.alloc, &payload_buf);
+        var pending: sequencer_mod.PendingSubmit = undefined;
+        const result = try self.sequencer.submitBytes(
+            &pending,
+            payload_buf.items,
+            self.client_id,
+            self.client_seq,
+            .schema_change,
+        ).awaitCommit(self.io);
+        try self.waitAllFoldExecutors(result.seq);
     }
 
     /// Register a SQL query and return its hash with schema version.

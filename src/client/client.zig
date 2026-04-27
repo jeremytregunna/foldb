@@ -113,7 +113,7 @@ pub const Client = struct {
         return .{ .kind = kind, .stream_id = header.stream_id, .payload = payload };
     }
 
-    pub fn handshake(self: *Client) !void {
+    pub fn handshake(self: *Client, database_name: []const u8) !void {
         hello_wait: {
             for (0..frames_per_response_max) |_| {
                 const f = try self.read_frame();
@@ -138,6 +138,7 @@ pub const Client = struct {
             .method = .none,
             .client_max_frame_size = frame.DEFAULT_MAX_PAYLOAD,
             .payload = .none,
+            .database_name = database_name,
         });
         try frame.sendFrameList(&self.writer.interface, 0, .auth, frame.Flags.final_only, null, auth_payload);
 
@@ -329,7 +330,8 @@ pub fn connect_stream(io: std.Io, host: []const u8, port: u16) !net.Stream {
 }
 
 /// Connect to host:port and complete the Hello → Auth(none) → AuthOk handshake.
-pub fn connect(io: std.Io, host: []const u8, port: u16, alloc: std.mem.Allocator) !Client {
+/// Pass an empty string for database_name to connect to the default database.
+pub fn connect(io: std.Io, host: []const u8, port: u16, database_name: []const u8, alloc: std.mem.Allocator) !Client {
     assert(host.len > 0);
     assert(port > 0);
     const stream = try connect_stream(io, host, port);
@@ -337,6 +339,6 @@ pub fn connect(io: std.Io, host: []const u8, port: u16, alloc: std.mem.Allocator
     client.reader = stream.reader(io, &client.read_buf);
     client.writer = stream.writer(io, &client.write_buf);
     errdefer client.deinit();
-    try client.handshake();
+    try client.handshake(database_name);
     return client;
 }

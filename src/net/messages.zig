@@ -71,6 +71,8 @@ pub const Auth = struct {
     method: AuthMethod,
     client_max_frame_size: u32,
     payload: AuthPayload,
+    /// Database to connect to. Empty string means "default".
+    database_name: []const u8 = "",
 };
 
 pub fn encodeAuth(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, a: Auth) !void {
@@ -84,6 +86,9 @@ pub fn encodeAuth(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, a:
             try out.appendSlice(alloc, t.token);
         },
     }
+    assert(a.database_name.len <= 255);
+    try appendU8(out, alloc, @intCast(a.database_name.len));
+    try out.appendSlice(alloc, a.database_name);
 }
 
 pub fn decodeAuth(cur: *Cursor, alloc: std.mem.Allocator) !Auth {
@@ -104,7 +109,13 @@ pub fn decodeAuth(cur: *Cursor, alloc: std.mem.Allocator) !Auth {
         },
         _ => unreachable,
     };
-    return .{ .method = method, .client_max_frame_size = client_max, .payload = payload };
+    // database_name: u8-length-prefixed, present when bytes remain.
+    const database_name: []const u8 = if (cur.remaining() > 0) blk: {
+        const name_len = try cur.readU8();
+        const name_raw = try cur.readSlice(name_len);
+        break :blk try alloc.dupe(u8, name_raw);
+    } else "";
+    return .{ .method = method, .client_max_frame_size = client_max, .payload = payload, .database_name = database_name };
 }
 
 pub fn freeAuth(a: Auth, alloc: std.mem.Allocator) void {
@@ -112,6 +123,7 @@ pub fn freeAuth(a: Auth, alloc: std.mem.Allocator) void {
         .none => {},
         .token => |t| alloc.free(t.token),
     }
+    if (a.database_name.len > 0) alloc.free(a.database_name);
 }
 
 // ---- Ping (C→S / S→C, stream 0) ----

@@ -589,6 +589,11 @@ pub const FoldExecutor = struct {
         return self.registry.validateQuery(sql);
     }
 
+    /// Like validateQuery but scoped to a specific database.
+    pub fn validateQueryForDb(self: *FoldExecutor, sql: []const u8, db_id: sql_mod.DatabaseId) !sql_mod.QueryHash {
+        return self.registry.validateQueryForDb(sql, db_id);
+    }
+
     /// Compute the canonical hash of a SQL string without registering it.
     /// Pure computation — safe to call from any thread concurrently.
     pub fn computeQueryHash(self: *const FoldExecutor, sql: []const u8) !sql_mod.QueryHash {

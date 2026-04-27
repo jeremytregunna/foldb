@@ -60,6 +60,8 @@ pub const Conn = struct {
     alloc: std.mem.Allocator,
     gw: *gateway_mod.Gateway,
     users: []const config_mod.UserEntry,
+    /// Active database for this connection. Set during handshake; updated by USE DATABASE.
+    current_db_id: u32,
 
     fn init(io: std.Io, stream: net.Stream, gw: *gateway_mod.Gateway, users: []const config_mod.UserEntry, alloc: std.mem.Allocator) Conn {
         // SAFETY: reader, writer, read_buf, and write_buf are all initialized in run() before use.
@@ -77,6 +79,7 @@ pub const Conn = struct {
             .alloc = alloc,
             .gw = gw,
             .users = users,
+            .current_db_id = gateway_mod.default_database_id,
         };
     }
 
@@ -207,6 +210,16 @@ pub const Conn = struct {
             self.sendFatalError(.auth_failed, "authentication failed");
             return error.ProtocolError;
         }
+        // Resolve the requested database (empty = default).
+        if (auth.database_name.len > 0) {
+            const db_id = self.gw.getDatabaseId(auth.database_name) orelse {
+                var emsg_buf: [128]u8 = undefined;
+                const emsg = std.fmt.bufPrint(&emsg_buf, "database not found: {s}", .{auth.database_name}) catch "database not found";
+                self.sendFatalError(.auth_failed, emsg);
+                return error.ProtocolError;
+            };
+            self.current_db_id = db_id;
+        }
         try frame.sendFrame(&self.writer.interface, 0, .auth_ok, .none, null, &.{});
     }
 
@@ -316,11 +329,15 @@ pub const Conn = struct {
             return;
         };
         defer self.alloc.free(rq.sql);
+        if (parseUseDatabaseName(rq.sql)) |db_name| {
+            try self.handleUseDatabase(stream_id, db_name);
+            return;
+        }
         if (isDdl(rq.sql)) {
             try self.handleRegisterDdl(stream_id, rq.sql);
             return;
         }
-        const result = self.gw.register(rq.sql) catch |e| {
+        const result = self.gw.registerForDb(rq.sql, self.current_db_id) catch |e| {
             const code: msg.ErrorCode = switch (e) {
                 error.ParseError => .parse_error,
                 error.TypeCheckError => .type_error,
@@ -341,8 +358,26 @@ pub const Conn = struct {
         try frame.sendFrame(&self.writer.interface, stream_id, .registered, .final_only, null, out.items);
     }
 
+    fn handleUseDatabase(self: *Conn, stream_id: u64, db_name: []const u8) !void {
+        const db_id = self.gw.getDatabaseId(db_name) orelse {
+            var emsg_buf: [128]u8 = undefined;
+            const emsg = std.fmt.bufPrint(&emsg_buf, "database not found: {s}", .{db_name}) catch "database not found";
+            self.sendStreamError(stream_id, .server_error, emsg);
+            return;
+        };
+        self.current_db_id = db_id;
+        // Return a stable hash so the caller can execute it (no-op execute).
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.Blake3.hash(db_name, &hash, .{});
+        try self.ddl_hashes.put(hash, {});
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        defer out.deinit(self.alloc);
+        try msg.encodeRegistered(&out, self.alloc, .{ .query_hash = hash, .param_tags = &.{}, .columns = &.{} });
+        try frame.sendFrame(&self.writer.interface, stream_id, .registered, .final_only, null, out.items);
+    }
+
     fn handleRegisterDdl(self: *Conn, stream_id: u64, sql: []const u8) !void {
-        self.gw.applyDdl(sql) catch |e| {
+        self.gw.applyDdlForDb(sql, self.current_db_id) catch |e| {
             const code: msg.ErrorCode = switch (e) {
                 error.ParseError, error.MissingNullability => .parse_error,
                 error.TypeCheckError => .type_error,
@@ -824,4 +859,15 @@ fn isDdl(sql: []const u8) bool {
     for (s[0..len], 0..) |c, i| buf[i] = if (c >= 'A' and c <= 'Z') c + 32 else c;
     const tok = buf[0..len];
     return std.mem.eql(u8, tok, "create") or std.mem.eql(u8, tok, "drop") or std.mem.eql(u8, tok, "alter");
+}
+
+/// If sql is a USE DATABASE statement, return the database name (slice into sql). Otherwise null.
+fn parseUseDatabaseName(sql: []const u8) ?[]const u8 {
+    const s = std.mem.trimStart(u8, sql, " \t\r\n;");
+    if (!std.ascii.startsWithIgnoreCase(s, "use")) return null;
+    const after_use = std.mem.trimStart(u8, s[3..], " \t");
+    if (!std.ascii.startsWithIgnoreCase(after_use, "database")) return null;
+    const name = std.mem.trim(u8, after_use[8..], " \t\r\n;");
+    if (name.len == 0) return null;
+    return name;
 }
