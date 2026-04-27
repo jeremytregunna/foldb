@@ -103,6 +103,10 @@ pub const EvalCtx = struct {
     row: ?[]const ?ColumnValue,
     schema: *const schema_mod.SchemaRegistry,
     alloc: std.mem.Allocator,
+    /// Pending mutations from prior DML statements in this transaction.
+    /// When non-null, scans overlay these on top of the storage snapshot
+    /// so ASSERT and subquery reads see read-your-own-writes semantics.
+    pending_mutations: ?*const std.ArrayList(storage_mod.Mutation) = null,
 };
 
 pub fn freeRowValues(vals: []const ?ColumnValue, alloc: std.mem.Allocator) void {

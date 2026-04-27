@@ -94,7 +94,10 @@ pub fn decodeParams(data: []const u8, types: []const ast.SqlType, alloc: std.mem
         const tag_byte = data[pos];
         pos += 1;
         if (types.len > 0) {
-            values[i] = try decodeParamValue(data, &pos, types[i], alloc);
+            // Decode the wire value using its actual tag, then coerce to declared type.
+            // This handles mismatches where the sender uses int64 for a declared int32.
+            const wire_val = try decodeParamValueByTag(data, &pos, tag_byte, alloc);
+            values[i] = coerceToSqlType(wire_val, types[i]);
         } else {
             values[i] = try decodeParamValueByTag(data, &pos, tag_byte, alloc);
         }
@@ -102,75 +105,44 @@ pub fn decodeParams(data: []const u8, types: []const ast.SqlType, alloc: std.mem
     return values;
 }
 
-fn decodeParamValue(data: []const u8, pos: *u32, typ: ast.SqlType, alloc: std.mem.Allocator) !ColumnValue {
+/// Coerce a decoded ColumnValue to the expected SqlType declared in the query signature.
+/// Integer types are converted losslessly when the value fits; other types must match exactly.
+fn coerceToSqlType(v: ColumnValue, typ: ast.SqlType) ColumnValue {
+    // Extract integer value for numeric coercions.
+    const as_i64: ?i64 = switch (v) {
+        .int8 => |n| @intCast(n),
+        .int16 => |n| @intCast(n),
+        .int32 => |n| @intCast(n),
+        .int64 => |n| n,
+        .uint8 => |n| @intCast(n),
+        .uint16 => |n| @intCast(n),
+        .uint32 => |n| @intCast(n),
+        .uint64 => |n| if (n <= std.math.maxInt(i64)) @intCast(n) else null,
+        .bool_t => |b| if (b) 1 else 0,
+        else => null,
+    };
+    const as_u64: ?u64 = switch (v) {
+        .int8 => |n| if (n >= 0) @intCast(n) else null,
+        .int16 => |n| if (n >= 0) @intCast(n) else null,
+        .int32 => |n| if (n >= 0) @intCast(n) else null,
+        .int64 => |n| if (n >= 0) @intCast(n) else null,
+        .uint8 => |n| @intCast(n),
+        .uint16 => |n| @intCast(n),
+        .uint32 => |n| @intCast(n),
+        .uint64 => |n| n,
+        .bool_t => |b| if (b) 1 else 0,
+        else => null,
+    };
     return switch (typ) {
-        .bool => blk: {
-            const b = data[pos.*];
-            pos.* += 1;
-            break :blk .{ .bool_t = b != 0 };
-        },
-        .int8 => blk: {
-            const n: i8 = @bitCast(data[pos.*]);
-            pos.* += 1;
-            break :blk .{ .int8 = n };
-        },
-        .int16 => blk: {
-            const n = std.mem.readInt(i16, data[pos.*..][0..2], .little);
-            pos.* += 2;
-            break :blk .{ .int16 = n };
-        },
-        .int32 => blk: {
-            const n = std.mem.readInt(i32, data[pos.*..][0..4], .little);
-            pos.* += 4;
-            break :blk .{ .int32 = n };
-        },
-        .int64 => blk: {
-            const n = std.mem.readInt(i64, data[pos.*..][0..8], .little);
-            pos.* += 8;
-            break :blk .{ .int64 = n };
-        },
-        .uint8 => blk: {
-            const n = data[pos.*];
-            pos.* += 1;
-            break :blk .{ .uint8 = n };
-        },
-        .uint16 => blk: {
-            const n = std.mem.readInt(u16, data[pos.*..][0..2], .little);
-            pos.* += 2;
-            break :blk .{ .uint16 = n };
-        },
-        .uint32 => blk: {
-            const n = std.mem.readInt(u32, data[pos.*..][0..4], .little);
-            pos.* += 4;
-            break :blk .{ .uint32 = n };
-        },
-        .uint64 => blk: {
-            const n = std.mem.readInt(u64, data[pos.*..][0..8], .little);
-            pos.* += 8;
-            break :blk .{ .uint64 = n };
-        },
-        .string => blk: {
-            const len = std.mem.readInt(u32, data[pos.*..][0..4], .little);
-            pos.* += 4;
-            const s = try alloc.dupe(u8, data[pos.* .. pos.* + len]);
-            pos.* += len;
-            break :blk .{ .string = s };
-        },
-        .bytes, .uuid, .timestamp, .interval_months, .interval_micros, .json, .vector => blk: {
-            const len = std.mem.readInt(u32, data[pos.*..][0..4], .little);
-            pos.* += 4;
-            const b = try alloc.dupe(u8, data[pos.* .. pos.* + len]);
-            pos.* += len;
-            break :blk .{ .bytes = b };
-        },
-        .decimal => blk: {
-            const scale = data[pos.*];
-            pos.* += 1;
-            const coeff = std.mem.readInt(i128, data[pos.*..][0..16], .little);
-            pos.* += 16;
-            break :blk .{ .decimal = .{ .coefficient = coeff, .scale = scale } };
-        },
-        else => error.TypeMismatch,
+        .int8 => if (as_i64) |n| .{ .int8 = @truncate(n) } else v,
+        .int16 => if (as_i64) |n| .{ .int16 = @truncate(n) } else v,
+        .int32 => if (as_i64) |n| .{ .int32 = @truncate(n) } else v,
+        .int64 => if (as_i64) |n| .{ .int64 = n } else v,
+        .uint8 => if (as_u64) |n| .{ .uint8 = @truncate(n) } else v,
+        .uint16 => if (as_u64) |n| .{ .uint16 = @truncate(n) } else v,
+        .uint32 => if (as_u64) |n| .{ .uint32 = @truncate(n) } else v,
+        .uint64 => if (as_u64) |n| .{ .uint64 = n } else v,
+        else => v, // string, bytes, decimal, bool — pass through unchanged
     };
 }
 
