@@ -72,17 +72,40 @@ fn historyPush(history: *std.ArrayListUnmanaged([]u8), entry: []const u8, alloc:
 
 // ---- Line editor ----
 
-fn lineDraw(prompt: []const u8, line: []const u8, cursor: u32) !void {
+/// Redraw the prompt and line. prev_pos is the cursor's current display position
+/// (prompt.len + prev_cursor) so we can move up to the prompt row when content wraps.
+fn lineDraw(prompt: []const u8, line: []const u8, cursor: u32, prev_pos: u32, term_cols: u32) !void {
     assert(cursor <= line.len);
-    try writeAll("\r");
+    const cols: u32 = if (term_cols > 0) term_cols else 80;
+    // Move up to the prompt row if the cursor is on a wrapped row below it.
+    const prev_row = prev_pos / cols;
+    if (prev_row > 0) {
+        var buf: [16]u8 = undefined;
+        const seq = std.fmt.bufPrint(&buf, "\x1b[{d}A", .{prev_row}) catch unreachable;
+        try writeAll(seq);
+    }
+    // Go to column 0 of the prompt row and clear to end of screen.
+    try writeAll("\r\x1b[0J");
     try writeAll(prompt);
     try writeAll(line);
-    try writeAll("\x1b[K"); // clear to end of line
-    if (cursor < line.len) {
-        // SAFETY: bufPrint writes to seq_buf before seq is used; buffer is large enough.
-        var seq_buf: [16]u8 = undefined;
-        const seq = std.fmt.bufPrint(&seq_buf, "\x1b[{d}D", .{line.len - cursor}) catch |err| std.debug.panic("unexpected: {}", .{err});
-        try writeAll(seq);
+    // Reposition cursor if it isn't at the end.
+    const end_display: u32 = @intCast(prompt.len + line.len);
+    const cursor_display: u32 = @intCast(prompt.len + cursor);
+    if (cursor_display < end_display) {
+        const end_row = end_display / cols;
+        const cursor_row = cursor_display / cols;
+        const cursor_col = cursor_display % cols;
+        if (cursor_row < end_row) {
+            // Cursor is on a row above the end row: move up and set column.
+            var buf: [32]u8 = undefined;
+            const seq = std.fmt.bufPrint(&buf, "\x1b[{d}A\x1b[{d}G", .{ end_row - cursor_row, cursor_col + 1 }) catch unreachable;
+            try writeAll(seq);
+        } else {
+            // Same row: move left.
+            var buf: [16]u8 = undefined;
+            const seq = std.fmt.bufPrint(&buf, "\x1b[{d}D", .{end_display - cursor_display}) catch unreachable;
+            try writeAll(seq);
+        }
     }
 }
 
@@ -95,6 +118,8 @@ fn histNav(
     saved: *std.ArrayListUnmanaged(u8),
     history: []const []const u8,
     prompt: []const u8,
+    prev_pos: *u32,
+    term_cols: u32,
     alloc: std.mem.Allocator,
     dir: NavDir,
 ) !void {
@@ -120,7 +145,8 @@ fn histNav(
         },
     }
     cursor.* = @intCast(line.items.len);
-    try lineDraw(prompt, line.items, cursor.*);
+    try lineDraw(prompt, line.items, cursor.*, prev_pos.*, term_cols);
+    prev_pos.* = @intCast(prompt.len + cursor.*);
 }
 
 fn handleEscape(
@@ -130,6 +156,8 @@ fn handleEscape(
     saved: *std.ArrayListUnmanaged(u8),
     history: []const []const u8,
     prompt: []const u8,
+    prev_pos: *u32,
+    term_cols: u32,
     alloc: std.mem.Allocator,
 ) !void {
     assert(cursor.* <= line.items.len);
@@ -137,14 +165,16 @@ fn handleEscape(
     if (b1 != '[') return;
     const b2 = readByte() orelse return;
     switch (b2) {
-        'A' => try histNav(line, cursor, hist_pos, saved, history, prompt, alloc, .up),
-        'B' => try histNav(line, cursor, hist_pos, saved, history, prompt, alloc, .down),
+        'A' => try histNav(line, cursor, hist_pos, saved, history, prompt, prev_pos, term_cols, alloc, .up),
+        'B' => try histNav(line, cursor, hist_pos, saved, history, prompt, prev_pos, term_cols, alloc, .down),
         'C' => if (cursor.* < line.items.len) {
             cursor.* += 1;
+            prev_pos.* = @intCast(prompt.len + cursor.*);
             try writeAll("\x1b[C");
         },
         'D' => if (cursor.* > 0) {
             cursor.* -= 1;
+            prev_pos.* = @intCast(prompt.len + cursor.*);
             try writeAll("\x1b[D");
         },
         else => {},
@@ -156,6 +186,7 @@ fn handleEscape(
 fn readLineRaw(
     prompt: []const u8,
     history: []const []const u8,
+    term_cols: u32,
     alloc: std.mem.Allocator,
 ) !?[]u8 {
     assert(prompt.len > 0);
@@ -165,6 +196,8 @@ fn readLineRaw(
     defer saved.deinit(alloc);
     var cursor: u32 = 0;
     var hist_pos: u32 = 0;
+    // Display position of cursor after the last draw (prompt.len + cursor).
+    var prev_pos: u32 = @intCast(prompt.len);
 
     try writeAll(prompt);
 
@@ -189,21 +222,30 @@ fn readLineRaw(
                 }
                 if (cursor < line.items.len) {
                     _ = line.orderedRemove(cursor);
-                    try lineDraw(prompt, line.items, cursor);
+                    try lineDraw(prompt, line.items, cursor, prev_pos, term_cols);
+                    prev_pos = @intCast(prompt.len + cursor);
                 }
+            },
+            0x15 => { // Ctrl-U: clear entire line
+                line.clearRetainingCapacity();
+                cursor = 0;
+                try lineDraw(prompt, line.items, cursor, prev_pos, term_cols);
+                prev_pos = @intCast(prompt.len + cursor);
             },
             0x7f, 0x08 => { // Backspace
                 if (cursor > 0) {
                     cursor -= 1;
                     _ = line.orderedRemove(cursor);
-                    try lineDraw(prompt, line.items, cursor);
+                    try lineDraw(prompt, line.items, cursor, prev_pos, term_cols);
+                    prev_pos = @intCast(prompt.len + cursor);
                 }
             },
-            0x1b => try handleEscape(&line, &cursor, &hist_pos, &saved, history, prompt, alloc),
+            0x1b => try handleEscape(&line, &cursor, &hist_pos, &saved, history, prompt, &prev_pos, term_cols, alloc),
             else => if (byte >= 0x20 and byte < 0x7f) {
                 try line.insert(alloc, cursor, byte);
                 cursor += 1;
-                try lineDraw(prompt, line.items, cursor);
+                try lineDraw(prompt, line.items, cursor, prev_pos, term_cols);
+                prev_pos = @intCast(prompt.len + cursor);
             },
         }
     }
@@ -364,7 +406,29 @@ fn printTable(rs: *client_mod.ResultSet, alloc: std.mem.Allocator, out: *Out) !v
 
 // ---- Dispatch ----
 
-fn dispatch(c: *client_mod.Client, sql_with_semi: []const u8, alloc: std.mem.Allocator, out: *Out) !void {
+const QueryHash = [32]u8;
+
+fn hashShort(hash: QueryHash, buf: *[16]u8) []u8 {
+    for (hash[0..8], 0..) |b, i| {
+        _ = std.fmt.bufPrint(buf[i * 2 .. i * 2 + 2], "{x:0>2}", .{b}) catch {};
+    }
+    return buf[0..16];
+}
+
+fn hashFull(hash: QueryHash, buf: *[64]u8) []u8 {
+    for (hash, 0..) |b, i| {
+        _ = std.fmt.bufPrint(buf[i * 2 .. i * 2 + 2], "{x:0>2}", .{b}) catch {};
+    }
+    return buf[0..64];
+}
+
+fn dispatch(
+    c: *client_mod.Client,
+    sql_with_semi: []const u8,
+    hashes: *std.ArrayListUnmanaged(QueryHash),
+    alloc: std.mem.Allocator,
+    out: *Out,
+) !void {
     assert(sql_with_semi.len > 0);
     const sql = std.mem.trimEnd(u8, std.mem.trimEnd(u8, sql_with_semi, " \t\r\n"), ";");
     const kind = classify(sql);
@@ -372,9 +436,10 @@ fn dispatch(c: *client_mod.Client, sql_with_semi: []const u8, alloc: std.mem.All
     const hash = c.register(sql) catch |e| {
         if (isConnError(e)) return e;
         const msg = c.last_error_msg();
-        if (msg.len > 0) try out.print("error: {s}\n", .{msg}) else try out.print("error: {}\n", .{e});
+        if (msg.len > 0) try out.print("error: register failed: {s}\n", .{msg}) else try out.print("error: register failed: {}\n", .{e});
         return;
     };
+    try hashes.append(alloc, hash);
 
     switch (kind) {
         .ddl => {
@@ -395,7 +460,7 @@ fn dispatch(c: *client_mod.Client, sql_with_semi: []const u8, alloc: std.mem.All
             };
             try out.print("{d} row(s) affected\n", .{result.rows_affected});
         },
-        .select, .unknown => {
+        .select => {
             var rs = c.query(hash, &.{}) catch |e| {
                 if (isConnError(e)) return e;
                 const msg = c.last_error_msg();
@@ -405,7 +470,94 @@ fn dispatch(c: *client_mod.Client, sql_with_semi: []const u8, alloc: std.mem.All
             defer rs.deinit();
             printTable(&rs, alloc, out) catch |err| std.log.warn("printTable: {}", .{err});
         },
+        .unknown => {
+            // Parameterized query (e.g. TRANSACTION block) — cannot auto-execute.
+            var full_buf: [64]u8 = undefined;
+            const full = hashFull(hash, &full_buf);
+            try out.print("registered: {s}\n", .{full});
+            try out.print("  use: \\call {s} (val, ...)\n", .{full});
+        },
     }
+}
+
+// ---- \call support ----
+
+/// Parse a parenthesised comma-separated literal value list, e.g. (1, 'hello', true, null).
+/// Caller owns the returned slice.
+fn parseCallParams(text: []const u8, alloc: std.mem.Allocator) ![]messages.TypedValue {
+    const s = std.mem.trim(u8, text, " \t");
+    if (s.len < 2 or s[0] != '(') return error.MissingParens;
+    const inner_end = std.mem.lastIndexOfScalar(u8, s, ')') orelse return error.MissingParens;
+    const inner = std.mem.trim(u8, s[1..inner_end], " \t");
+
+    var params: std.ArrayListUnmanaged(messages.TypedValue) = .empty;
+    errdefer params.deinit(alloc);
+
+    if (inner.len == 0) return params.toOwnedSlice(alloc);
+
+    var i: usize = 0;
+    while (i <= inner.len) {
+        // Skip whitespace.
+        while (i < inner.len and (inner[i] == ' ' or inner[i] == '\t')) i += 1;
+        if (i >= inner.len) break;
+
+        // Find end of this value (comma or end, respecting string quotes).
+        const val_start = i;
+        if (inner[i] == '\'') {
+            // Quoted string: scan to closing quote (handle '' escapes).
+            i += 1;
+            while (i < inner.len) {
+                if (inner[i] == '\'') {
+                    i += 1;
+                    if (i < inner.len and inner[i] == '\'') { i += 1; continue; } // escaped ''
+                    break;
+                }
+                i += 1;
+            }
+        } else {
+            while (i < inner.len and inner[i] != ',') i += 1;
+        }
+        const raw = std.mem.trim(u8, inner[val_start..i], " \t");
+        const val = try parseLiteralValue(raw, alloc);
+        try params.append(alloc, val);
+
+        // Skip comma.
+        while (i < inner.len and (inner[i] == ' ' or inner[i] == '\t' or inner[i] == ',')) {
+            if (inner[i] == ',') { i += 1; break; }
+            i += 1;
+        }
+    }
+    return params.toOwnedSlice(alloc);
+}
+
+fn parseLiteralValue(raw: []const u8, alloc: std.mem.Allocator) !messages.TypedValue {
+    if (std.ascii.eqlIgnoreCase(raw, "null")) return .null_val;
+    if (std.ascii.eqlIgnoreCase(raw, "true")) return .{ .bool_val = true };
+    if (std.ascii.eqlIgnoreCase(raw, "false")) return .{ .bool_val = false };
+    if (raw.len >= 2 and raw[0] == '\'') {
+        // Strip quotes and unescape ''.
+        const inner = raw[1 .. raw.len - 1];
+        var buf = try alloc.alloc(u8, inner.len);
+        var wi: usize = 0;
+        var ri: usize = 0;
+        while (ri < inner.len) {
+            if (inner[ri] == '\'' and ri + 1 < inner.len and inner[ri + 1] == '\'') {
+                buf[wi] = '\'';
+                wi += 1;
+                ri += 2;
+            } else {
+                buf[wi] = inner[ri];
+                wi += 1;
+                ri += 1;
+            }
+        }
+        return .{ .string = buf[0..wi] };
+    }
+    // Try integer.
+    if (std.fmt.parseInt(i64, raw, 10)) |n| return .{ .int64 = n } else |_| {}
+    // Try float.
+    if (std.fmt.parseFloat(f64, raw)) |f| return .{ .float64 = f } else |_| {}
+    return error.UnrecognisedLiteral;
 }
 
 fn isConnError(e: anyerror) bool {
@@ -473,14 +625,18 @@ pub fn main(init: std.process.Init) !void {
         history.deinit(alloc);
     }
 
+    var session_hashes: std.ArrayListUnmanaged(QueryHash) = .empty;
+    defer session_hashes.deinit(alloc);
+
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(alloc);
 
     while (true) {
         const prompt = if (buf.items.len == 0) "foldb> " else "   ...> ";
 
+        const term_cols: u32 = if (is_tty and ws.col > 0) @intCast(ws.col) else 80;
         const line_or_null: ?[]u8 = if (is_tty and orig_termios != null)
-            readLineRaw(prompt, history.items, alloc) catch |e| {
+            readLineRaw(prompt, history.items, term_cols, alloc) catch |e| {
                 if (e == error.Interrupted) {
                     buf.clearRetainingCapacity();
                     continue;
@@ -512,9 +668,50 @@ pub fn main(init: std.process.Init) !void {
                 const sql = try std.fmt.allocPrint(alloc, "describe {s};", .{tname});
                 defer alloc.free(sql);
                 historyPush(&history, sql, alloc) catch |err| std.log.warn("historyPush: {}", .{err});
-                dispatch(&c, sql, alloc, &out) catch |e| try out.print("error: {}\n", .{e});
+                dispatch(&c, sql, &session_hashes, alloc, &out) catch |e| try out.print("error: {}\n", .{e});
                 continue;
             }
+        }
+
+        if (std.mem.startsWith(u8, trimmed, "\\call ")) {
+            historyPush(&history, trimmed, alloc) catch |err| std.log.warn("historyPush: {}", .{err});
+            const rest = std.mem.trimStart(u8, trimmed[6..], " \t");
+            // Require full 64-char hex hash.
+            var hex_end: usize = 0;
+            while (hex_end < rest.len and rest[hex_end] != ' ' and rest[hex_end] != '(') hex_end += 1;
+            const hex_str = rest[0..hex_end];
+            if (hex_str.len != 64) {
+                try out.print("error: expected full 64-character hex hash (got {d} chars)\n", .{hex_str.len});
+                continue;
+            }
+            var hash: QueryHash = undefined;
+            _ = std.fmt.hexToBytes(&hash, hex_str) catch {
+                try out.print("error: invalid hex hash\n", .{});
+                continue;
+            };
+            // Parse value list.
+            const param_text = std.mem.trimStart(u8, rest[hex_end..], " \t");
+            const params = parseCallParams(param_text, alloc) catch |e| {
+                try out.print("error: bad params: {}\n", .{e});
+                continue;
+            };
+            defer {
+                for (params) |p| if (p == .string) alloc.free(p.string);
+                alloc.free(params);
+            }
+            // Try as DML/transaction first; if result has rows fall back to query display.
+            const result = c.execute(hash, params) catch |e| {
+                if (isConnError(e)) return e;
+                const msg = c.last_error_msg();
+                if (msg.len > 0) try out.print("error: {s}\n", .{msg}) else try out.print("error: {}\n", .{e});
+                continue;
+            };
+            if (result.rows_affected > 0) {
+                try out.print("{d} row(s) affected\n", .{result.rows_affected});
+            } else {
+                try out.print("OK\n", .{});
+            }
+            continue;
         }
 
         if (buf.items.len > 0) try buf.append(alloc, ' ');
@@ -524,7 +721,7 @@ pub fn main(init: std.process.Init) !void {
             if (buf.items.len > 1) historyPush(&history, buf.items, alloc) catch |err| std.log.warn("historyPush: {}", .{err});
 
             var disconnected = false;
-            dispatch(&c, buf.items, alloc, &out) catch |e| {
+            dispatch(&c, buf.items, &session_hashes, alloc, &out) catch |e| {
                 if (!isConnError(e)) {
                     try out.print("error: {}\n", .{e});
                 } else {
@@ -532,7 +729,7 @@ pub fn main(init: std.process.Init) !void {
                     c.deinit();
                     if (tryReconnect(io, host, port, alloc, &out)) |new_c| {
                         c = new_c;
-                        dispatch(&c, buf.items, alloc, &out) catch |err| std.log.warn("dispatch on reconnect: {}", .{err});
+                        dispatch(&c, buf.items, &session_hashes, alloc, &out) catch |err| std.log.warn("dispatch on reconnect: {}", .{err});
                     } else {
                         disconnected = true;
                     }
