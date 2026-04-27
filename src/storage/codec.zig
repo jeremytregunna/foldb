@@ -69,7 +69,7 @@ fn intMinMax(col_type: ColumnType, values: []const ColumnValue) ?[2]u64 {
             }
             break :blk .{ mn, mx };
         },
-        else => null,
+        .bool_t, .bytes, .string, .decimal, .null_t => null,
     };
 }
 
@@ -83,7 +83,7 @@ fn valueToU64(v: ColumnValue) u64 {
         .uint16 => |x| x,
         .uint32 => |x| x,
         .uint64 => |x| x,
-        else => 0,
+        .bool_t, .bytes, .string, .decimal, .null_t => 0,
     };
 }
 
@@ -97,7 +97,7 @@ fn u64ToValue(u: u64, col_type: ColumnType) ColumnValue {
         .uint16 => .{ .uint16 = @intCast(u) },
         .uint32 => .{ .uint32 = @intCast(u) },
         .uint64 => .{ .uint64 = u },
-        else => unreachable,
+        .bool_t, .bytes, .string, .decimal, .null_t => unreachable,
     };
 }
 
@@ -336,6 +336,8 @@ fn writeValue(col_type: ColumnType, v: ColumnValue, out: *std.ArrayList(u8), all
             std.mem.writeInt(i128, &b, v.decimal.coefficient, .little);
             try out.appendSlice(alloc, &b);
         },
+        // null_t: tag-only, no value bytes.
+        .null_t => {},
     }
 }
 
@@ -392,5 +394,7 @@ fn readValue(col_type: ColumnType, data: []const u8, alloc: std.mem.Allocator) !
                 .coefficient = std.mem.readInt(i128, data[1..17], .little),
             } }, .bytes_read = 17 };
         },
+        // null_t: no value bytes — read nothing.
+        .null_t => return .{ .value = .null_t, .bytes_read = 0 },
     }
 }

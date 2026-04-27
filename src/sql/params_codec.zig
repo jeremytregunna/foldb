@@ -74,6 +74,8 @@ fn encodeParamValue(buf: *std.ArrayList(u8), v: ColumnValue, alloc: std.mem.Allo
             std.mem.writeInt(i128, &b, d.coefficient, .little);
             try buf.appendSlice(alloc, &b);
         },
+        // null_t: tag only, no value bytes.
+        .null_t => {},
     }
 }
 
@@ -108,6 +110,8 @@ pub fn decodeParams(data: []const u8, types: []const ast.SqlType, alloc: std.mem
 /// Coerce a decoded ColumnValue to the expected SqlType declared in the query signature.
 /// Integer types are converted losslessly when the value fits; other types must match exactly.
 fn coerceToSqlType(v: ColumnValue, typ: ast.SqlType) ColumnValue {
+    // null_t passes through unchanged — don't try to convert it.
+    if (v == .null_t) return v;
     // Extract integer value for numeric coercions.
     const as_i64: ?i64 = switch (v) {
         .int8 => |n| @intCast(n),
@@ -119,7 +123,7 @@ fn coerceToSqlType(v: ColumnValue, typ: ast.SqlType) ColumnValue {
         .uint32 => |n| @intCast(n),
         .uint64 => |n| if (n <= std.math.maxInt(i64)) @intCast(n) else null,
         .bool_t => |b| if (b) 1 else 0,
-        else => null,
+        .null_t, .bytes, .string, .decimal => null,
     };
     const as_u64: ?u64 = switch (v) {
         .int8 => |n| if (n >= 0) @intCast(n) else null,
@@ -131,7 +135,7 @@ fn coerceToSqlType(v: ColumnValue, typ: ast.SqlType) ColumnValue {
         .uint32 => |n| @intCast(n),
         .uint64 => |n| n,
         .bool_t => |b| if (b) 1 else 0,
-        else => null,
+        .null_t, .bytes, .string, .decimal => null,
     };
     return switch (typ) {
         .int8 => if (as_i64) |n| .{ .int8 = @truncate(n) } else v,
@@ -160,9 +164,11 @@ fn decodeParamValueByTag(data: []const u8, pos: *u32, tag: u8, alloc: std.mem.Al
         11 => .bytes,
         12 => .string,
         13 => .decimal,
+        14 => .null_t,
         else => return error.TypeMismatch,
     };
     return switch (col_type) {
+        .null_t => .null_t,
         .bool_t => blk: {
             const b = data[pos.*];
             pos.* += 1;

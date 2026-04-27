@@ -175,6 +175,7 @@ fn renderValue(val: ?ColumnValue, buf: *std.ArrayList(u8), alloc: std.mem.Alloca
                 try buf.print(alloc, "{d}.{d}", .{ integer_part, abs_frac });
             }
         },
+        .null_t => try buf.appendSlice(alloc, "NULL"),
     }
 }
 

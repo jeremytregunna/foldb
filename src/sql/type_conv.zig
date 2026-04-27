@@ -20,12 +20,13 @@ pub fn columnValueToPlanValue(cv: ColumnValue) plan_mod.Value {
         .string => |v| .{ .string_val = v },
         .bytes => |v| .{ .bytes_val = v },
         .decimal => |v| .{ .decimal_val = v },
+        .null_t => .null_val,
     };
 }
 
 pub fn planValueToColumnValue(v: plan_mod.Value, alloc: std.mem.Allocator) !ColumnValue {
     return switch (v) {
-        .null_val => error.TypeMismatch,
+        .null_val => error.TypeMismatch, // null → outer null via `catch null` at call sites
         .bool_val => |b| .{ .bool_t = b },
         .int_val => |n| .{ .int64 = n },
         .uint_val => |n| .{ .uint64 = n },
@@ -37,6 +38,8 @@ pub fn planValueToColumnValue(v: plan_mod.Value, alloc: std.mem.Allocator) !Colu
 }
 
 pub fn planValueToTypedColumnValue(v: plan_mod.Value, typ: ast.SqlType, alloc: std.mem.Allocator) !ColumnValue {
+    // null_val from a NULL literal can always produce null_t — callers handle NOT NULL checks.
+    if (v == .null_val) return .null_t;
     return switch (typ) {
         .bool => .{ .bool_t = v.toBool() orelse return error.TypeMismatch },
         .int8 => switch (v) {

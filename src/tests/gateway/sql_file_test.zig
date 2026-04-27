@@ -69,3 +69,7 @@ test "sql: expressions" {
 test "sql: combinations" {
     try runner.run(@embedFile("sql/combinations.sql"), testing.allocator);
 }
+
+test "sql: null" {
+    try runner.run(@embedFile("sql/null.sql"), testing.allocator);
+}

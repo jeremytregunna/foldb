@@ -23,10 +23,12 @@ pub const ColumnType = enum(u8) {
     bytes = 11,
     string = 12,
     decimal = 13,
+    /// Stored SQL NULL. Not a valid declared column type; only appears as a ColumnValue tag.
+    null_t = 14,
 
     pub fn isFixedWidth(self: ColumnType) bool {
         return switch (self) {
-            .bytes, .string => false,
+            .bytes, .string, .null_t => false,
             else => true,
         };
     }
@@ -39,7 +41,7 @@ pub const ColumnType = enum(u8) {
             .int32, .uint32 => 4,
             .int64, .uint64 => 8,
             .decimal => 17,
-            .bytes, .string => 0,
+            .bytes, .string, .null_t => 0,
         };
     }
 };
@@ -67,6 +69,8 @@ pub const ColumnValue = union(ColumnType) {
     bytes: []const u8,
     string: []const u8,
     decimal: Decimal,
+    /// Stored SQL NULL value. Distinct from a missing column (short row).
+    null_t: void,
 
     pub fn eql(self: ColumnValue, other: ColumnValue) bool {
         if (std.meta.activeTag(self) != std.meta.activeTag(other)) return false;
@@ -83,6 +87,8 @@ pub const ColumnValue = union(ColumnType) {
             .bytes => |v| std.mem.eql(u8, v, other.bytes),
             .string => |v| std.mem.eql(u8, v, other.string),
             .decimal => |v| v.coefficient == other.decimal.coefficient and v.scale == other.decimal.scale,
+            // Storage equality: null_t == null_t (pragmatic; for dedup/UNIQUE checks).
+            .null_t => true,
         };
     }
 
@@ -90,6 +96,7 @@ pub const ColumnValue = union(ColumnType) {
         return switch (self) {
             .bytes => |v| .{ .bytes = try alloc.dupe(u8, v) },
             .string => |v| .{ .string = try alloc.dupe(u8, v) },
+            .null_t => .null_t,
             else => self,
         };
     }
@@ -98,6 +105,7 @@ pub const ColumnValue = union(ColumnType) {
         switch (self) {
             .bytes => |v| alloc.free(v),
             .string => |v| alloc.free(v),
+            .null_t => {},
             else => {},
         }
     }

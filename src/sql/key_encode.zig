@@ -96,6 +96,8 @@ pub fn encodeKeyComponent(buf: *std.ArrayList(u8), v: ColumnValue, alloc: std.me
             std.mem.writeInt(i128, b[1..17], d.coefficient, .big);
             try buf.appendSlice(alloc, &b);
         },
+        // null_t as a key component: encode as a single zero byte (NULL sorts before everything).
+        .null_t => try buf.append(alloc, 0),
     }
 }
 
@@ -180,6 +182,8 @@ pub fn serializeRowKey(row: []const ?ColumnValue, alloc: std.mem.Allocator) ![]c
                     std.mem.writeInt(i128, tmp[1..17], d.coefficient, .little);
                     try buf.appendSlice(alloc, &tmp);
                 },
+                // null_t stored value: treat as absent (same as outer null).
+                .null_t => {},
             }
         } else {
             try buf.append(alloc, 0);

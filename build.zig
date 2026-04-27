@@ -1278,6 +1278,18 @@ pub fn build(b: *std.Build) void {
     const gateway_join_tests = b.addTest(.{ .root_module = gateway_join_test_module });
     const run_gateway_join_tests = b.addRunArtifact(gateway_join_tests);
 
+    // Gateway null tests
+    const gateway_null_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/gateway/null_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gateway_null_test_module.addImport("gateway.zig", gateway_module);
+    gateway_null_test_module.addImport("storage.zig", storage_module);
+    gateway_null_test_module.addImport("sequencer.zig", sequencer_module);
+    const gateway_null_tests = b.addTest(.{ .root_module = gateway_null_test_module });
+    const run_gateway_null_tests = b.addRunArtifact(gateway_null_tests);
+
     // SQL file runner tests
     const sql_file_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/gateway/sql_file_test.zig"),
@@ -1360,6 +1372,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_gateway_agg_tests.step);
     test_step.dependOn(&run_gateway_window_tests.step);
     test_step.dependOn(&run_gateway_join_tests.step);
+    test_step.dependOn(&run_gateway_null_tests.step);
     test_step.dependOn(&run_seq_epoch_tests.step);
     test_step.dependOn(&run_seq_idem_tests.step);
     test_step.dependOn(&run_seq_tests.step);

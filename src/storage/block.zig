@@ -118,6 +118,11 @@ pub const BlockWriter = struct {
             if (is_tombstone) {
                 try self.null_bits[ci].append(alloc, true);
                 try self.columns[ci].append(alloc, zeroValue(col_schema.col_type));
+            } else if (values.?[ci] == .null_t) {
+                // SQL NULL: record in null bitmap, store type-safe zero in column data
+                // so the codec can encode/decode the column without gaps.
+                try self.null_bits[ci].append(alloc, true);
+                try self.columns[ci].append(alloc, zeroValue(col_schema.col_type));
             } else {
                 try self.columns[ci].append(alloc, try values.?[ci].dupe(alloc));
                 try self.null_bits[ci].append(alloc, false);
@@ -316,6 +321,7 @@ pub const BlockReader = struct {
     }
 
     /// Decode column values for a specific row. Caller owns result.
+    /// SQL NULLs stored via the null bitmap are returned as ColumnValue.null_t.
     pub fn readRowValues(self: *const BlockReader, row_idx: u32, alloc: std.mem.Allocator) ![]ColumnValue {
         if (row_idx >= self.row_count) return error.OutOfBounds;
         const col_count = self.header.column_count;
@@ -339,6 +345,26 @@ pub const BlockReader = struct {
             out[ci] = try col_vals[row_idx].dupe(alloc);
             for (col_vals) |v| v.freeIfOwned(alloc);
         }
+
+        // Apply the null bitmap: replace stored zero values with null_t where the bit is set.
+        const null_bmp_offset = self.header.null_bmp_offset;
+        const footer_offset = self.header.footer_offset;
+        if (null_bmp_offset < footer_offset) {
+            const bits_per_col: u32 = (self.row_count + 7) / 8;
+            for (0..col_count) |ci| {
+                const byte_idx: u32 = bits_per_col * @as(u32, @intCast(ci)) + row_idx / 8;
+                const bit_idx: u3 = @intCast(row_idx % 8);
+                const byte_offset = null_bmp_offset + byte_idx;
+                if (byte_offset < self.data.len) {
+                    const is_null = (self.data[byte_offset] >> bit_idx) & 1;
+                    if (is_null != 0) {
+                        out[ci].freeIfOwned(alloc);
+                        out[ci] = .null_t;
+                    }
+                }
+            }
+        }
+
         return out;
     }
 
@@ -403,5 +429,6 @@ fn zeroValue(col_type: ColumnType) ColumnValue {
         .bytes => .{ .bytes = "" },
         .string => .{ .string = "" },
         .decimal => .{ .decimal = .{ .coefficient = 0, .scale = 0 } },
+        .null_t => .null_t,
     };
 }

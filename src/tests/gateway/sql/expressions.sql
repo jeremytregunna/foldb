@@ -84,6 +84,20 @@ CREATE TABLE t_not_null (id INT64 NOT NULL PRIMARY KEY, val INT64 NOT NULL);
 INSERT INTO t_not_null (id, val) VALUES (1, NULL);
 -- @error not-null
 
+-- IS NULL and IS NOT NULL with stored null values (INSERT NULL directly)
+CREATE TABLE t_null2 (id INT64 NOT NULL PRIMARY KEY, val INT64 NULL);
+INSERT INTO t_null2 (id, val) VALUES (1, 42);
+-- @rows 1
+INSERT INTO t_null2 (id, val) VALUES (2, NULL);
+-- @rows 1
+SELECT id FROM t_null2 WHERE val IS NULL ORDER BY id;
+-- @result
+-- @  2
+SELECT id FROM t_null2 WHERE val IS NOT NULL ORDER BY id;
+-- @result
+-- @  1
+DROP TABLE t_null2;
+
 -- String concat
 CREATE TABLE t_expr_str (id INT64 NOT NULL PRIMARY KEY, label STRING NOT NULL);
 INSERT INTO t_expr_str (id, label) VALUES (1, 'hello');

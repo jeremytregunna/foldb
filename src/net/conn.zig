@@ -780,6 +780,7 @@ fn columnValueToTypedValue(v: gateway_mod.ColumnValue) TypedValue {
         .decimal => |d| .{ .decimal = .{ .coefficient = d.coefficient, .scale = d.scale } },
         .string => |s| .{ .string = s },
         .bytes => |b| .{ .bytes = b },
+        .null_t => .null_val,
     };
 }
 

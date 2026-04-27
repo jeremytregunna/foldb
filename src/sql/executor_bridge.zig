@@ -961,13 +961,16 @@ pub const SqlExecutor = struct {
                     for (ins.column_ids, 0..) |col_id, i| {
                         const pv = try evalExpr(row[i], ctx);
                         const col = tbl.columnById(col_id) orelse return error.ColumnNotFound;
-                        // NULL literal: reject for NOT NULL columns, leave defaultValue for nullable.
+                        // NULL literal: reject for NOT NULL columns, store null_t for nullable.
                         if (pv == .null_val) {
                             if (col.nullable == .not_null) {
                                 self.setDetail("null value in column \"{s}\" violates not-null constraint", .{col.name});
                                 return error.NullViolation;
                             }
-                            continue; // leave full_values[pos] as defaultValue
+                            const pos: usize = @intCast(col_id);
+                            full_values[pos].freeIfOwned(ctx.alloc);
+                            full_values[pos] = .null_t;
+                            continue;
                         }
                         const pos: usize = @intCast(col_id);
                         full_values[pos].freeIfOwned(ctx.alloc);
@@ -1486,6 +1489,8 @@ pub const SqlExecutor = struct {
             if (is_pk) continue;
             if (i >= row_values.len) continue;
             const new_val = row_values[i];
+            // SQL: NULLs are never considered duplicates in UNIQUE constraints.
+            if (new_val == .null_t) continue;
             var it = self.storage.scan(tbl.id, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch return error.StorageReadError;
             defer it.deinit();
             while (it.next() catch return error.StorageReadError) |row| {
@@ -1728,12 +1733,13 @@ pub const SqlExecutor = struct {
         _ = self;
         _ = cols;
         // Dupe each ColumnValue so the result outlives the scan iterator.
+        // Stored null_t → outer null (same as missing column; evaluator treats both as null_val).
         const vals = try alloc.alloc(?ColumnValue, row.values.len);
         errdefer alloc.free(vals);
         var duped: usize = 0;
         errdefer for (vals[0..duped]) |v| if (v) |vv| vv.freeIfOwned(alloc) else {};
         for (row.values, 0..) |v, i| {
-            vals[i] = try v.dupe(alloc);
+            vals[i] = if (v == .null_t) null else try v.dupe(alloc);
             duped += 1;
         }
         return vals;
@@ -1804,7 +1810,7 @@ fn columnDefaultToValue(dv: schema_mod.ColumnDefault) ColumnValue {
         .float_val => |f| .{ .decimal = f },
         .string_val => |s| .{ .string = s },
         .bool_val => |b| .{ .bool_t = b },
-        .null_val => .{ .int64 = 0 }, // NULL represented as zero (no null_t in ColumnValue)
+        .null_val => .null_t,
     };
 }
 
@@ -1824,8 +1830,8 @@ fn evalConstraintExpr(
             const i: usize = @intCast(col.id);
             return i < row_values.len; // present = non-null for our purposes
         },
-        // IS NULL / IS NOT NULL: ColumnValue has no null representation; always pass.
-        .is_null => return false,
+        // IS NULL / IS NOT NULL in CHECK: pass through (NULL skips CHECK evaluation).
+        .is_null => return true,
         .is_not_null => return true,
         .binary => |b| {
             const lv = constraintExprToI128(b.left, tbl, row_values);
@@ -1876,6 +1882,7 @@ fn constraintExprToI128(
                 .uint32 => |v| @intCast(v),
                 .uint64 => |v| @intCast(v),
                 .bool_t => |v| if (v) 1 else 0,
+                .null_t => null, // NULL in CHECK expression — propagates as null
                 else => null,
             };
         },
@@ -1884,6 +1891,7 @@ fn constraintExprToI128(
 }
 
 /// Shallow equality check for ColumnValue (used for UNIQUE enforcement).
+/// null_t is never equal to anything (SQL NULL semantics for UNIQUE).
 fn columnValuesEqual(a: ColumnValue, b: ColumnValue) bool {
     return switch (a) {
         .bool_t => |v| if (b == .bool_t) v == b.bool_t else false,
@@ -1897,6 +1905,7 @@ fn columnValuesEqual(a: ColumnValue, b: ColumnValue) bool {
         .uint64 => |v| if (b == .uint64) v == b.uint64 else false,
         .string => |s| if (b == .string) std.mem.eql(u8, s, b.string) else false,
         .bytes => |s| if (b == .bytes) std.mem.eql(u8, s, b.bytes) else false,
+        .null_t => false,
         else => false,
     };
 }
