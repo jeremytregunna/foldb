@@ -28,11 +28,8 @@ pub const PartitionId = types_mod.PartitionId;
 
 pub const QueryContext = registry_mod.QueryContext;
 pub const QueryHandler = registry_mod.QueryHandler;
-pub const CrossPartitionQueryHandler = registry_mod.CrossPartitionQueryHandler;
 pub const RegisteredHandler = registry_mod.RegisteredHandler;
 pub const QueryRegistry = registry_mod.QueryRegistry;
-pub const ForeignRead = types_mod.ForeignRead;
-pub const FetchedRow = types_mod.FetchedRow;
 
 pub const LogEntry = log_mod.LogEntry;
 pub const EntryKind = log_mod.EntryKind;
@@ -130,10 +127,6 @@ pub const Executor = struct {
         try self.registry.register(hash, handler);
     }
 
-    pub fn register_cross(self: *Executor, hash: [32]u8, handler: CrossPartitionQueryHandler) !void {
-        try self.registry.register_cross(hash, handler);
-    }
-
     pub fn current_seq(self: *const Executor) Seq {
         return self.committed_seq;
     }
@@ -178,10 +171,8 @@ pub const Executor = struct {
             return .{ .abort = .{ .code = .missing_query, .detail = "unknown query hash" } };
         };
 
-        // Single-partition handlers only. Cross-partition txns must go through PartitionSet.
         const handler = switch (registered) {
             .single => |single_handler| single_handler,
-            .cross => return .{ .abort = .{ .code = .missing_query, .detail = "cross-partition txn requires PartitionSet" } },
         };
 
         const ctx = QueryContext{

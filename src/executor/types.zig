@@ -1,7 +1,6 @@
 /// Core types for the fold executor: TxnIntent wire format, ExecResult, AbortCode, ResolvedValue.
 const std = @import("std");
 const assert = std.debug.assert;
-const storage_mod = @import("storage.zig");
 
 pub const QueryHash = [32]u8;
 pub const Seq = u64;
@@ -31,19 +30,6 @@ pub const ExecResult = union(enum) {
     abort: struct { code: AbortCode, detail: []const u8 },
 };
 
-// Temporary: mirrors exchange.ForeignRead / exchange.FetchedRow.
-// Single canonical definition so all callers share the same type identity.
-// Removed together with partition_set.zig / CrossPartitionQueryHandler in Step 7.
-pub const ForeignRead = struct {
-    table_id: u32,
-    key: []const u8,
-};
-pub const FetchedRow = struct {
-    from_partition: u32,
-    table_id: u32,
-    key: []const u8,
-    row: ?storage_mod.Row,
-};
 
 // --- TxnIntent wire format ---
 //

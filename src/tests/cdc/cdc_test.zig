@@ -4,7 +4,6 @@ const testing = std.testing;
 const cdc_mod = @import("cdc.zig");
 const storage_mod = @import("storage.zig");
 const executor_mod = @import("executor.zig");
-const partition_set_mod = @import("partition_set.zig");
 const log_mod = @import("log.zig");
 
 const CdcManager = cdc_mod.CdcManager;
@@ -444,11 +443,12 @@ fn testInsertHandler(
     });
 }
 
-test "CDC: cross-partition transaction emits events on both partitions" {
+test "CDC: each partition emits CDC events independently for its own mutations" {
+    // Verifies that per-partition apply paths each fire CDC correctly.
+    // Uses two independent storages/executors rather than the removed PartitionSet coordinator.
     var mgr = try CdcManager.init(testing.allocator);
     defer mgr.deinit();
 
-    // Two storage directories for two partitions.
     const dir0 = try makeTempDir();
     defer {
         removeDirRecursive(dir0);
@@ -467,81 +467,43 @@ test "CDC: cross-partition transaction emits events on both partitions" {
     try s0.registerTable(makeSchema());
     try s1.registerTable(makeSchema());
 
-    var storages = [_]*Storage{ &s0, &s1 };
-    var ps = try partition_set_mod.PartitionSet.init(&storages, testing.allocator);
-    defer ps.deinit();
-
-    ps.with_cdc(&mgr);
-
-    // Register a cross-partition handler that inserts one row per partition.
-    const HASH_CROSS: [32]u8 = [_]u8{0xCC} ** 32;
-    try ps.register_cross_all(HASH_CROSS, .{
-        .declareReads = crossNoDeclare,
-        .execute = crossInsertExecute,
-    });
-
     const sub = try mgr.subscribe(null, 0);
 
-    // Build a TxnIntent with write_set_hint = [0, 1] (touches both partitions).
-    const intent = log_mod.TxnIntent{
-        .query_hash = HASH_CROSS,
-        .params = &.{},
-        .read_set_hint = &.{},
-        .write_set_hint = &.{ 0, 1 },
-        .resolved_nondet = &.{},
-        .client_id = 1,
-        .client_seq = 1,
-    };
-    const payload = try intent.serialize_to(testing.allocator);
-    defer testing.allocator.free(payload);
+    // Partition 0 applies an insert at seq=1.
+    {
+        const key = try testing.allocator.dupe(u8, "p0_key");
+        defer testing.allocator.free(key);
+        const vals = try testing.allocator.alloc(ColumnValue, 2);
+        defer testing.allocator.free(vals);
+        vals[0] = .{ .int64 = 0 };
+        vals[1] = .{ .int64 = 77 };
+        const muts = [_]Mutation{.{ .kind = .insert, .table_id = TABLE_ID, .key = key, .values = vals }};
+        try applyWithCdc(&mgr, &s0, &muts, 1, 0, testing.allocator);
+    }
 
-    const header = log_mod.LogEntryHeader.init(1, 0, .txn_intent, payload);
-    const entry = log_mod.LogEntry{ .header = header, .payload = payload };
-    const results = try ps.run_entry(entry);
-    defer testing.allocator.free(results);
+    // Partition 1 applies an insert at seq=1 (same txn, different partition executor).
+    {
+        const key = try testing.allocator.dupe(u8, "p1_key");
+        defer testing.allocator.free(key);
+        const vals = try testing.allocator.alloc(ColumnValue, 2);
+        defer testing.allocator.free(vals);
+        vals[0] = .{ .int64 = 1 };
+        vals[1] = .{ .int64 = 88 };
+        const muts = [_]Mutation{.{ .kind = .insert, .table_id = TABLE_ID, .key = key, .values = vals }};
+        try applyWithCdc(&mgr, &s1, &muts, 1, 0, testing.allocator);
+    }
 
-    for (results) |r| try testing.expect(r.result == .ok);
-
-    // Both partitions should have emitted a CDC event.
     var buf: [2]CdcEvent = undefined;
     const n = sub.next(&buf);
     defer for (buf[0..n]) |*e| e.deinit();
     try testing.expectEqual(@as(usize, 2), n);
 
-    // Each event should have exactly one insert effect.
     for (buf[0..n]) |ev| {
         try testing.expectEqual(@as(usize, 1), ev.effects.len);
         try testing.expectEqual(CdcOperation.insert, ev.effects[0].op);
         try testing.expect(ev.effects[0].before == null);
         try testing.expect(ev.effects[0].after != null);
     }
-}
-
-fn crossNoDeclare(
-    _: executor_mod.QueryContext,
-    _: u32,
-    _: *std.ArrayList(executor_mod.ForeignRead),
-) anyerror!void {}
-
-fn crossInsertExecute(
-    ctx: executor_mod.QueryContext,
-    local_partition: u32,
-    _: *Storage,
-    _: []const executor_mod.FetchedRow,
-    mutations: *std.ArrayList(Mutation),
-) anyerror!void {
-    const key = try std.fmt.allocPrint(ctx.alloc, "p{d}_key", .{local_partition});
-    errdefer ctx.alloc.free(key);
-    const vals = try ctx.alloc.alloc(ColumnValue, 2);
-    errdefer ctx.alloc.free(vals);
-    vals[0] = .{ .int64 = @intCast(local_partition) };
-    vals[1] = .{ .int64 = 77 };
-    try mutations.append(ctx.alloc, .{
-        .kind = .insert,
-        .table_id = TABLE_ID,
-        .key = key,
-        .values = vals,
-    });
 }
 
 test "CDC: event.kind is txn_intent" {

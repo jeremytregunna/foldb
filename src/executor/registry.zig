@@ -1,12 +1,10 @@
-/// Query registry: maps QueryHash → RegisteredHandler (single or cross-partition).
+/// Query registry: maps QueryHash → QueryHandler (single-partition).
 const std = @import("std");
 const assert = std.debug.assert;
 
-/// Maximum number of registered query handlers per registry.
 pub const handlers_max: u32 = 1024;
 const types = @import("types.zig");
 const storage_mod = @import("storage.zig");
-const types_mod = @import("types.zig");
 
 pub const QueryHash = types.QueryHash;
 pub const ResolvedValue = types.ResolvedValue;
@@ -14,8 +12,6 @@ pub const Seq = types.Seq;
 pub const PartitionId = types.PartitionId;
 pub const Storage = storage_mod.Storage;
 pub const Mutation = storage_mod.Mutation;
-pub const ForeignRead = types_mod.ForeignRead;
-pub const FetchedRow = types_mod.FetchedRow;
 
 pub const QueryContext = struct {
     params: []const u8,
@@ -33,39 +29,8 @@ pub const QueryHandler = *const fn (
     mutations: *std.ArrayList(Mutation),
 ) anyerror!void;
 
-/// Cross-partition query handler. Used when a TxnIntent's write_set_hint spans
-/// multiple partitions. Each partition's executor calls declareReads then execute.
-///
-/// Determinism contract (same as QueryHandler):
-///   - No std.time.* (use ctx.seq as logical time)
-///   - No RNG (use ctx.resolved[i])
-///   - No hash-map iteration order dependence
-///   - No float comparisons for ordering
-pub const CrossPartitionQueryHandler = struct {
-    /// Declare which rows are needed from other partitions at seq-1.
-    /// Called once per involved partition before any execution begins.
-    /// Append ForeignRead items to `out` for each foreign row needed.
-    declareReads: *const fn (
-        ctx: QueryContext,
-        local_partition: PartitionId,
-        out: *std.ArrayList(ForeignRead),
-    ) anyerror!void,
-
-    /// Execute this partition's slice of the transaction.
-    /// `foreign` contains all rows fetched from other partitions at seq-1.
-    /// Return error.ConstraintViolation to abort all partitions.
-    execute: *const fn (
-        ctx: QueryContext,
-        local_partition: PartitionId,
-        storage: *Storage,
-        foreign: []const FetchedRow,
-        mutations: *std.ArrayList(Mutation),
-    ) anyerror!void,
-};
-
 pub const RegisteredHandler = union(enum) {
     single: QueryHandler,
-    cross: CrossPartitionQueryHandler,
 };
 
 pub const QueryRegistry = struct {
@@ -87,12 +52,6 @@ pub const QueryRegistry = struct {
         assert(self.handlers.count() < handlers_max);
         if (self.handlers.count() >= handlers_max) return error.TooManyHandlers;
         try self.handlers.put(hash, .{ .single = handler });
-    }
-
-    pub fn register_cross(self: *QueryRegistry, hash: [32]u8, handler: CrossPartitionQueryHandler) !void {
-        assert(self.handlers.count() < handlers_max);
-        if (self.handlers.count() >= handlers_max) return error.TooManyHandlers;
-        try self.handlers.put(hash, .{ .cross = handler });
     }
 
     pub fn lookup(self: *const QueryRegistry, hash: [32]u8) ?RegisteredHandler {

@@ -480,26 +480,7 @@ pub fn build(b: *std.Build) void {
     const exchange_bus_tests = b.addTest(.{ .root_module = exchange_bus_test_module });
     const run_exchange_bus_tests = b.addRunArtifact(exchange_bus_tests);
 
-    // PartitionSet module (separate from executor to avoid circular imports)
-    const partition_set_module = b.createModule(.{
-        .root_source_file = b.path("src/executor/partition_set.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    partition_set_module.addImport("executor.zig", executor_module);
-
-    // Cross-partition tests (M8)
-    const cross_partition_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/executor/cross_partition_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    cross_partition_test_module.addImport("executor.zig", executor_module);
-    cross_partition_test_module.addImport("partition_set.zig", partition_set_module);
-    cross_partition_test_module.addImport("storage.zig", storage_module);
-    cross_partition_test_module.addImport("log.zig", log_module);
-    const cross_partition_tests = b.addTest(.{ .root_module = cross_partition_test_module });
-    const run_cross_partition_tests = b.addRunArtifact(cross_partition_tests);
+    // (partition_set.zig and cross_partition_test.zig removed in Step 7 cleanup)
 
     // Executor unit tests
     const executor_test_module = b.createModule(.{
@@ -1120,7 +1101,6 @@ pub fn build(b: *std.Build) void {
     cdc_test_module.addImport("cdc.zig", cdc_module);
     cdc_test_module.addImport("storage.zig", storage_module);
     cdc_test_module.addImport("executor.zig", executor_module);
-    cdc_test_module.addImport("partition_set.zig", partition_set_module);
     cdc_test_module.addImport("log.zig", log_module);
     const cdc_tests = b.addTest(.{ .root_module = cdc_test_module });
     const run_cdc_tests = b.addRunArtifact(cdc_tests);
@@ -1386,7 +1366,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_executor_tests.step);
     test_step.dependOn(&run_driver_tests.step);
     test_step.dependOn(&run_recovery_tests.step);
-    test_step.dependOn(&run_cross_partition_tests.step);
     test_step.dependOn(&run_sql_partition_tests.step);
     test_step.dependOn(&run_sql_lexer_tests.step);
     test_step.dependOn(&run_sql_parser_tests.step);
@@ -1440,7 +1419,6 @@ pub fn build(b: *std.Build) void {
     dst_step.dependOn(&run_sql_replay_tests.step);
     dst_step.dependOn(&run_log_replay_tests.step);
     dst_step.dependOn(&run_gateway_replay_tests.step);
-    dst_step.dependOn(&run_cross_partition_tests.step);
     dst_step.dependOn(&run_sim_determinism_tests.step);
     dst_step.dependOn(&run_sim_recovery_tests.step);
     dst_step.dependOn(&run_sim_disk_fault_tests.step);

@@ -8,11 +8,11 @@
 /// Zig does not expose transitive import graph at comptime, so full whitelist
 /// enforcement of function pointers is not possible today. What IS enforced:
 ///   - QueryContext exposes `resolved` (handlers must use it, not system clocks)
-///   - Exchange types are well-formed (ForeignReadRequest is accessible)
+///   - ValidatedTxnEntry remains well-formed (the executor core domain boundary)
 ///
 /// ## Documented contract (Tier 2 — code review enforced)
 ///
-/// QueryHandler and CrossPartitionQueryHandler implementations MUST NOT:
+/// QueryHandler implementations MUST NOT:
 ///   1. Call std.time.* or std.os.linux.clock_gettime  (use ctx.seq as logical time)
 ///   2. Call std.crypto.random, io.random, posix.getrandom   (use ctx.resolved[i])
 ///   3. Depend on hash-map iteration order             (sort before iterating)
@@ -24,28 +24,11 @@
 pub fn verifyExecutorModule() void {
     comptime {
         const registry = @import("registry.zig");
-        const types_check = @import("types.zig");
 
         // QueryContext must have 'resolved' so handlers can access resolved nondeterminism
         // instead of calling system clocks or RNGs.
         if (!@hasField(registry.QueryContext, "resolved")) {
             @compileError("QueryContext must expose 'resolved' field — handlers must not call system clocks");
-        }
-
-        // CrossPartitionQueryHandler must have both required function pointers.
-        if (!@hasField(registry.CrossPartitionQueryHandler, "declareReads")) {
-            @compileError("CrossPartitionQueryHandler missing declareReads");
-        }
-        if (!@hasField(registry.CrossPartitionQueryHandler, "execute")) {
-            @compileError("CrossPartitionQueryHandler missing execute");
-        }
-
-        // Exchange types must be well-formed.
-        if (!@hasField(types_check.ForeignRead, "table_id")) {
-            @compileError("ForeignRead missing table_id");
-        }
-        if (!@hasField(types_check.FetchedRow, "row")) {
-            @compileError("FetchedRow missing row");
         }
 
         // ValidatedTxnEntry must remain well-formed — it is the only type the executor
