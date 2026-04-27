@@ -450,10 +450,8 @@ pub const FoldExecutor = struct {
 
     // ---- Schema / DDL ----
 
-    /// Validate DDL against the current schema without mutating any state.
-    /// Called by Gateway before Raft submission so the client gets early error feedback.
-    /// Does not check SchemaBreakingChange — that is enforced at replay time.
-    pub fn validateDdl(self: *FoldExecutor, sql: []const u8) !void {
+    /// Validate DDL against a specific database schema without mutating any state.
+    pub fn validateDdlForDb(self: *FoldExecutor, sql: []const u8, db_id: sql_mod.DatabaseId) !void {
         assert(sql.len > 0);
         var arena = std.heap.ArenaAllocator.init(self.alloc);
         defer arena.deinit();
@@ -461,33 +459,48 @@ pub const FoldExecutor = struct {
         const parsed = try parser.parseQuery();
         if (parsed.stmts.len == 0) return;
         const stmt = parsed.stmts[0];
+        const db = if (std.ascii.startsWithIgnoreCase(std.mem.trim(u8, sql, " \t\r\n"), "create database") or
+            std.ascii.startsWithIgnoreCase(std.mem.trim(u8, sql, " \t\r\n"), "drop database"))
+            null // cluster-level DDL; validated at execution time
+        else
+            self.cluster.getDb(db_id);
         switch (stmt) {
             .create_table => |ct| {
-                if (self.defaultDb().getTable(ct.name) != null) return error.TableAlreadyExists;
+                if (db) |d| if (d.getTable(ct.name) != null) return error.TableAlreadyExists;
             },
             .drop_table => |dt| {
-                if (!dt.if_exists and self.defaultDb().getTable(dt.name) == null) return error.TableNotFound;
+                if (db) |d| if (!dt.if_exists and d.getTable(dt.name) == null) return error.TableNotFound;
             },
             .create_index => |ci| {
-                const tbl = self.defaultDb().getTable(ci.table) orelse return error.TableNotFound;
-                for (tbl.indexes) |idx| {
-                    if (std.ascii.eqlIgnoreCase(idx.name, ci.name)) return error.IndexAlreadyExists;
+                if (db) |d| {
+                    const tbl = d.getTable(ci.table) orelse return error.TableNotFound;
+                    for (tbl.indexes) |idx| {
+                        if (std.ascii.eqlIgnoreCase(idx.name, ci.name)) return error.IndexAlreadyExists;
+                    }
                 }
             },
             .alter_table => |at| {
-                const tbl = self.defaultDb().getTable(at.table) orelse return error.TableNotFound;
-                switch (at.action) {
-                    .add_column => |col| {
-                        if (tbl.columnByName(col.name) != null) return error.ColumnAlreadyExists;
-                    },
-                    .drop_column => |col_name| {
-                        if (tbl.columnByName(col_name) == null) return error.ColumnNotFound;
-                    },
+                if (db) |d| {
+                    const tbl = d.getTable(at.table) orelse return error.TableNotFound;
+                    switch (at.action) {
+                        .add_column => |col| {
+                            if (tbl.columnByName(col.name) != null) return error.ColumnAlreadyExists;
+                        },
+                        .drop_column => |col_name| {
+                            if (tbl.columnByName(col_name) == null) return error.ColumnNotFound;
+                        },
+                    }
                 }
             },
             .create_database, .drop_database => {}, // validated at execution time (Step 6)
             else => return error.TypeCheckError,
         }
+    }
+
+    /// Validate DDL against the current schema without mutating any state.
+    /// Called by Gateway before Raft submission so the client gets early error feedback.
+    pub fn validateDdl(self: *FoldExecutor, sql: []const u8) !void {
+        return self.validateDdlForDb(sql, sql_mod.default_database_id);
     }
 
     fn replayClusterDdl(self: *FoldExecutor, sql: []const u8) !void {
@@ -540,7 +553,7 @@ pub const FoldExecutor = struct {
             break :blk tbl.id;
         } else null;
 
-        try self.registry.applyDdl(stmt);
+        try self.registry.applyDdlToSchema(stmt, db_schema);
 
         // Each executor owns its own Storage and registers tables/indexes independently.
         switch (stmt) {

@@ -190,28 +190,33 @@ pub const SqlRegistry = struct {
     /// Apply DDL to the schema registry, bumping schema_seq.
     /// Validates that no registered queries would break.
     pub fn applyDdl(self: *SqlRegistry, stmt: ast.Stmt) RegistryError!void {
-        // Apply the DDL to the schema
+        return self.applyDdlToSchema(stmt, self.schema);
+    }
+
+    /// Apply DDL to a specific SchemaRegistry (may differ from self.schema for multi-db).
+    /// Bumps schema_seq and re-validates registered queries that reference the given schema.
+    pub fn applyDdlToSchema(self: *SqlRegistry, stmt: ast.Stmt, target: *schema_mod.SchemaRegistry) RegistryError!void {
         switch (stmt) {
             .create_table => |s| {
-                _ = try self.schema.createTable(s);
+                _ = try target.createTable(s);
             },
             .create_index => |s| {
-                try self.schema.createIndex(s);
+                try target.createIndex(s);
             },
             .alter_table => |s| {
                 switch (s.action) {
-                    .add_column => |col| try self.schema.addColumn(s.table, col),
-                    .drop_column => |col| try self.schema.dropColumn(s.table, col),
+                    .add_column => |col| try target.addColumn(s.table, col),
+                    .drop_column => |col| try target.dropColumn(s.table, col),
                 }
             },
             .drop_table => |s| {
-                _ = try self.schema.dropTable(s.name);
+                _ = try target.dropTable(s.name);
             },
             else => return error.TypeCheckError,
         }
         self.schema_seq += 1;
 
-        // Re-validate all registered queries against the new schema.
+        // Re-validate all registered queries against the changed schema.
         // DROP TABLE evicts broken queries; other DDL rejects if queries would break.
         const evict_broken = (stmt == .drop_table);
         var to_evict: std.ArrayList(QueryHash) = .empty;
@@ -228,7 +233,7 @@ pub const SqlRegistry = struct {
                 }
                 return error.SchemaBreakingChange;
             };
-            var checker = tc_mod.TypeChecker.init(tmp_arena.allocator(), self.schema);
+            var checker = tc_mod.TypeChecker.init(tmp_arena.allocator(), target);
             var broken = false;
             for (parsed.stmts) |s| {
                 checker.checkStmt(s, rq.param_types, true) catch {

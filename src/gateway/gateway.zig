@@ -460,7 +460,7 @@ pub const Gateway = struct {
     /// Apply a DDL statement scoped to a specific database.
     pub fn applyDdlForDb(self: *Gateway, sql: []const u8, db_id: DatabaseId) !void {
         self.error_detail_len = 0;
-        try self.fold_executors[0].validateDdl(sql);
+        try self.fold_executors[0].validateDdlForDb(sql, db_id);
         self.client_seq += 1;
         const kind: executor_mod.SchemaPayloadKind = if (isClusterDdl(sql)) .cluster else .ddl;
         const effective_db_id: DatabaseId = if (kind == .cluster) executor_mod.default_database_id else db_id;
