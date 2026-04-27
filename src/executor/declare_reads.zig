@@ -86,7 +86,8 @@ fn collectStmtTables(
             // ASSERT predicates may reference subqueries.
             try collectExprTables(a.predicate, alloc, out);
         },
-        .describe_table, .describe_transaction, .show_transactions, .drop_transaction => {},
+        .describe_table, .describe_transaction, .show_transactions, .drop_transaction,
+        .show_databases => {},
     }
 }
 

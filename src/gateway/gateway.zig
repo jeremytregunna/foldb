@@ -484,7 +484,7 @@ pub const Gateway = struct {
             plan,
             &self.partitioned,
             params,
-            &self.fold_executors[0].schema,
+            self.fold_executors[0].cluster.getDb(sql_mod.default_database_id).?,
             recon_seq,
             self.partition_count,
             self.recon_strategy,

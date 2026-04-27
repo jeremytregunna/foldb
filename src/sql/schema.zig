@@ -7,6 +7,11 @@ const assert = std.debug.assert;
 pub const TableId = u32;
 pub const IndexId = u32;
 pub const ColumnId = u16;
+pub const DatabaseId = u32;
+
+/// The well-known ID and name of the default database created at cluster initialisation.
+pub const default_database_id: DatabaseId = 1;
+pub const default_database_name: []const u8 = "default";
 
 /// Literal default value for a column. Owned by the schema allocator.
 pub const ColumnDefault = union(enum) {
@@ -370,6 +375,20 @@ pub const SchemaRegistry = struct {
         return tbl;
     }
 
+    /// Like createTable but uses a caller-supplied table_id instead of the internal counter.
+    /// Used by ClusterSchema to allocate globally-unique IDs across databases.
+    pub fn createTableWithId(self: *SchemaRegistry, stmt: ast.CreateTableStmt, table_id: TableId) SchemaError!*const TableSchema {
+        const saved = self.next_table_id;
+        self.next_table_id = table_id;
+        const result = self.createTable(stmt) catch |e| {
+            self.next_table_id = saved;
+            return e;
+        };
+        // next_table_id was incremented by createTable; restore to saved if lower.
+        if (self.next_table_id <= table_id) self.next_table_id = table_id + 1;
+        return result;
+    }
+
     /// Apply a CREATE INDEX statement.
     pub fn createIndex(self: *SchemaRegistry, stmt: ast.CreateIndexStmt) SchemaError!void {
         const tbl = self.tables.get(stmt.table) orelse return error.TableNotFound;
@@ -493,5 +512,96 @@ pub const SchemaRegistry = struct {
         self.alloc.free(tbl.name);
         self.alloc.destroy(tbl);
         return id;
+    }
+};
+
+// ─── ClusterSchema ────────────────────────────────────────────────────────────
+
+/// Cluster-wide schema: maps DatabaseId → SchemaRegistry.
+/// Owns the global TableId and IndexId counters so IDs are unique across databases.
+/// The default database (id=1, name="default") is created at init.
+pub const ClusterSchema = struct {
+    databases: std.AutoHashMap(DatabaseId, *SchemaRegistry),
+    db_names: std.StringHashMap(DatabaseId),
+    next_db_id: DatabaseId,
+    /// Global counters — shared across all databases for uniqueness.
+    next_table_id: TableId,
+    next_index_id: IndexId,
+    alloc: std.mem.Allocator,
+
+    pub fn init(alloc: std.mem.Allocator) !ClusterSchema {
+        var cs = ClusterSchema{
+            .databases = std.AutoHashMap(DatabaseId, *SchemaRegistry).init(alloc),
+            .db_names = std.StringHashMap(DatabaseId).init(alloc),
+            .next_db_id = default_database_id + 1,
+            .next_table_id = 1,
+            .next_index_id = 1,
+            .alloc = alloc,
+        };
+        errdefer cs.deinit();
+        _ = try cs.createDatabaseWithId(default_database_id, default_database_name);
+        return cs;
+    }
+
+    pub fn deinit(self: *ClusterSchema) void {
+        var it = self.databases.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.*.deinit();
+            self.alloc.destroy(entry.value_ptr.*);
+        }
+        self.databases.deinit();
+        var name_it = self.db_names.iterator();
+        while (name_it.next()) |entry| self.alloc.free(entry.key_ptr.*);
+        self.db_names.deinit();
+    }
+
+    pub fn getDb(self: *ClusterSchema, db_id: DatabaseId) ?*SchemaRegistry {
+        return self.databases.get(db_id);
+    }
+
+    pub fn getDbByName(self: *const ClusterSchema, name: []const u8) ?DatabaseId {
+        return self.db_names.get(name);
+    }
+
+    pub fn createDatabase(self: *ClusterSchema, name: []const u8) !DatabaseId {
+        const id = self.next_db_id;
+        self.next_db_id += 1;
+        return self.createDatabaseWithId(id, name);
+    }
+
+    fn createDatabaseWithId(self: *ClusterSchema, id: DatabaseId, name: []const u8) !DatabaseId {
+        if (self.db_names.contains(name)) return error.DatabaseAlreadyExists;
+        const sr = try self.alloc.create(SchemaRegistry);
+        errdefer self.alloc.destroy(sr);
+        sr.* = SchemaRegistry.init(self.alloc);
+        const name_copy = try self.alloc.dupe(u8, name);
+        errdefer self.alloc.free(name_copy);
+        try self.databases.put(id, sr);
+        errdefer _ = self.databases.remove(id);
+        try self.db_names.put(name_copy, id);
+        return id;
+    }
+
+    pub fn dropDatabase(self: *ClusterSchema, db_id: DatabaseId) error{DatabaseNotFound}!void {
+        const sr = self.databases.fetchRemove(db_id) orelse return error.DatabaseNotFound;
+        sr.value.deinit();
+        self.alloc.destroy(sr.value);
+        var it = self.db_names.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.* == db_id) {
+                const key = entry.key_ptr.*;
+                _ = self.db_names.remove(key);
+                self.alloc.free(key);
+                return;
+            }
+        }
+    }
+
+    /// Allocate a globally unique TableId and create the table in the given database.
+    pub fn createTableInDb(self: *ClusterSchema, db_id: DatabaseId, stmt: ast.CreateTableStmt) !*const TableSchema {
+        const sr = self.databases.getPtr(db_id) orelse return error.DatabaseNotFound;
+        const id = self.next_table_id;
+        self.next_table_id += 1;
+        return sr.*.createTableWithId(stmt, id);
     }
 };

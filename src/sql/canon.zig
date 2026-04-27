@@ -142,6 +142,22 @@ pub const CanonWriter = struct {
                 try self.writeByte(0x17);
                 try self.writeStr(q.hash_hex);
             },
+            .create_database => |q| {
+                try self.writeByte(0x18);
+                try self.writeStr(q.name);
+            },
+            .drop_database => |q| {
+                try self.writeByte(0x19);
+                try self.writeByte(if (q.if_exists) 1 else 0);
+                try self.writeStr(q.name);
+            },
+            .use_database => |q| {
+                try self.writeByte(0x1a);
+                try self.writeStr(q.name);
+            },
+            .show_databases => {
+                try self.writeByte(0x1b);
+            },
             .transaction => |q| {
                 try self.writeByte(0x20);
                 try self.writeTransaction(q);

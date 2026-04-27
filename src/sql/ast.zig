@@ -428,6 +428,10 @@ pub const DescribeTableStmt = struct {
     name: []const u8,
 };
 
+pub const CreateDatabaseStmt = struct { name: []const u8 };
+pub const DropDatabaseStmt = struct { name: []const u8, if_exists: bool };
+pub const UseDatabaseStmt = struct { name: []const u8 };
+
 pub const DescribeTransactionStmt = struct {
     hash_hex: []const u8, // 64-char lowercase hex string
 };
@@ -450,6 +454,10 @@ pub const Stmt = union(enum) {
     describe_transaction: DescribeTransactionStmt,
     show_transactions: void,
     drop_transaction: DropTransactionStmt,
+    create_database: CreateDatabaseStmt,
+    drop_database: DropDatabaseStmt,
+    use_database: UseDatabaseStmt,
+    show_databases: void,
     transaction: TransactionBlock,
 };
 

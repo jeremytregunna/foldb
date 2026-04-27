@@ -145,11 +145,18 @@ pub const Parser = struct {
                     return .{ .describe_table = .{ .name = name } };
                 }
                 if (t.kind == .ident and std.ascii.eqlIgnoreCase(t.text(self.src), "show")) {
-                    if (!try self.eatIdent("transactions")) {
-                        self.err_msg = "expected TRANSACTIONS after SHOW";
+                    if (try self.eatIdent("transactions")) return .{ .show_transactions = {} };
+                    if (try self.eatIdent("databases")) return .{ .show_databases = {} };
+                    self.err_msg = "expected TRANSACTIONS or DATABASES after SHOW";
+                    return error.UnexpectedToken;
+                }
+                if (t.kind == .ident and std.ascii.eqlIgnoreCase(t.text(self.src), "use")) {
+                    if (!try self.eatIdent("database")) {
+                        self.err_msg = "expected DATABASE after USE";
                         return error.UnexpectedToken;
                     }
-                    return .{ .show_transactions = {} };
+                    const name = try self.expectIdent();
+                    return .{ .use_database = .{ .name = name } };
                 }
                 self.err_pos = t.span.start;
                 self.err_msg = "unexpected statement";
@@ -687,6 +694,11 @@ pub const Parser = struct {
         if (k == .kw_table) {
             return .{ .create_table = try self.parseCreateTable() };
         }
+        if (k == .ident and std.ascii.eqlIgnoreCase((try self.peek()).text(self.src), "database")) {
+            _ = try self.advance();
+            const name = try self.expectIdent();
+            return .{ .create_database = .{ .name = name } };
+        }
         // CREATE [UNIQUE] [ORDERED|HASH|VECTOR|JSON PATH] INDEX
         var unique = false;
         if (k == .kw_unique) {
@@ -917,6 +929,14 @@ pub const Parser = struct {
         if (try self.eatIdent("transaction")) {
             const hex = try self.parseHashHex();
             return .{ .drop_transaction = .{ .hash_hex = hex } };
+        }
+        if (try self.eatIdent("database")) {
+            const if_exists = if (try self.eatIdent("if")) blk: {
+                _ = try self.expectIdent(); // "exists"
+                break :blk true;
+            } else false;
+            const name = try self.expectIdent();
+            return .{ .drop_database = .{ .name = name, .if_exists = if_exists } };
         }
         _ = try self.expect(.kw_table);
         const if_exists = if (try self.eatIdent("if")) blk: {

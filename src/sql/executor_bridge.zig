@@ -512,6 +512,7 @@ pub const SqlExecutor = struct {
             .describe_transaction => {},
             .show_transactions => {},
             .drop_transaction => {},
+            .show_databases => {},
         }
     }
 

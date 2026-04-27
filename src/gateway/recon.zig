@@ -77,7 +77,8 @@ pub fn reconnaissanceScan(
                 try scanTablePartitions(storage, mrg.target_id, at_seq, partition_count, strategy, &read_set, alloc);
                 try collectNodePartitions(mrg.source, storage, params, at_seq, partition_count, strategy, &read_set, alloc);
             },
-            .assert, .describe_table, .describe_transaction, .show_transactions, .drop_transaction => {},
+            .assert, .describe_table, .describe_transaction, .show_transactions, .drop_transaction,
+            .show_databases => {},
         }
     }
 

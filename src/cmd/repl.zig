@@ -302,6 +302,7 @@ fn classify(sql: []const u8) SqlKind {
     if (std.ascii.eqlIgnoreCase(kw, "create") or
         std.ascii.eqlIgnoreCase(kw, "drop") or
         std.ascii.eqlIgnoreCase(kw, "alter")) return .ddl;
+    if (std.ascii.eqlIgnoreCase(kw, "use")) return .ddl;
     return .unknown;
 }
 
@@ -643,8 +644,8 @@ pub fn main(init: std.process.Init) !void {
 
     var session_sql: std.StringHashMapUnmanaged([]u8) = .empty;
     defer {
-        var it = session_sql.iterator();
-        while (it.next()) |entry| {
+        var sql_it = session_sql.iterator();
+        while (sql_it.next()) |entry| {
             alloc.free(entry.key_ptr.*);
             alloc.free(entry.value_ptr.*);
         }
@@ -701,8 +702,8 @@ pub fn main(init: std.process.Init) !void {
             if (session_sql.count() == 0) {
                 try out.print("(no transactions registered this session)\n", .{});
             } else {
-                var it = session_sql.iterator();
-                while (it.next()) |entry| {
+                var hash_it = session_sql.iterator();
+                while (hash_it.next()) |entry| {
                     try out.print("{s}\n  {s}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
                 }
             }

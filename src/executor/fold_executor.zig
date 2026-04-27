@@ -24,7 +24,9 @@ pub const ExecResult = executor_bridge.ExecResult;
 pub const ResolvedValue = executor_bridge.ResolvedValue;
 
 pub const FoldExecutor = struct {
-    schema: sql_mod.SchemaRegistry,
+    /// Cluster-wide schema: all databases. DDL is applied to the database named by
+    /// each log entry's db_id (Step 2). Until Step 2, all DDL goes to default_database_id.
+    cluster: sql_mod.ClusterSchema,
     registry: sql_mod.SqlRegistry,
     sql_exec: sql_mod.SqlExecutor,
     /// Arena for storage-layer column slice allocations during DDL. Owned.
@@ -76,18 +78,30 @@ pub const FoldExecutor = struct {
         fe.cpu_id = cpu_id;
         fe.shutdown = .init(false);
         fe.thread = null;
-        fe.schema = sql_mod.SchemaRegistry.init(alloc);
-        fe.registry = sql_mod.SqlRegistry.init(alloc, &fe.schema);
-        fe.sql_exec = sql_mod.SqlExecutor.init(storage, &fe.registry, &fe.schema, alloc);
+        fe.cluster = try sql_mod.ClusterSchema.init(alloc);
+        errdefer fe.cluster.deinit();
+        const default_schema = fe.cluster.getDb(sql_mod.default_database_id).?;
+        fe.registry = sql_mod.SqlRegistry.init(alloc, default_schema);
+        fe.sql_exec = sql_mod.SqlExecutor.init(storage, &fe.registry, default_schema, alloc);
         fe.sql_exec.initCdc(cdc);
         fe.sql_exec.filter_partition = partition_id;
         fe.sql_exec.part_count = part_count;
         return fe;
     }
 
+    /// Returns the schema for the default database. Until Step 2 (log envelope),
+    /// all DDL operates on the default database.
+    fn defaultDb(self: *FoldExecutor) *sql_mod.SchemaRegistry {
+        return self.cluster.getDb(sql_mod.default_database_id).?;
+    }
+
+    fn defaultDbConst(self: *const FoldExecutor) *sql_mod.SchemaRegistry {
+        return self.cluster.databases.get(sql_mod.default_database_id).?;
+    }
+
     pub fn deinit(self: *FoldExecutor) void {
         self.registry.deinit();
-        self.schema.deinit();
+        self.cluster.deinit();
         self.storage_schema_arena.deinit();
         self.alloc.destroy(self);
     }
@@ -445,19 +459,19 @@ pub const FoldExecutor = struct {
         const stmt = parsed.stmts[0];
         switch (stmt) {
             .create_table => |ct| {
-                if (self.schema.getTable(ct.name) != null) return error.TableAlreadyExists;
+                if (self.defaultDb().getTable(ct.name) != null) return error.TableAlreadyExists;
             },
             .drop_table => |dt| {
-                if (!dt.if_exists and self.schema.getTable(dt.name) == null) return error.TableNotFound;
+                if (!dt.if_exists and self.defaultDb().getTable(dt.name) == null) return error.TableNotFound;
             },
             .create_index => |ci| {
-                const tbl = self.schema.getTable(ci.table) orelse return error.TableNotFound;
+                const tbl = self.defaultDb().getTable(ci.table) orelse return error.TableNotFound;
                 for (tbl.indexes) |idx| {
                     if (std.ascii.eqlIgnoreCase(idx.name, ci.name)) return error.IndexAlreadyExists;
                 }
             },
             .alter_table => |at| {
-                const tbl = self.schema.getTable(at.table) orelse return error.TableNotFound;
+                const tbl = self.defaultDb().getTable(at.table) orelse return error.TableNotFound;
                 switch (at.action) {
                     .add_column => |col| {
                         if (tbl.columnByName(col.name) != null) return error.ColumnAlreadyExists;
@@ -467,6 +481,7 @@ pub const FoldExecutor = struct {
                     },
                 }
             },
+            .create_database, .drop_database => {}, // validated at execution time (Step 6)
             else => return error.TypeCheckError,
         }
     }
@@ -506,7 +521,7 @@ pub const FoldExecutor = struct {
 
         const drop_table_id: ?storage_mod.TableId = if (stmt == .drop_table) blk: {
             const dt = stmt.drop_table;
-            const tbl = self.schema.getTable(dt.name) orelse {
+            const tbl = self.defaultDb().getTable(dt.name) orelse {
                 if (dt.if_exists) return;
                 break :blk null;
             };
@@ -518,7 +533,7 @@ pub const FoldExecutor = struct {
         // Each executor owns its own Storage and registers tables/indexes independently.
         switch (stmt) {
             .create_table => |ct| {
-                const tbl = self.schema.getTable(ct.name) orelse return error.TableNotFound;
+                const tbl = self.defaultDb().getTable(ct.name) orelse return error.TableNotFound;
                 try self.storage.registerTable(
                     try sqlTableToStorage(tbl, self.storage_schema_arena.allocator()),
                 );
@@ -527,7 +542,7 @@ pub const FoldExecutor = struct {
                 if (drop_table_id) |id| self.storage.unregisterTable(id);
             },
             .create_index => |ci| {
-                const tbl = self.schema.getTable(ci.table) orelse return error.TableNotFound;
+                const tbl = self.defaultDb().getTable(ci.table) orelse return error.TableNotFound;
                 if (tbl.indexes.len == 0) return;
                 const idx = tbl.indexes[tbl.indexes.len - 1];
                 const spec: storage_mod.IndexSpec = switch (idx.kind) {
@@ -611,7 +626,7 @@ pub const FoldExecutor = struct {
         const rq = self.registry.lookup(hash) orelse return false;
         for (rq.plan.stmts) |stmt| {
             switch (stmt) {
-                .select, .describe_table, .describe_transaction, .show_transactions => {},
+                .select, .describe_table, .describe_transaction, .show_transactions, .show_databases => {},
                 else => return false,
             }
         }
@@ -639,13 +654,16 @@ pub const FoldExecutor = struct {
         if (rq.plan.stmts.len > 0 and rq.plan.stmts[0] == .show_transactions) {
             return self.buildShowTransactionsResult(alloc);
         }
+        if (rq.plan.stmts.len > 0 and rq.plan.stmts[0] == .show_databases) {
+            return self.buildShowDatabasesResult(alloc);
+        }
 
         const decoded_params = try decodeParams(params, rq.param_types, alloc);
         defer alloc.free(decoded_params);
 
         // Use a temporary executor backed by the all-partitions PartitionedStorage so
         // non-transactional reads (querySelect/readAt) see data from every partition.
-        var read_exec = sql_mod.SqlExecutor.initAll(self.read_storage, &self.registry, &self.schema, alloc);
+        var read_exec = sql_mod.SqlExecutor.initAll(self.read_storage, &self.registry, self.defaultDb(), alloc);
         var rows = try read_exec.querySelect(
             rq.plan,
             decoded_params,
@@ -676,7 +694,7 @@ pub const FoldExecutor = struct {
         const decoded_params = try decodeParams(params, rq.param_types, alloc);
         defer alloc.free(decoded_params);
 
-        var read_exec = sql_mod.SqlExecutor.initAll(self.read_storage, &self.registry, &self.schema, alloc);
+        var read_exec = sql_mod.SqlExecutor.initAll(self.read_storage, &self.registry, self.defaultDb(), alloc);
         var rows = try read_exec.querySelect(rq.plan, decoded_params, &.{}, seq + 1, alloc);
         const rows_slice = try rows.toOwnedSlice(alloc);
         const columns_slice = try dupeStringSlice(rq.output_column_names, alloc);
@@ -691,12 +709,12 @@ pub const FoldExecutor = struct {
     // ---- Schema queries ----
 
     pub fn resolveTableName(self: *const FoldExecutor, name: []const u8) ?u32 {
-        const tbl = self.schema.getTable(name) orelse return null;
+        const tbl = self.defaultDbConst().getTable(name) orelse return null;
         return tbl.id;
     }
 
     pub fn tableIdExists(self: *const FoldExecutor, id: u32) bool {
-        return self.schema.getTableById(id) != null;
+        return self.defaultDbConst().getTableById(id) != null;
     }
 
     // ---- Startup replay ----
@@ -756,7 +774,7 @@ pub const FoldExecutor = struct {
 
     fn buildDescribeResult(self: *FoldExecutor, table_name: []const u8, alloc: std.mem.Allocator) !sql_mod.ResultSet {
         assert(table_name.len > 0);
-        const tbl = self.schema.getTable(table_name) orelse return error.TableNotFound;
+        const tbl = self.defaultDb().getTable(table_name) orelse return error.TableNotFound;
         assert(tbl.columns.len <= std.math.maxInt(u32));
 
         const col_names = [_][]const u8{ "column", "type", "nullable", "primary_key" };
@@ -790,6 +808,36 @@ pub const FoldExecutor = struct {
             built += 1;
         }
         return sql_mod.ResultSet{ .columns = columns, .rows = rows, .alloc = alloc };
+    }
+
+    fn buildShowDatabasesResult(self: *FoldExecutor, alloc: std.mem.Allocator) !sql_mod.ResultSet {
+        const columns = try alloc.alloc([]const u8, 2);
+        columns[0] = try alloc.dupe(u8, "id");
+        columns[1] = try alloc.dupe(u8, "name");
+
+        var rows_list: std.ArrayList([]const ?storage_mod.ColumnValue) = .empty;
+        errdefer {
+            for (rows_list.items) |r| {
+                for (r) |v| if (v) |cv| cv.freeIfOwned(alloc);
+                alloc.free(r);
+            }
+            rows_list.deinit(alloc);
+        }
+
+        var it = self.cluster.db_names.iterator();
+        while (it.next()) |entry| {
+            const db_id = entry.value_ptr.*;
+            const row = try alloc.alloc(?storage_mod.ColumnValue, 2);
+            row[0] = .{ .int64 = @intCast(db_id) };
+            row[1] = .{ .string = try alloc.dupe(u8, entry.key_ptr.*) };
+            try rows_list.append(alloc, row);
+        }
+
+        return sql_mod.ResultSet{
+            .columns = columns,
+            .rows = try rows_list.toOwnedSlice(alloc),
+            .alloc = alloc,
+        };
     }
 
     fn buildDescribeTransactionResult(self: *FoldExecutor, hash_hex: []const u8, alloc: std.mem.Allocator) !sql_mod.ResultSet {

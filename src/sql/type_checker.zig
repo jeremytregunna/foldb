@@ -72,6 +72,10 @@ pub const TypeChecker = struct {
             .describe_transaction => {},
             .show_transactions => {},
             .drop_transaction => {},
+            .create_database => {},
+            .drop_database => {},
+            .use_database => {},
+            .show_databases => {},
             .transaction => |q| try self.checkTransaction(q),
         }
     }
