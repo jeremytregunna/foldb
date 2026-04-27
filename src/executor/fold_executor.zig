@@ -504,9 +504,29 @@ pub const FoldExecutor = struct {
     }
 
     fn replayClusterDdl(self: *FoldExecutor, sql: []const u8) !void {
-        // Step 6: implement CREATE DATABASE / DROP DATABASE here.
-        _ = self;
-        _ = sql;
+        var arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena.deinit();
+        var parser = sql_mod.parser.Parser.init(sql, arena.allocator());
+        const parsed = parser.parseQuery() catch return;
+        if (parsed.stmts.len == 0) return;
+        switch (parsed.stmts[0]) {
+            .create_database => |cd| {
+                _ = self.cluster.createDatabase(cd.name) catch |e| switch (e) {
+                    error.DatabaseAlreadyExists => {}, // idempotent replay
+                    else => return e,
+                };
+            },
+            .drop_database => |dd| {
+                const db_id = self.cluster.getDbByName(dd.name) orelse {
+                    if (dd.if_exists) return;
+                    return error.DatabaseNotFound;
+                };
+                self.cluster.dropDatabase(db_id) catch |e| switch (e) {
+                    error.DatabaseNotFound => if (!dd.if_exists) return e,
+                };
+            },
+            else => {},
+        }
     }
 
     fn replayDdl(self: *FoldExecutor, db_id: sql_mod.DatabaseId, sql: []const u8) !void {
