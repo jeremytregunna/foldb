@@ -520,14 +520,14 @@ test "CDC: cross-partition transaction emits events on both partitions" {
 fn crossNoDeclare(
     _: executor_mod.QueryContext,
     _: u32,
-    _: *std.ArrayList(executor_mod.ForeignReadRequest),
+    _: *std.ArrayList(executor_mod.ForeignRead),
 ) anyerror!void {}
 
 fn crossInsertExecute(
     ctx: executor_mod.QueryContext,
     local_partition: u32,
     _: *Storage,
-    _: []const executor_mod.ForeignRow,
+    _: []const executor_mod.FetchedRow,
     mutations: *std.ArrayList(Mutation),
 ) anyerror!void {
     const key = try std.fmt.allocPrint(ctx.alloc, "p{d}_key", .{local_partition});

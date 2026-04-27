@@ -41,11 +41,11 @@ pub fn verifyExecutorModule() void {
         }
 
         // Exchange types must be well-formed.
-        if (!@hasField(exchange.ForeignReadRequest, "from_partition")) {
-            @compileError("ForeignReadRequest missing from_partition");
+        if (!@hasField(exchange.ForeignRead, "table_id")) {
+            @compileError("ForeignRead missing table_id");
         }
-        if (!@hasField(exchange.ForeignRow, "row")) {
-            @compileError("ForeignRow missing row");
+        if (!@hasField(exchange.FetchedRow, "row")) {
+            @compileError("FetchedRow missing row");
         }
 
         // ValidatedTxnEntry must remain well-formed — it is the only type the executor

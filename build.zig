@@ -454,6 +454,24 @@ pub fn build(b: *std.Build) void {
     const recovery_tests = b.addTest(.{ .root_module = recovery_test_module });
     const run_recovery_tests = b.addRunArtifact(recovery_tests);
 
+    // ExchangeBus module (exchange.zig resolved as relative file; needs storage.zig named import)
+    const exchange_bus_module = b.createModule(.{
+        .root_source_file = b.path("src/executor/exchange_bus.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exchange_bus_module.addImport("storage.zig", storage_module);
+
+    // ExchangeBus unit tests
+    const exchange_bus_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/executor/exchange_bus_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exchange_bus_test_module.addImport("exchange_bus.zig", exchange_bus_module);
+    const exchange_bus_tests = b.addTest(.{ .root_module = exchange_bus_test_module });
+    const run_exchange_bus_tests = b.addRunArtifact(exchange_bus_tests);
+
     // PartitionSet module (separate from executor to avoid circular imports)
     const partition_set_module = b.createModule(.{
         .root_source_file = b.path("src/executor/partition_set.zig"),
@@ -1351,6 +1369,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_json_path_tests.step);
     test_step.dependOn(&run_json_index_tests.step);
     test_step.dependOn(&run_hnsw_tests.step);
+    test_step.dependOn(&run_exchange_bus_tests.step);
     test_step.dependOn(&run_executor_tests.step);
     test_step.dependOn(&run_driver_tests.step);
     test_step.dependOn(&run_recovery_tests.step);

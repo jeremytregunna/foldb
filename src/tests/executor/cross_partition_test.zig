@@ -14,8 +14,8 @@ const storage_mod = @import("storage.zig");
 const PartitionSet = partition_set_mod.PartitionSet;
 const CrossPartitionQueryHandler = executor_mod.CrossPartitionQueryHandler;
 const QueryContext = executor_mod.QueryContext;
-const ForeignReadRequest = executor_mod.ForeignReadRequest;
-const ForeignRow = executor_mod.ForeignRow;
+const ForeignRead = executor_mod.ForeignRead;
+const FetchedRow = executor_mod.FetchedRow;
 const Storage = executor_mod.Storage;
 const Mutation = executor_mod.Mutation;
 const AbortCode = executor_mod.AbortCode;
@@ -166,12 +166,11 @@ fn handlerSetup(ctx: QueryContext, _: *Storage, mutations: *std.ArrayList(Mutati
 //   declareReads: request sender row from partition 0
 //   execute: read sender balance from foreign_rows, check >= amount, credit receiver
 
-fn transferDeclareReads(ctx: QueryContext, local_partition: u32, out: *std.ArrayList(ForeignReadRequest)) !void {
+fn transferDeclareReads(ctx: QueryContext, local_partition: u32, out: *std.ArrayList(ForeignRead)) !void {
     if (local_partition != 1) return; // only receiver partition needs a foreign read
     const p = try decodeTransferParams(ctx.params);
     const sender_key_copy = try ctx.alloc.dupe(u8, p.sender_key);
     try out.append(ctx.alloc, .{
-        .from_partition = 0,
         .table_id = ACCOUNTS_TABLE,
         .key = sender_key_copy,
     });
@@ -181,7 +180,7 @@ fn transferExecute(
     ctx: QueryContext,
     local_partition: u32,
     storage: *Storage,
-    foreign: []const ForeignRow,
+    foreign: []const FetchedRow,
     mutations: *std.ArrayList(Mutation),
 ) !void {
     const p = try decodeTransferParams(ctx.params);
@@ -719,10 +718,10 @@ test "PartitionSet: non-ConstraintViolation error in Phase C propagates" {
     const HASH_BOOM: [32]u8 = [_]u8{0x30} ++ [_]u8{0} ** 31;
     const boom_handler = CrossPartitionQueryHandler{
         .declareReads = struct {
-            fn f(_: QueryContext, _: u32, _: *std.ArrayList(ForeignReadRequest)) !void {}
+            fn f(_: QueryContext, _: u32, _: *std.ArrayList(ForeignRead)) !void {}
         }.f,
         .execute = struct {
-            fn f(_: QueryContext, _: u32, _: *Storage, _: []const ForeignRow, _: *std.ArrayList(Mutation)) !void {
+            fn f(_: QueryContext, _: u32, _: *Storage, _: []const FetchedRow, _: *std.ArrayList(Mutation)) !void {
                 return error.DiskQuotaExceeded;
             }
         }.f,
@@ -800,19 +799,19 @@ test "PartitionSet: write_set_hint empty defaults to partition 0" {
 
 // --- Three-partition test ---
 
-fn transfer3DeclareReads(ctx: QueryContext, local_partition: u32, out: *std.ArrayList(ForeignReadRequest)) !void {
+fn transfer3DeclareReads(ctx: QueryContext, local_partition: u32, out: *std.ArrayList(ForeignRead)) !void {
     // Partition 2 (final receiver) needs to verify sender balance via partition 0
     if (local_partition != 2) return;
     const p = try decodeTransferParams(ctx.params);
     const key = try ctx.alloc.dupe(u8, p.sender_key);
-    try out.append(ctx.alloc, .{ .from_partition = 0, .table_id = ACCOUNTS_TABLE, .key = key });
+    try out.append(ctx.alloc, .{ .table_id = ACCOUNTS_TABLE, .key = key });
 }
 
 fn transfer3Execute(
     ctx: QueryContext,
     local_partition: u32,
     storage: *Storage,
-    foreign: []const ForeignRow,
+    foreign: []const FetchedRow,
     mutations: *std.ArrayList(Mutation),
 ) !void {
     const p = try decodeTransferParams(ctx.params);

@@ -32,8 +32,8 @@ pub const QueryHandler = registry_mod.QueryHandler;
 pub const CrossPartitionQueryHandler = registry_mod.CrossPartitionQueryHandler;
 pub const RegisteredHandler = registry_mod.RegisteredHandler;
 pub const QueryRegistry = registry_mod.QueryRegistry;
-pub const ForeignReadRequest = exchange_mod.ForeignReadRequest;
-pub const ForeignRow = exchange_mod.ForeignRow;
+pub const ForeignRead = exchange_mod.ForeignRead;
+pub const FetchedRow = exchange_mod.FetchedRow;
 
 pub const LogEntry = log_mod.LogEntry;
 pub const EntryKind = log_mod.EntryKind;

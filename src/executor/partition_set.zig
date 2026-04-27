@@ -27,8 +27,8 @@ const ColumnValue = executor_mod.ColumnValue;
 const Row = executor_mod.Row;
 const LogEntry = executor_mod.LogEntry;
 const QueryContext = executor_mod.QueryContext;
-const ForeignReadRequest = executor_mod.ForeignReadRequest;
-const ForeignRow = executor_mod.ForeignRow;
+const ForeignRead = executor_mod.ForeignRead;
+const FetchedRow = executor_mod.FetchedRow;
 const PartitionId = executor_mod.PartitionId;
 const Seq = executor_mod.Seq;
 const deserialize_txn_intent = executor_mod.deserialize_txn_intent;
@@ -144,7 +144,7 @@ pub const PartitionSet = struct {
         };
 
         // Phase A: each partition declares which foreign rows it needs at seq-1.
-        var all_requests: std.ArrayList(ForeignReadRequest) = .empty;
+        var all_requests: std.ArrayList(ForeignRead) = .empty;
         defer {
             for (all_requests.items) |request| self.alloc.free(request.key);
             all_requests.deinit(self.alloc);
@@ -152,7 +152,7 @@ pub const PartitionSet = struct {
         if (try self.run_cross_partition_declare(ctx, partitions, decoded, &all_requests)) |abort| return abort;
 
         // Phase B: fetch requested rows from their source partitions at seq-1.
-        var foreign_rows: std.ArrayList(ForeignRow) = .empty;
+        var foreign_rows: std.ArrayList(FetchedRow) = .empty;
         defer {
             for (foreign_rows.items) |*foreign_row| {
                 if (foreign_row.row) |*row| row.deinit(self.alloc);
@@ -183,7 +183,7 @@ pub const PartitionSet = struct {
         ctx: QueryContext,
         partitions: []const PartitionId,
         decoded: *const TxnIntentDecoded,
-        out: *std.ArrayList(ForeignReadRequest),
+        out: *std.ArrayList(ForeignRead),
     ) !?[]PartitionExecResult {
         assert(partitions.len > 1);
         for (partitions) |partition_id| {
@@ -205,26 +205,29 @@ pub const PartitionSet = struct {
     fn run_cross_partition_fetch(
         self: *PartitionSet,
         seq: Seq,
-        requests: []const ForeignReadRequest,
-        out: *std.ArrayList(ForeignRow),
+        requests: []const ForeignRead,
+        out: *std.ArrayList(FetchedRow),
     ) !void {
         const read_seq: Seq = if (seq > 0) seq - 1 else 0;
         for (requests) |request| {
-            const source_index: usize = @intCast(request.from_partition);
-            if (source_index >= self.executors.len) continue;
-            const row_opt = try self.executors[source_index].storage.get(request.table_id, request.key, read_seq);
-            const storage_alloc = self.executors[source_index].storage.alloc;
-            const cloned = if (row_opt) |row| blk: {
-                var original = row;
-                defer original.deinit(storage_alloc);
-                break :blk try clone_row(row, self.alloc);
-            } else null;
-            try out.append(self.alloc, .{
-                .from_partition = request.from_partition,
-                .table_id = request.table_id,
-                .key = request.key,
-                .row = cloned,
-            });
+            // Scan all executors; the one that owns the key returns a row.
+            for (self.executors, 0..) |*exec, source_index| {
+                const row_opt = exec.storage.get(request.table_id, request.key, read_seq) catch continue;
+                if (row_opt == null and source_index + 1 < self.executors.len) continue;
+                const storage_alloc = exec.storage.alloc;
+                const cloned = if (row_opt) |row| blk: {
+                    var original = row;
+                    defer original.deinit(storage_alloc);
+                    break :blk try clone_row(row, self.alloc);
+                } else null;
+                try out.append(self.alloc, .{
+                    .from_partition = @intCast(source_index),
+                    .table_id = request.table_id,
+                    .key = request.key,
+                    .row = cloned,
+                });
+                break;
+            }
         }
     }
 
@@ -233,7 +236,7 @@ pub const PartitionSet = struct {
         ctx: QueryContext,
         partitions: []const PartitionId,
         decoded: *const TxnIntentDecoded,
-        foreign_rows: []const ForeignRow,
+        foreign_rows: []const FetchedRow,
         mut_arrays: []std.ArrayList(Mutation),
     ) !?[]PartitionExecResult {
         assert(partitions.len == mut_arrays.len);

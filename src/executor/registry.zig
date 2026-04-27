@@ -14,8 +14,8 @@ pub const Seq = types.Seq;
 pub const PartitionId = types.PartitionId;
 pub const Storage = storage_mod.Storage;
 pub const Mutation = storage_mod.Mutation;
-pub const ForeignReadRequest = exchange.ForeignReadRequest;
-pub const ForeignRow = exchange.ForeignRow;
+pub const ForeignRead = exchange.ForeignRead;
+pub const FetchedRow = exchange.FetchedRow;
 
 pub const QueryContext = struct {
     params: []const u8,
@@ -44,21 +44,21 @@ pub const QueryHandler = *const fn (
 pub const CrossPartitionQueryHandler = struct {
     /// Declare which rows are needed from other partitions at seq-1.
     /// Called once per involved partition before any execution begins.
-    /// Append ForeignReadRequest items to `out` for each foreign row needed.
+    /// Append ForeignRead items to `out` for each foreign row needed.
     declareReads: *const fn (
         ctx: QueryContext,
         local_partition: PartitionId,
-        out: *std.ArrayList(ForeignReadRequest),
+        out: *std.ArrayList(ForeignRead),
     ) anyerror!void,
 
     /// Execute this partition's slice of the transaction.
-    /// `foreign` contains all rows collected from other partitions at seq-1.
+    /// `foreign` contains all rows fetched from other partitions at seq-1.
     /// Return error.ConstraintViolation to abort all partitions.
     execute: *const fn (
         ctx: QueryContext,
         local_partition: PartitionId,
         storage: *Storage,
-        foreign: []const ForeignRow,
+        foreign: []const FetchedRow,
         mutations: *std.ArrayList(Mutation),
     ) anyerror!void,
 };
