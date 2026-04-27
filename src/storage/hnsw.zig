@@ -22,6 +22,7 @@ const Node = struct {
     vec: []f32,
     seq: Seq,
     deleted: bool,
+    deleted_seq: Seq, // seq at which this node was deleted; maxInt(Seq) when live
     // neighbors[l] = neighbor node IDs at layer l. Layer 0 = base layer.
     layers: []std.ArrayListUnmanaged(u32),
 
@@ -85,6 +86,7 @@ pub const HnswIndex = struct {
             .vec = vec_copy,
             .seq = seq,
             .deleted = false,
+            .deleted_seq = std.math.maxInt(Seq),
             .layers = layers,
         });
 
@@ -132,15 +134,25 @@ pub const HnswIndex = struct {
         }
     }
 
-    /// Mark a node deleted by pk. Returns true if found.
-    pub fn markDeleted(self: *HnswIndex, pk: []const u8) bool {
+    /// Mark a node deleted by pk at the given seq. Returns true if found.
+    pub fn markDeleted(self: *HnswIndex, pk: []const u8, seq: Seq) bool {
         for (self.nodes.items) |*node| {
             if (std.mem.eql(u8, node.pk, pk)) {
                 node.deleted = true;
+                node.deleted_seq = seq;
                 return true;
             }
         }
         return false;
+    }
+
+    /// Remove all nodes and reset the graph. Used when the index must be rebuilt
+    /// from scratch after a partial-failure inconsistency.
+    pub fn clear(self: *HnswIndex) void {
+        for (self.nodes.items) |*node| node.deinit(self.alloc);
+        self.nodes.clearRetainingCapacity();
+        self.entry_point = null;
+        self.max_level = 0;
     }
 
     /// Rebuild the graph, removing tombstoned nodes and remapping neighbor indices.
@@ -233,7 +245,7 @@ pub const HnswIndex = struct {
         for (candidates) |c| {
             if (results.items.len >= k) break;
             const node = &self.nodes.items[c.id];
-            if (node.deleted) continue;
+            if (node.deleted and node.deleted_seq <= at_seq) continue;
             if (node.seq > at_seq) continue;
             try results.append(alloc, Match{
                 .pk = try alloc.dupe(u8, node.pk),

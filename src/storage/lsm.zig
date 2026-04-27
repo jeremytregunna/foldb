@@ -99,6 +99,21 @@ pub const LSM = struct {
         if (self.cache_dir) |cd| self.alloc.free(cd);
     }
 
+    /// Delete all on-disk SSTables and reset in-memory state. Used when an
+    /// index LSM must be rebuilt from scratch after a partial-failure inconsistency.
+    pub fn reset(self: *LSM) void {
+        self.memtable.deinit(self.alloc);
+        self.memtable = Memtable.init(self.schema, self.alloc);
+        for (&self.levels) |*level| {
+            for (level.files.items) |*meta| {
+                deleteFile(meta.path);
+                meta.deinit(self.alloc);
+            }
+            level.files.clearRetainingCapacity();
+        }
+        self.next_file_id = 0;
+    }
+
     pub fn withObjectStore(self: *LSM, store: ObjectStore, cache_dir: []const u8) !void {
         assert(cache_dir.len > 0);
         self.object_store = store;
@@ -218,11 +233,22 @@ pub const LSM = struct {
 
         try self.scanCollectMemtable(range, at_seq, &all_entries, alloc);
 
-        // 2. All SSTable levels (skip remote-only L3 files).
+        // 2. All SSTable levels; fetch remote-only files on demand.
         for (&self.levels) |*level| {
             for (level.files.items) |*meta| {
-                if (!fileExists(meta.path)) continue;
-                try self.collectRangeFromFile(meta, range, at_seq, &all_entries, alloc);
+                if (at_seq < meta.seq_min) continue;
+                if (fileExists(meta.path)) {
+                    try self.collectRangeFromFile(meta, range, at_seq, &all_entries, alloc);
+                    continue;
+                }
+                // File not present locally — fetch from object store if available.
+                const store = self.object_store orelse continue;
+                const rk = meta.remote_key orelse continue;
+                const local_path = self.ensureCached(store, rk, meta.path) catch continue;
+                defer if (!std.mem.eql(u8, local_path, meta.path)) self.alloc.free(local_path);
+                var fetched_meta = meta.*;
+                fetched_meta.path = local_path;
+                try self.collectRangeFromFile(&fetched_meta, range, at_seq, &all_entries, alloc);
             }
         }
 
@@ -419,6 +445,22 @@ pub const LSM = struct {
             all_entries.deinit(self.alloc);
         }
 
+        // Merge existing L3 files so L3 stays a single consolidated file.
+        // Without this, successive compaction cycles accumulate overlapping L3 files and
+        // findFileForKey (binary search) returns only the newest, hiding keys that were
+        // last written in an older cycle.
+        for (self.levels[3].files.items) |*meta| {
+            if (fileExists(meta.path)) {
+                try self.collectFromFile(meta, &all_entries);
+            } else if (meta.remote_key) |rk| {
+                const local_path = try self.ensureCached(store, rk, meta.path);
+                defer if (!std.mem.eql(u8, local_path, meta.path)) self.alloc.free(local_path);
+                var local_meta = meta.*;
+                local_meta.path = local_path;
+                try self.collectFromFile(&local_meta, &all_entries);
+            }
+        }
+
         for (self.levels[2].files.items) |*meta| {
             try self.collectFromFile(meta, &all_entries);
         }
@@ -432,6 +474,14 @@ pub const LSM = struct {
             defer reader.deinit();
             var m = try reader.meta(path, self.alloc);
             try self.compactL2toL3Upload(store, path, &m);
+
+            // Replace old L3 files with the new consolidated one.
+            for (self.levels[3].files.items) |*old| {
+                deleteFile(old.path);
+                if (old.remote_key) |rk| store.delete(rk) catch {};
+                old.deinit(self.alloc);
+            }
+            self.levels[3].files.clearRetainingCapacity();
             try self.levels[3].files.append(self.alloc, m);
         }
 

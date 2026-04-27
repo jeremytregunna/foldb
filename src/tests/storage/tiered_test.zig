@@ -135,6 +135,177 @@ test "tiered_write_and_read" {
     }
 }
 
+test "get finds key after second L2-to-L3 compaction cycle" {
+    // Regression: without L3 consolidation, a key written only in cycle 1 becomes
+    // invisible to get() after cycle 2 because findFileForKey returns only the
+    // newest L3 file, which doesn't contain keys not updated in cycle 2.
+    const alloc = testing.allocator;
+
+    const dir = try makeTempDir(alloc, "tiered_l3_regression");
+    defer alloc.free(dir);
+    defer cleanDir(dir);
+
+    const cache_dir = try std.fmt.allocPrint(alloc, "{s}/cache", .{dir});
+    defer alloc.free(cache_dir);
+
+    const schema = makeSchema();
+    var lsm = try LSM.init(schema, dir, alloc);
+    defer lsm.deinit();
+
+    var obj_store = MemoryObjectStore.init(alloc);
+    defer obj_store.deinit();
+
+    try lsm.withObjectStore(obj_store.objectStore(), cache_dir);
+
+    // Cycle 1: write key_stable (never updated again) and key_updated.
+    // 44 single-row flushes drives 11 L0→L1 compactions; maybeCompact() then
+    // triggers L1→L2. Five cycles fills L2 to >4 files so maybeCompact() fires
+    // L2→L3 on the 5th call, producing L3 file #1 containing both keys.
+    const ROWS_PER_CYCLE = 44;
+    var seq: u64 = 1;
+
+    // Cycle 1: write both keys among 44 rows.
+    var i: usize = 0;
+    while (i < ROWS_PER_CYCLE) : (i += 1) {
+        const key = try std.fmt.allocPrint(alloc, "key_{d:06}", .{i});
+        defer alloc.free(key);
+        try insertRow(&lsm, key, @intCast(i), seq);
+        seq += 1;
+        try lsm.flushMemtable();
+    }
+    try lsm.maybeCompact(); // L0→L1, L1 has 11 files → L1→L2; L2 has 1 file
+
+    // Cycles 2–4: write 44 new rows each cycle, accumulating L2 to 4 files.
+    var cycle: usize = 1;
+    while (cycle < 4) : (cycle += 1) {
+        i = 0;
+        while (i < ROWS_PER_CYCLE) : (i += 1) {
+            const key = try std.fmt.allocPrint(alloc, "key_{d:06}", .{cycle * ROWS_PER_CYCLE + i});
+            defer alloc.free(key);
+            try insertRow(&lsm, key, @intCast(i), seq);
+            seq += 1;
+            try lsm.flushMemtable();
+        }
+        try lsm.maybeCompact();
+    }
+
+    // Cycle 5: write only NEW keys (not key_000000). This triggers L2→L3 (L3 file #1).
+    i = 0;
+    while (i < ROWS_PER_CYCLE) : (i += 1) {
+        const key = try std.fmt.allocPrint(alloc, "key_{d:06}", .{4 * ROWS_PER_CYCLE + i});
+        defer alloc.free(key);
+        try insertRow(&lsm, key, @intCast(i), seq);
+        seq += 1;
+        try lsm.flushMemtable();
+    }
+    try lsm.maybeCompact(); // produces L3 file #1, L2 cleared
+
+    // Verify L3 file #1 exists and key_000000 is readable.
+    try testing.expect(lsm.levels[3].files.items.len == 1);
+    {
+        const row = try lsm.get("key_000000", std.math.maxInt(u64));
+        try testing.expect(row != null);
+        if (row) |r| {
+            var mr = r;
+            mr.deinit(alloc);
+        }
+    }
+
+    // Second L2→L3 cycle: write 5*44 more new keys (not key_000000), producing L3 file #2.
+    cycle = 0;
+    while (cycle < 5) : (cycle += 1) {
+        i = 0;
+        while (i < ROWS_PER_CYCLE) : (i += 1) {
+            const key = try std.fmt.allocPrint(alloc, "new_{d:06}", .{cycle * ROWS_PER_CYCLE + i});
+            defer alloc.free(key);
+            try insertRow(&lsm, key, @intCast(i), seq);
+            seq += 1;
+            try lsm.flushMemtable();
+        }
+        try lsm.maybeCompact();
+    }
+
+    // L3 must stay consolidated at exactly one file.
+    try testing.expect(lsm.levels[3].files.items.len == 1);
+
+    // key_000000 was NOT updated in cycle 2; it must still be readable.
+    const row = try lsm.get("key_000000", std.math.maxInt(u64));
+    try testing.expect(row != null);
+    if (row) |r| {
+        var mr = r;
+        mr.deinit(alloc);
+    }
+}
+
+test "scan returns rows from remote-only L3 files" {
+    const alloc = testing.allocator;
+
+    const dir = try makeTempDir(alloc, "tiered_scan_test");
+    defer alloc.free(dir);
+    defer cleanDir(dir);
+
+    const cache_dir = try std.fmt.allocPrint(alloc, "{s}/cache", .{dir});
+    defer alloc.free(cache_dir);
+
+    const schema = makeSchema();
+    var lsm = try LSM.init(schema, dir, alloc);
+    defer lsm.deinit();
+
+    var obj_store = MemoryObjectStore.init(alloc);
+    defer obj_store.deinit();
+
+    try lsm.withObjectStore(obj_store.objectStore(), cache_dir);
+
+    // Drive the full compaction cascade to L3.
+    //
+    // Thresholds: L0→L1 at 4 L0 files, L1→L2 at >10 L1 files, L2→L3 at >4 L2 files.
+    // Each cycle: 44 one-row flushes accumulate 10 L0 files before the final flush reaches
+    // 4 again; maybeCompact() then runs L0→L1 (→L1 hits 11), L1→L2 (→L2 grows by 1).
+    // After 5 cycles L2 has 5 files; the 5th maybeCompact() also fires L2→L3.
+    const CYCLES = 5;
+    const ROWS_PER_CYCLE = 44;
+    var seq: u64 = 1;
+    var cycle: usize = 0;
+    while (cycle < CYCLES) : (cycle += 1) {
+        var i: usize = 0;
+        while (i < ROWS_PER_CYCLE) : (i += 1) {
+            const key = try std.fmt.allocPrint(alloc, "key_{d:06}", .{cycle * ROWS_PER_CYCLE + i});
+            defer alloc.free(key);
+            try insertRow(&lsm, key, @intCast(i), seq);
+            seq += 1;
+            try lsm.flushMemtable();
+        }
+        try lsm.maybeCompact();
+    }
+
+    // Verify that L3 was actually populated (sanity guard).
+    var l3_remote_count: usize = 0;
+    for (lsm.levels[3].files.items) |meta| {
+        if (meta.remote_key != null) l3_remote_count += 1;
+    }
+    try testing.expect(l3_remote_count > 0);
+
+    // Delete local L3 files — only the remote copies in the object store remain.
+    for (lsm.levels[3].files.items) |*meta| {
+        if (meta.remote_key == null) continue;
+        const null_path = try alloc.allocSentinel(u8, meta.path.len, 0);
+        defer alloc.free(null_path);
+        @memcpy(null_path[0..meta.path.len], meta.path);
+        _ = std.os.linux.unlink(null_path.ptr);
+    }
+
+    // Scan must return all rows by fetching from the object store.
+    const rows = try lsm.scan(storage.KeyRange.all(), std.math.maxInt(u64), alloc);
+    defer {
+        for (rows) |*r| {
+            var mr = r.*;
+            mr.deinit(alloc);
+        }
+        alloc.free(rows);
+    }
+    try testing.expect(rows.len == CYCLES * ROWS_PER_CYCLE);
+}
+
 test "snapshot_round_trip" {
     const alloc = testing.allocator;
 

@@ -458,7 +458,24 @@ pub const Storage = struct {
         }
 
         if (self.indexes.count() > 0) {
-            try self.applyIndexMaintenance(mutations, pre_images, at_seq);
+            self.applyIndexMaintenance(mutations, pre_images, at_seq) catch |err| {
+                // Base-table mutations are already written. Rebuild all indexes from
+                // the current base-table state to restore consistency. If rebuild also
+                // fails, the original error propagates — log replay on restart will
+                // fully restore consistency.
+                var idx_it = self.indexes.iterator();
+                while (idx_it.next()) |kv| {
+                    switch (kv.value_ptr.*) {
+                        .json => |*j| j.clear(),
+                        .vector => |*v| v.clear(),
+                    }
+                }
+                var refill_it = self.indexes.iterator();
+                while (refill_it.next()) |kv| {
+                    self.backfillIndex(kv.key_ptr.*, kv.value_ptr.tableId()) catch {};
+                }
+                return err;
+            };
         }
 
         if (self.snapshot_policy) |*policy| {
@@ -654,9 +671,9 @@ fn maintainEntry(
                 std.debug.assert(vec.len == vidx.dim);
                 try vidx.insert(vec, row_key, at_seq);
             },
-            .delete => _ = vidx.markDeleted(row_key),
+            .delete => _ = vidx.markDeleted(row_key, at_seq),
             .update => |upd| {
-                _ = vidx.markDeleted(row_key);
+                _ = vidx.markDeleted(row_key, at_seq);
                 if (vidx.column_idx >= upd.new.len) return;
                 const raw = switch (upd.new[vidx.column_idx]) {
                     .bytes => |b| b,

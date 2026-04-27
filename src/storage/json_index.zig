@@ -61,6 +61,12 @@ pub const JsonPathIndex = struct {
         self.alloc.free(self.paths);
     }
 
+    /// Delete all SSTable files and reset the in-memory state. Used when the
+    /// index must be rebuilt from scratch after a partial-failure inconsistency.
+    pub fn clear(self: *JsonPathIndex) void {
+        self.lsm.reset();
+    }
+
     /// Index a newly inserted row. json must be the row's JSON column bytes.
     pub fn maintainInsert(self: *JsonPathIndex, row_key: []const u8, json: []const u8, at_seq: Seq) !void {
         for (self.paths) |path| {
