@@ -8,12 +8,106 @@ pub const TableId = u32;
 pub const IndexId = u32;
 pub const ColumnId = u16;
 
+/// Literal default value for a column. Owned by the schema allocator.
+pub const ColumnDefault = union(enum) {
+    int_val: i128,
+    float_val: ast.Decimal,
+    string_val: []const u8,
+    bool_val: bool,
+    null_val: void,
+};
+
 pub const ColumnSchema = struct {
     id: ColumnId,
     name: []const u8,
     typ: ast.SqlType,
     nullable: ast.NullConstraint,
+    /// Schema-defined default value (literal only). Owned.
+    default_value: ?ColumnDefault = null,
+    /// Column-level UNIQUE constraint.
+    unique: bool = false,
+    /// CHECK constraint expression. Deep-copied into schema allocator.
+    check_expr: ?*ast.Expr = null,
 };
+
+/// Deep-copy an Expr tree into alloc. The result is owned by alloc.
+pub fn dupeExpr(alloc: std.mem.Allocator, expr: *const ast.Expr) std.mem.Allocator.Error!*ast.Expr {
+    const copy = try alloc.create(ast.Expr);
+    copy.* = switch (expr.*) {
+        .lit_int, .lit_float, .lit_bool, .lit_null, .param, .nondet => expr.*,
+        .lit_string => |s| .{ .lit_string = try alloc.dupe(u8, s) },
+        .lit_bytes => |b| .{ .lit_bytes = try alloc.dupe(u8, b) },
+        .column_ref => |r| .{ .column_ref = .{
+            .table = if (r.table) |t| try alloc.dupe(u8, t) else null,
+            .column = try alloc.dupe(u8, r.column),
+        } },
+        .binary => |b| .{ .binary = .{
+            .op = b.op,
+            .left = try dupeExpr(alloc, b.left),
+            .right = try dupeExpr(alloc, b.right),
+        } },
+        .unary => |u| .{ .unary = .{ .op = u.op, .expr = try dupeExpr(alloc, u.expr) } },
+        .is_null => |e| .{ .is_null = try dupeExpr(alloc, e) },
+        .is_not_null => |e| .{ .is_not_null = try dupeExpr(alloc, e) },
+        .is_distinct => |d| .{ .is_distinct = .{
+            .left = try dupeExpr(alloc, d.left),
+            .right = try dupeExpr(alloc, d.right),
+        } },
+        .is_not_distinct => |d| .{ .is_not_distinct = .{
+            .left = try dupeExpr(alloc, d.left),
+            .right = try dupeExpr(alloc, d.right),
+        } },
+        .between => |b| .{ .between = .{
+            .expr = try dupeExpr(alloc, b.expr),
+            .low = try dupeExpr(alloc, b.low),
+            .high = try dupeExpr(alloc, b.high),
+        } },
+        .in_list => |il| blk: {
+            const vals = try alloc.alloc(*ast.Expr, il.values.len);
+            for (il.values, 0..) |v, i| vals[i] = try dupeExpr(alloc, v);
+            break :blk .{ .in_list = .{ .expr = try dupeExpr(alloc, il.expr), .values = vals } };
+        },
+        .not_in_list => |il| blk: {
+            const vals = try alloc.alloc(*ast.Expr, il.values.len);
+            for (il.values, 0..) |v, i| vals[i] = try dupeExpr(alloc, v);
+            break :blk .{ .not_in_list = .{ .expr = try dupeExpr(alloc, il.expr), .values = vals } };
+        },
+        // Unsupported in constraints (subqueries, aggregates, window functions, etc.)
+        else => expr.*,
+    };
+    return copy;
+}
+
+/// Recursively free an Expr tree previously created by dupeExpr.
+pub fn freeExpr(alloc: std.mem.Allocator, expr: *ast.Expr) void {
+    switch (expr.*) {
+        .lit_string => |s| alloc.free(s),
+        .lit_bytes => |b| alloc.free(b),
+        .column_ref => |r| {
+            if (r.table) |t| alloc.free(t);
+            alloc.free(r.column);
+        },
+        .binary => |b| { freeExpr(alloc, b.left); freeExpr(alloc, b.right); },
+        .unary => |u| freeExpr(alloc, u.expr),
+        .is_null => |e| freeExpr(alloc, e),
+        .is_not_null => |e| freeExpr(alloc, e),
+        .is_distinct => |d| { freeExpr(alloc, d.left); freeExpr(alloc, d.right); },
+        .is_not_distinct => |d| { freeExpr(alloc, d.left); freeExpr(alloc, d.right); },
+        .between => |b| { freeExpr(alloc, b.expr); freeExpr(alloc, b.low); freeExpr(alloc, b.high); },
+        .in_list => |il| {
+            freeExpr(alloc, il.expr);
+            for (il.values) |v| freeExpr(alloc, v);
+            alloc.free(il.values);
+        },
+        .not_in_list => |il| {
+            freeExpr(alloc, il.expr);
+            for (il.values) |v| freeExpr(alloc, v);
+            alloc.free(il.values);
+        },
+        else => {},
+    }
+    alloc.destroy(expr);
+}
 
 pub const IndexKind = enum { ordered, hash, vector, json_path };
 
@@ -104,7 +198,11 @@ pub const SchemaRegistry = struct {
         var it = self.tables.iterator();
         while (it.next()) |entry| {
             const tbl = entry.value_ptr.*;
-            for (tbl.columns) |col| self.alloc.free(col.name);
+            for (tbl.columns) |col| {
+                self.alloc.free(col.name);
+                if (col.default_value) |dv| if (dv == .string_val) self.alloc.free(dv.string_val);
+                if (col.check_expr) |ce| freeExpr(self.alloc, ce);
+            }
             self.alloc.free(tbl.columns);
             self.alloc.free(tbl.primary_key);
             for (tbl.indexes) |idx| {
@@ -163,11 +261,28 @@ pub const SchemaRegistry = struct {
         var cols_named: usize = 0;
         errdefer for (cols[0..cols_named]) |c| self.alloc.free(c.name);
         for (stmt.columns, 0..) |col_def, i| {
+            const default_val: ?ColumnDefault = if (col_def.default_value) |dv| blk: {
+                break :blk switch (dv.*) {
+                    .lit_int => |n| .{ .int_val = n },
+                    .lit_float => |f| .{ .float_val = f },
+                    .lit_bool => |b| .{ .bool_val = b },
+                    .lit_null => .null_val,
+                    .lit_string => |s| .{ .string_val = try self.alloc.dupe(u8, s) },
+                    else => null, // non-literal defaults ignored at schema level
+                };
+            } else null;
+            const check: ?*ast.Expr = if (col_def.check_expr) |ce|
+                try dupeExpr(self.alloc, ce)
+            else
+                null;
             cols[i] = .{
                 .id = @intCast(i),
                 .name = try self.alloc.dupe(u8, col_def.name),
                 .typ = col_def.typ,
                 .nullable = col_def.nullable,
+                .default_value = default_val,
+                .unique = col_def.unique,
+                .check_expr = check,
             };
             cols_named += 1;
         }

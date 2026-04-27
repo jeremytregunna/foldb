@@ -10,6 +10,7 @@ pub const TypeCheckError = error{
     UnqualifiedJoinColumnRef,
     SideEffectingFunctionInWhere,
     IsolationLevelClause,
+    NondetInConstraint, // NOW/RANDOM/UUID in DEFAULT or CHECK
     // General
     TableNotFound,
     ColumnNotFound,
@@ -83,6 +84,19 @@ pub const TypeChecker = struct {
                 }
             }
             if (!found) return error.ColumnNotFound;
+        }
+        // Validate column constraints: DEFAULT type and CHECK determinism.
+        for (stmt.columns) |col| {
+            if (col.default_value) |dv| {
+                const ok = switch (dv.*) {
+                    .lit_int, .lit_float, .lit_string, .lit_bytes, .lit_bool, .lit_null => true,
+                    else => false,
+                };
+                if (!ok) return error.TypeMismatch; // non-literal DEFAULT not supported
+            }
+            if (col.check_expr) |ce| {
+                if (exprContainsNondet(ce)) return error.NondetInConstraint;
+            }
         }
         // Validate FK constraints: referenced table and columns must exist, column counts match.
         for (stmt.foreign_keys) |fk| {
@@ -644,4 +658,35 @@ fn inferBuiltinReturn(name: []const u8, arg_count: usize, star: bool) TypeCheckE
     if (std.ascii.eqlIgnoreCase(name, "ANN")) return .bool;
     // Unknown function — allowed (could be a user WASM function)
     return .null_type;
+}
+
+/// Returns true if the Expr tree contains any nondeterministic function call (NOW/RANDOM/UUID).
+/// Used to reject CHECK constraints and DEFAULT expressions that would violate determinism.
+fn exprContainsNondet(expr: *const ast.Expr) bool {
+    return switch (expr.*) {
+        .nondet => true,
+        .binary => |b| exprContainsNondet(b.left) or exprContainsNondet(b.right),
+        .unary => |u| exprContainsNondet(u.expr),
+        .is_null => |e| exprContainsNondet(e),
+        .is_not_null => |e| exprContainsNondet(e),
+        .is_distinct => |d| exprContainsNondet(d.left) or exprContainsNondet(d.right),
+        .is_not_distinct => |d| exprContainsNondet(d.left) or exprContainsNondet(d.right),
+        .between => |b| exprContainsNondet(b.expr) or exprContainsNondet(b.low) or exprContainsNondet(b.high),
+        .cast => |c| exprContainsNondet(c.expr),
+        .in_list => |il| blk: {
+            if (exprContainsNondet(il.expr)) break :blk true;
+            for (il.values) |v| if (exprContainsNondet(v)) break :blk true;
+            break :blk false;
+        },
+        .not_in_list => |il| blk: {
+            if (exprContainsNondet(il.expr)) break :blk true;
+            for (il.values) |v| if (exprContainsNondet(v)) break :blk true;
+            break :blk false;
+        },
+        .fn_call => |fc| blk: {
+            for (fc.args) |a| if (exprContainsNondet(a)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
 }

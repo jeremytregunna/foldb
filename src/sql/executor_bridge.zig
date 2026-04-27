@@ -6,6 +6,7 @@
 const std = @import("std");
 const plan_mod = @import("plan.zig");
 const schema_mod = @import("schema.zig");
+const ast = @import("ast.zig");
 const registry_mod = @import("registry.zig");
 
 // Re-export storage types — these are imported via build.zig module imports
@@ -204,29 +205,6 @@ pub const SqlExecutor = struct {
         return self.run_validated_inner(validated, validated.seq);
     }
 
-    /// Like run, but uses first_seq as the read snapshot (reads at first_seq-1) while
-    /// writing mutations at entry.seq. Called by FoldExecutor for multi-partition txns.
-    pub fn runWithFirstSeq(self: *SqlExecutor, entry: LogEntry, first_seq: Seq) !ExecResult {
-        if (entry.header.kind != .txn_intent) {
-            self.advanceSeq(entry.header.seq);
-            return .{ .ok = .{ .rows_affected = 0 } };
-        }
-        var validated = executor_mod.validate_txn_entry(entry, self.alloc) catch |e| {
-            const r: ExecResult = switch (e) {
-                error.CrcMismatch => .{ .abort = .{ .code = .bad_params, .detail = "crc mismatch" } },
-                else => .{ .abort = .{ .code = .bad_params, .detail = "invalid payload" } },
-            };
-            self.results[entry.header.seq % result_ring_size] = .{ .seq = entry.header.seq, .result = r };
-            self.committed_seq.store(entry.header.seq, .release);
-            return r;
-        };
-        defer validated.decoded.deinit();
-        const result = try self.run_validated_inner(validated, first_seq);
-        self.results[validated.seq % result_ring_size] = .{ .seq = validated.seq, .result = result };
-        self.committed_seq.store(validated.seq, .release);
-        return result;
-    }
-
     fn run_validated_inner(self: *SqlExecutor, validated: executor_mod.ValidatedTxnEntry, read_seq: Seq) !ExecResult {
         const decoded = validated.decoded;
 
@@ -341,6 +319,7 @@ pub const SqlExecutor = struct {
         entry_kind: log_mod.EntryKind,
         returning_rows: ?*std.ArrayList([]const ?ColumnValue),
     ) SqlExecError!u64 {
+        // mutations must be declared before ctx so pending_mutations can point to it.
         var mutations: std.ArrayList(Mutation) = .empty;
         defer {
             for (mutations.items) |m| {
@@ -362,6 +341,8 @@ pub const SqlExecutor = struct {
             .row = null,
             .schema = self.schema,
             .alloc = self.alloc,
+            // Scans within this transaction see pending mutations (read-your-own-writes).
+            .pending_mutations = &mutations,
         };
 
         for (plan.stmts) |stmt| {
@@ -490,9 +471,113 @@ pub const SqlExecutor = struct {
     ) SqlExecError!void {
         var iter = self.storage.scan(s.table_id, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch return error.TableNotFound;
         defer iter.deinit();
+
+        // If there are no pending mutations for this table, fast path.
+        const has_pending = if (ctx.pending_mutations) |pm| blk: {
+            for (pm.items) |m| { if (m.table_id == s.table_id) break :blk true; }
+            break :blk false;
+        } else false;
+
+        if (!has_pending) {
+            while (iter.next() catch return error.StorageReadError) |row| {
+                const r = try self.rowToValues(row, s.columns, ctx.alloc);
+                try out.append(ctx.alloc, r);
+            }
+            return;
+        }
+
+        // Build a key → values map from storage, then overlay pending mutations.
+        // This gives read-your-own-writes semantics within a transaction block.
+        const Entry = struct { key: []u8, vals: ?[]?ColumnValue };
+        var rows: std.ArrayList(Entry) = .empty;
+        defer {
+            for (rows.items) |e| {
+                ctx.alloc.free(e.key);
+                if (e.vals) |v| {
+                    for (v) |cv| if (cv) |c| c.freeIfOwned(ctx.alloc);
+                    ctx.alloc.free(v);
+                }
+            }
+            rows.deinit(ctx.alloc);
+        }
+
         while (iter.next() catch return error.StorageReadError) |row| {
-            const r = try self.rowToValues(row, s.columns, ctx.alloc);
-            try out.append(ctx.alloc, r);
+            const key = try ctx.alloc.dupe(u8, row.key);
+            const vals = try self.rowToValues(row, s.columns, ctx.alloc);
+            // rowToValues returns []const ?ColumnValue; we need []?ColumnValue for mutation
+            const mutable_vals = try ctx.alloc.alloc(?ColumnValue, vals.len);
+            @memcpy(mutable_vals, vals);
+            ctx.alloc.free(vals); // free the const slice, keep the mutable copy
+            try rows.append(ctx.alloc, .{ .key = key, .vals = mutable_vals });
+        }
+
+        // Apply pending mutations in order (matches execution order).
+        for (ctx.pending_mutations.?.items) |m| {
+            if (m.table_id != s.table_id) continue;
+            switch (m.kind) {
+                .delete => {
+                    var i: usize = 0;
+                    while (i < rows.items.len) {
+                        if (std.mem.eql(u8, rows.items[i].key, m.key)) {
+                            const e = rows.orderedRemove(i);
+                            ctx.alloc.free(e.key);
+                            if (e.vals) |v| {
+                                for (v) |cv| if (cv) |c| c.freeIfOwned(ctx.alloc);
+                                ctx.alloc.free(v);
+                            }
+                        } else i += 1;
+                    }
+                },
+                .update => {
+                    const new_vals = m.values orelse continue;
+                    var found = false;
+                    for (rows.items) |*e| {
+                        if (std.mem.eql(u8, e.key, m.key)) {
+                            // Replace values with mutation's new values.
+                            if (e.vals) |old| {
+                                for (old) |cv| if (cv) |c| c.freeIfOwned(ctx.alloc);
+                                ctx.alloc.free(old);
+                            }
+                            const duped = try ctx.alloc.alloc(?ColumnValue, new_vals.len);
+                            for (new_vals, 0..) |v, i| duped[i] = try v.dupe(ctx.alloc);
+                            e.vals = duped;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        // UPDATE that didn't match in storage — add as new row.
+                        const key = try ctx.alloc.dupe(u8, m.key);
+                        const duped = try ctx.alloc.alloc(?ColumnValue, new_vals.len);
+                        for (new_vals, 0..) |v, i| duped[i] = try v.dupe(ctx.alloc);
+                        try rows.append(ctx.alloc, .{ .key = key, .vals = duped });
+                    }
+                },
+                .insert => {
+                    const new_vals = m.values orelse continue;
+                    // Only add if key not already present (duplicate insert = conflict).
+                    const already_there = for (rows.items) |e| {
+                        if (std.mem.eql(u8, e.key, m.key)) break true;
+                    } else false;
+                    if (!already_there) {
+                        const key = try ctx.alloc.dupe(u8, m.key);
+                        const duped = try ctx.alloc.alloc(?ColumnValue, new_vals.len);
+                        for (new_vals, 0..) |v, i| duped[i] = try v.dupe(ctx.alloc);
+                        try rows.append(ctx.alloc, .{ .key = key, .vals = duped });
+                    }
+                },
+            }
+        }
+
+        // Output the overlaid rows. Deep-copy so out owns independent values
+        // (the defer above frees the rows map; out is freed by the caller).
+        for (rows.items) |e| {
+            if (e.vals) |v| {
+                const r = try ctx.alloc.alloc(?ColumnValue, v.len);
+                errdefer ctx.alloc.free(r);
+                for (v, 0..) |cv, i| r[i] = if (cv) |c| try c.dupe(ctx.alloc) else null;
+                try out.append(ctx.alloc, r);
+            }
         }
     }
 
@@ -853,23 +938,51 @@ pub const SqlExecutor = struct {
     ) SqlExecError!void {
         const tbl = self.schema.getTableById(ins.table_id) orelse return error.TableNotFound;
 
+        // Build a full column-id array for FK and key lookups when using full-width values.
+        const all_col_ids = try ctx.alloc.alloc(schema_mod.ColumnId, tbl.columns.len);
+        defer ctx.alloc.free(all_col_ids);
+        for (tbl.columns, 0..) |col, ci| all_col_ids[ci] = col.id;
+
         switch (ins.source) {
             .values => |rows| {
                 for (rows) |row| {
-                    const values = try ctx.alloc.alloc(ColumnValue, ins.column_ids.len);
+                    // Build a full-width values array (indexed by column position = column id).
+                    const full_values = try ctx.alloc.alloc(ColumnValue, tbl.columns.len);
                     errdefer {
-                        for (values) |v| v.freeIfOwned(ctx.alloc);
-                        ctx.alloc.free(values);
+                        for (full_values) |v| v.freeIfOwned(ctx.alloc);
+                        ctx.alloc.free(full_values);
                     }
+                    for (tbl.columns, 0..) |col, ci| full_values[ci] = defaultValue(col.typ);
+
+                    // Fill explicitly provided columns.
                     for (ins.column_ids, 0..) |col_id, i| {
                         const pv = try evalExpr(row[i], ctx);
                         const col = tbl.columnById(col_id) orelse return error.ColumnNotFound;
-                        values[i] = try planValueToTypedColumnValue(pv, col.typ, ctx.alloc);
+                        const pos: usize = @intCast(col_id);
+                        full_values[pos].freeIfOwned(ctx.alloc);
+                        full_values[pos] = try planValueToTypedColumnValue(pv, col.typ, ctx.alloc);
                     }
-                    try self.checkForeignKeys(tbl, ins.column_ids, values, ctx);
-                    const key = try buildPrimaryKey(tbl, ins.column_ids, values, ctx.alloc);
+
+                    // Apply schema-defined defaults for omitted columns; enforce NOT NULL.
+                    for (tbl.columns, 0..) |col, ci| {
+                        const provided = for (ins.column_ids) |cid| { if (cid == col.id) break true; } else false;
+                        if (!provided) {
+                            if (col.default_value) |dv| {
+                                full_values[ci].freeIfOwned(ctx.alloc);
+                                full_values[ci] = columnDefaultToValue(dv);
+                            } else {
+                                const is_pk = for (tbl.primary_key) |pk| { if (pk == col.id) break true; } else false;
+                                if (col.nullable == .not_null and !is_pk) return error.NullViolation;
+                            }
+                        }
+                    }
+
+                    try self.checkColumnConstraints(tbl, full_values);
+                    try self.checkUniqueConstraints(tbl, full_values, ctx);
+                    try self.checkForeignKeys(tbl, all_col_ids, full_values, ctx);
+                    const key = try buildPrimaryKey(tbl, all_col_ids, full_values, ctx.alloc);
                     errdefer ctx.alloc.free(key);
-                    try self.appendInsertMutation(ins, tbl, key, values, ctx, mutations, returning_rows);
+                    try self.appendInsertMutation(ins, tbl, key, full_values, ctx, mutations, returning_rows);
                 }
             },
             .query => |node| {
@@ -1324,6 +1437,51 @@ pub const SqlExecutor = struct {
         }
     }
 
+    /// Evaluate column CHECK constraints against a full-width row.
+    /// row_values[i] is the value for column i (tbl.columns[i]).
+    fn checkColumnConstraints(
+        self: *SqlExecutor,
+        tbl: *const schema_mod.TableSchema,
+        row_values: []const ColumnValue,
+    ) SqlExecError!void {
+        for (tbl.columns, 0..) |col, i| {
+            if (col.check_expr) |check| {
+                if (!evalConstraintExpr(check, tbl, row_values)) {
+                    _ = i;
+                    self.setDetail("check constraint violated on column \"{s}\"", .{col.name});
+                    return error.ConstraintViolation;
+                }
+            }
+        }
+    }
+
+    /// Enforce UNIQUE constraints (scan-based; O(n) — use unique indexes for production).
+    fn checkUniqueConstraints(
+        self: *SqlExecutor,
+        tbl: *const schema_mod.TableSchema,
+        row_values: []const ColumnValue,
+        ctx: EvalCtx,
+    ) SqlExecError!void {
+        for (tbl.columns, 0..) |col, i| {
+            if (!col.unique) continue;
+            // PK uniqueness is already enforced by appendInsertMutation.
+            const is_pk = for (tbl.primary_key) |pk_id| { if (pk_id == col.id) break true; } else false;
+            if (is_pk) continue;
+            if (i >= row_values.len) continue;
+            const new_val = row_values[i];
+            var it = self.storage.scan(tbl.id, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch return error.StorageReadError;
+            defer it.deinit();
+            while (it.next() catch return error.StorageReadError) |row| {
+                var mutable_row = row;
+                defer mutable_row.deinit(ctx.alloc);
+                if (i < mutable_row.values.len and columnValuesEqual(new_val, mutable_row.values[i])) {
+                    self.setDetail("duplicate value violates unique constraint on column \"{s}\"", .{col.name});
+                    return error.ConstraintViolation;
+                }
+            }
+        }
+    }
+
     /// Verify no child rows reference the given parent row being deleted.
     fn checkInboundForeignKeys(
         self: *SqlExecutor,
@@ -1620,5 +1778,110 @@ fn buildReturningResultSet(
         .columns = try col_names.toOwnedSlice(alloc),
         .rows = rows,
         .alloc = alloc,
+    };
+}
+
+/// Convert a schema ColumnDefault to a ColumnValue for INSERT.
+/// String defaults are not owned by the returned value — the schema owns the string.
+fn columnDefaultToValue(dv: schema_mod.ColumnDefault) ColumnValue {
+    return switch (dv) {
+        .int_val => |n| .{ .int64 = @intCast(n) },
+        .float_val => |f| .{ .decimal = f },
+        .string_val => |s| .{ .string = s },
+        .bool_val => |b| .{ .bool_t = b },
+        .null_val => .{ .int64 = 0 }, // NULL represented as zero (no null_t in ColumnValue)
+    };
+}
+
+/// Evaluate a CHECK constraint expression against a full-width row.
+/// row_values[i] is the value for tbl.columns[i]. Returns true if satisfied.
+fn evalConstraintExpr(
+    expr: *const ast.Expr,
+    tbl: *const schema_mod.TableSchema,
+    row_values: []const ColumnValue,
+) bool {
+    switch (expr.*) {
+        .lit_bool => |b| return b,
+        .lit_null => return false,
+        .lit_int => return true,
+        .column_ref => |r| {
+            const col = tbl.columnByName(r.column) orelse return true;
+            const i: usize = @intCast(col.id);
+            return i < row_values.len; // present = non-null for our purposes
+        },
+        // IS NULL / IS NOT NULL: ColumnValue has no null representation; always pass.
+        .is_null => return false,
+        .is_not_null => return true,
+        .binary => |b| {
+            const lv = constraintExprToI128(b.left, tbl, row_values);
+            const rv = constraintExprToI128(b.right, tbl, row_values);
+            return switch (b.op) {
+                .eq => if (lv) |l| if (rv) |r| l == r else false else false,
+                .neq => if (lv) |l| if (rv) |r| l != r else true else true,
+                .lt => if (lv) |l| if (rv) |r| l < r else false else false,
+                .lte => if (lv) |l| if (rv) |r| l <= r else false else false,
+                .gt => if (lv) |l| if (rv) |r| l > r else false else false,
+                .gte => if (lv) |l| if (rv) |r| l >= r else false else false,
+                .and_op => evalConstraintExpr(b.left, tbl, row_values) and
+                    evalConstraintExpr(b.right, tbl, row_values),
+                .or_op => evalConstraintExpr(b.left, tbl, row_values) or
+                    evalConstraintExpr(b.right, tbl, row_values),
+                else => true,
+            };
+        },
+        .unary => |u| {
+            if (u.op == .not) return !evalConstraintExpr(u.expr, tbl, row_values);
+            return true;
+        },
+        else => return true, // unsupported variant — pass through
+    }
+}
+
+/// Extract a comparable i128 from a constraint expression leaf.
+fn constraintExprToI128(
+    expr: *const ast.Expr,
+    tbl: *const schema_mod.TableSchema,
+    row_values: []const ColumnValue,
+) ?i128 {
+    switch (expr.*) {
+        .lit_int => |n| return n,
+        .lit_bool => |b| return if (b) 1 else 0,
+        .lit_null => return null, // null literal — comparisons with null return null → false
+        .column_ref => |r| {
+            const col = tbl.columnByName(r.column) orelse return null;
+            const i: usize = @intCast(col.id);
+            if (i >= row_values.len) return null;
+            return switch (row_values[i]) {
+                .int8 => |v| @intCast(v),
+                .int16 => |v| @intCast(v),
+                .int32 => |v| @intCast(v),
+                .int64 => |v| @intCast(v),
+                .uint8 => |v| @intCast(v),
+                .uint16 => |v| @intCast(v),
+                .uint32 => |v| @intCast(v),
+                .uint64 => |v| @intCast(v),
+                .bool_t => |v| if (v) 1 else 0,
+                else => null,
+            };
+        },
+        else => return null,
+    }
+}
+
+/// Shallow equality check for ColumnValue (used for UNIQUE enforcement).
+fn columnValuesEqual(a: ColumnValue, b: ColumnValue) bool {
+    return switch (a) {
+        .bool_t => |v| if (b == .bool_t) v == b.bool_t else false,
+        .int8 => |v| if (b == .int8) v == b.int8 else false,
+        .int16 => |v| if (b == .int16) v == b.int16 else false,
+        .int32 => |v| if (b == .int32) v == b.int32 else false,
+        .int64 => |v| if (b == .int64) v == b.int64 else false,
+        .uint8 => |v| if (b == .uint8) v == b.uint8 else false,
+        .uint16 => |v| if (b == .uint16) v == b.uint16 else false,
+        .uint32 => |v| if (b == .uint32) v == b.uint32 else false,
+        .uint64 => |v| if (b == .uint64) v == b.uint64 else false,
+        .string => |s| if (b == .string) std.mem.eql(u8, s, b.string) else false,
+        .bytes => |s| if (b == .bytes) std.mem.eql(u8, s, b.bytes) else false,
+        else => false,
     };
 }

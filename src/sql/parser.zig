@@ -720,8 +720,11 @@ pub const Parser = struct {
                 const col_name = try self.expectIdent();
                 const col_type = try self.parseType();
                 var is_pk = false;
+                var col_unique = false;
+                var col_default: ?*ast.Expr = null;
+                var col_check: ?*ast.Expr = null;
                 const nullable: ast.NullConstraint = blk: {
-                    // Allow column constraints in any order: NOT NULL, NULL, PRIMARY KEY
+                    // Allow column constraints in any order.
                     var got_null: ?ast.NullConstraint = null;
                     while (true) {
                         if (try self.eat(.kw_not)) {
@@ -735,7 +738,18 @@ pub const Parser = struct {
                             _ = try self.expect(.kw_key);
                             is_pk = true;
                             got_null = .not_null; // PRIMARY KEY implies NOT NULL
-                        } else break; // exits the inner while(true) loop
+                        } else if ((try self.peekKind()) == .kw_unique) {
+                            _ = try self.advance();
+                            col_unique = true;
+                        } else if ((try self.peekKind()) == .kw_default) {
+                            _ = try self.advance();
+                            col_default = try self.parsePrimaryExpr();
+                        } else if ((try self.peekKind()) == .kw_check) {
+                            _ = try self.advance();
+                            _ = try self.expect(.sym_lparen);
+                            col_check = try self.parseExpr();
+                            _ = try self.expect(.sym_rparen);
+                        } else break;
                     }
                     if (got_null) |n| break :blk n;
                     break :blk .nullable; // default: nullable when no constraint given
@@ -745,6 +759,9 @@ pub const Parser = struct {
                     .name = col_name,
                     .typ = col_type,
                     .nullable = nullable,
+                    .default_value = col_default,
+                    .unique = col_unique,
+                    .check_expr = col_check,
                     .span = .{ .start = col_span_start, .end = self.lexer.pos },
                 });
             }

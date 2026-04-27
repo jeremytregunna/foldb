@@ -344,6 +344,12 @@ pub const ColumnDef = struct {
     name: []const u8,
     typ: SqlType,
     nullable: NullConstraint,
+    /// DEFAULT <literal>. Only literal Expr variants are valid here.
+    default_value: ?*Expr = null,
+    /// Column-level UNIQUE constraint.
+    unique: bool = false,
+    /// CHECK (expr). Expression must be deterministic (no nondet variants).
+    check_expr: ?*Expr = null,
     span: Span,
 };
 
