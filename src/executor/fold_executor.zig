@@ -155,13 +155,17 @@ pub const FoldExecutor = struct {
     fn applyEntry(self: *FoldExecutor, entry: LogEntry) void {
         switch (entry.header.kind) {
             .schema_change => {
-                if (isSqlDdl(entry.payload)) {
-                    self.replayDdl(entry.payload) catch |err| {
-                        std.log.warn("FoldExecutor: DDL replay err={}", .{err});
-                    };
-                } else {
-                    _ = self.registry.register(entry.payload) catch |err| std.log.warn("registry register: {}", .{err});
+                if (executor_mod.decodeSchemaPayload(entry.payload)) |decoded| {
+                    switch (decoded.kind) {
+                        .ddl => self.replayDdl(decoded.db_id, decoded.sql) catch |err|
+                            std.log.warn("FoldExecutor: DDL replay err={}", .{err}),
+                        .query => _ = self.registry.registerForDb(decoded.sql, decoded.db_id) catch |err|
+                            std.log.warn("registry registerForDb: {}", .{err}),
+                        .cluster => self.replayClusterDdl(decoded.sql) catch |err|
+                            std.log.warn("FoldExecutor: cluster DDL replay err={}", .{err}),
+                    }
                 }
+                // Payloads that don't decode (empty, wrong format) are silently skipped.
                 self.sql_exec.advanceSeq(entry.header.seq);
             },
             .txn_intent => {
@@ -486,10 +490,16 @@ pub const FoldExecutor = struct {
         }
     }
 
-    fn replayDdl(self: *FoldExecutor, sql: []const u8) !void {
+    fn replayClusterDdl(self: *FoldExecutor, sql: []const u8) !void {
+        // Step 6: implement CREATE DATABASE / DROP DATABASE here.
+        _ = self;
+        _ = sql;
+    }
+
+    fn replayDdl(self: *FoldExecutor, db_id: sql_mod.DatabaseId, sql: []const u8) !void {
         // Suppress "already exists / not found" errors: at-least-once replay on crash-restart
         // can re-deliver an entry whose effects are already in the schema.
-        self.applyDdlToSchema(sql) catch |e| switch (e) {
+        self.applyDdlToSchema(db_id, sql) catch |e| switch (e) {
             error.TableAlreadyExists,
             error.IndexAlreadyExists,
             error.ColumnAlreadyExists,
@@ -500,7 +510,7 @@ pub const FoldExecutor = struct {
         };
     }
 
-    fn applyDdlToSchema(self: *FoldExecutor, sql: []const u8) !void {
+    fn applyDdlToSchema(self: *FoldExecutor, db_id: sql_mod.DatabaseId, sql: []const u8) !void {
         assert(sql.len > 0);
         var arena = std.heap.ArenaAllocator.init(self.alloc);
         defer arena.deinit();
@@ -519,9 +529,11 @@ pub const FoldExecutor = struct {
             return;
         }
 
+        const db_schema = self.cluster.getDb(db_id) orelse return error.DatabaseNotFound;
+
         const drop_table_id: ?storage_mod.TableId = if (stmt == .drop_table) blk: {
             const dt = stmt.drop_table;
-            const tbl = self.defaultDb().getTable(dt.name) orelse {
+            const tbl = db_schema.getTable(dt.name) orelse {
                 if (dt.if_exists) return;
                 break :blk null;
             };
@@ -533,7 +545,7 @@ pub const FoldExecutor = struct {
         // Each executor owns its own Storage and registers tables/indexes independently.
         switch (stmt) {
             .create_table => |ct| {
-                const tbl = self.defaultDb().getTable(ct.name) orelse return error.TableNotFound;
+                const tbl = db_schema.getTable(ct.name) orelse return error.TableNotFound;
                 try self.storage.registerTable(
                     try sqlTableToStorage(tbl, self.storage_schema_arena.allocator()),
                 );
@@ -542,7 +554,7 @@ pub const FoldExecutor = struct {
                 if (drop_table_id) |id| self.storage.unregisterTable(id);
             },
             .create_index => |ci| {
-                const tbl = self.defaultDb().getTable(ci.table) orelse return error.TableNotFound;
+                const tbl = db_schema.getTable(ci.table) orelse return error.TableNotFound;
                 if (tbl.indexes.len == 0) return;
                 const idx = tbl.indexes[tbl.indexes.len - 1];
                 const spec: storage_mod.IndexSpec = switch (idx.kind) {
@@ -740,10 +752,15 @@ pub const FoldExecutor = struct {
             if (entries.len == 0) break;
             for (entries) |e| {
                 if (e.header.kind == .schema_change) {
-                    if (isSqlDdl(e.payload)) {
-                        try self.replayDdl(e.payload);
-                    } else {
-                        _ = try self.registry.register(e.payload);
+                    if (executor_mod.decodeSchemaPayload(e.payload)) |decoded| {
+                        switch (decoded.kind) {
+                            .ddl => self.replayDdl(decoded.db_id, decoded.sql) catch |err|
+                                std.log.warn("FoldExecutor: DDL replay err={}", .{err}),
+                            .query => _ = self.registry.registerForDb(decoded.sql, decoded.db_id) catch |err|
+                                std.log.warn("FoldExecutor: query replay err={}", .{err}),
+                            .cluster => self.replayClusterDdl(decoded.sql) catch |err|
+                                std.log.warn("FoldExecutor: cluster DDL replay err={}", .{err}),
+                        }
                     }
                 }
                 from_seq = e.header.seq + 1;

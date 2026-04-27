@@ -67,17 +67,17 @@ pub const SqlRegistry = struct {
         self.queries.deinit();
     }
 
-    /// Validate a SQL string and return its QueryHash without registering it.
-    /// Does the same parse → canonicalize → type-check → plan pipeline as register(),
+    /// Validate a SQL string and return its db-scoped QueryHash without registering it.
+    /// Does the same parse → canonicalize → type-check → plan pipeline as registerForDb(),
     /// but discards all results. Safe to call from any thread; does not mutate state.
-    pub fn validateQuery(self: *SqlRegistry, sql: []const u8) RegistryError!QueryHash {
+    pub fn validateQueryForDb(self: *SqlRegistry, sql: []const u8, db_id: u32) RegistryError!QueryHash {
         var arena = std.heap.ArenaAllocator.init(self.alloc);
         defer arena.deinit();
         const arena_alloc = arena.allocator();
 
         const sql_copy = try arena_alloc.dupe(u8, sql);
         const parsed = try parser_mod.parse(sql_copy, arena_alloc);
-        const h = try canon.canonicalize(parsed, arena_alloc);
+        const h = try canon.canonicalizeForDb(parsed, db_id, arena_alloc);
 
         if (self.queries.contains(h)) return h;
 
@@ -100,92 +100,58 @@ pub const SqlRegistry = struct {
         return h;
     }
 
+    /// Validate a SQL string using the default database scope.
+    pub fn validateQuery(self: *SqlRegistry, sql: []const u8) RegistryError!QueryHash {
+        return self.validateQueryForDb(sql, schema_mod.default_database_id);
+    }
+
     /// Register a SQL string, returning its QueryHash.
     /// Rejects SELECT * in registered queries.
     /// Idempotent: registering the same SQL twice returns the same hash.
     // This is the SQL frontend domain boundary — raw client SQL enters here and must pass
     // parse, canonicalization, type-checking, and planning before entering the domain core.
     // All data past this point is validated; the resulting ExecutionPlan is a pure domain type.
-    pub fn register(self: *SqlRegistry, sql: []const u8) RegistryError!QueryHash {
+    /// Register a SQL string scoped to a database. The hash incorporates the
+    /// database_id so the same SQL in two databases gets different hashes.
+    pub fn registerForDb(self: *SqlRegistry, sql: []const u8, db_id: u32) RegistryError!QueryHash {
         var arena = std.heap.ArenaAllocator.init(self.alloc);
         const arena_alloc = arena.allocator();
 
-        // Dupe sql into the arena BEFORE parsing so all AST string slices
-        // (identifiers, literals) reference arena-owned memory and remain valid
-        // for the lifetime of the RegisteredQuery even after the caller frees sql.
-        const sql_copy = arena_alloc.dupe(u8, sql) catch |e| {
-            arena.deinit();
-            return e;
-        };
+        const sql_copy = arena_alloc.dupe(u8, sql) catch |e| { arena.deinit(); return e; };
+        const parsed = parser_mod.parse(sql_copy, arena_alloc) catch |e| { arena.deinit(); return e; };
+        const h = canon.canonicalizeForDb(parsed, db_id, arena_alloc) catch |e| { arena.deinit(); return e; };
 
-        const parsed = parser_mod.parse(sql_copy, arena_alloc) catch |e| {
-            arena.deinit();
-            return e;
-        };
+        if (self.queries.contains(h)) { arena.deinit(); return h; }
 
-        const h = canon.canonicalize(parsed, arena_alloc) catch |e| {
-            arena.deinit();
-            return e;
-        };
-
-        if (self.queries.contains(h)) {
-            arena.deinit();
-            return h;
-        }
-
-        const param_types = extractParamTypes(parsed, arena_alloc) catch |e| {
-            arena.deinit();
-            return e;
-        };
+        const param_types = extractParamTypes(parsed, arena_alloc) catch |e| { arena.deinit(); return e; };
 
         var checker = tc_mod.TypeChecker.init(arena_alloc, self.schema);
         for (parsed.stmts) |stmt| {
-            checker.checkStmt(stmt, param_types, true) catch |e| {
-                arena.deinit();
-                return e;
-            };
+            checker.checkStmt(stmt, param_types, true) catch |e| { arena.deinit(); return e; };
         }
 
         var planner = plan_mod.Planner.init(arena_alloc, self.schema);
         const exec_plan = if (parsed.stmts.len == 1 and parsed.stmts[0] == .transaction)
-            planner.planTransaction(parsed.stmts[0].transaction) catch |e| {
-                arena.deinit();
-                return e;
-            }
+            planner.planTransaction(parsed.stmts[0].transaction) catch |e| { arena.deinit(); return e; }
         else blk: {
             var stmts: std.ArrayList(plan_mod.StmtPlan) = .empty;
             for (parsed.stmts) |s| {
-                const sp = planner.planAstStmt(s) catch |e| {
-                    arena.deinit();
-                    return e;
-                };
-                stmts.append(arena_alloc, sp) catch |e| {
-                    arena.deinit();
-                    return e;
-                };
+                const sp = planner.planAstStmt(s) catch |e| { arena.deinit(); return e; };
+                stmts.append(arena_alloc, sp) catch |e| { arena.deinit(); return e; };
             }
-            const owned = stmts.toOwnedSlice(arena_alloc) catch |e| {
-                arena.deinit();
-                return e;
-            };
             break :blk plan_mod.ExecutionPlan{
-                .stmts = owned,
+                .stmts = stmts.toOwnedSlice(arena_alloc) catch |e| { arena.deinit(); return e; },
                 .param_types = param_types,
                 .nondet_count = planner.nondet_idx,
             };
         };
 
-        // Pre-compute output column names from the plan and current schema. Stored in arena
-        // so they're freed with the RegisteredQuery without any extra bookkeeping.
-        const col_names: []const []const u8 = if (exec_plan.stmts.len > 0 and exec_plan.stmts[0] == .select)
+        const output_column_names: []const []const u8 = if (exec_plan.stmts.len > 0 and exec_plan.stmts[0] == .select)
             extractPlanColumnNames(exec_plan.stmts[0].select, self.schema, arena_alloc) catch &.{}
         else
             &.{};
 
-        const rq = self.alloc.create(RegisteredQuery) catch |e| {
-            arena.deinit();
-            return e;
-        };
+        const rq = self.alloc.create(RegisteredQuery) catch |e| { arena.deinit(); return e; };
         rq.* = .{
             .hash = h,
             .sql_text = sql_copy,
@@ -193,16 +159,20 @@ pub const SqlRegistry = struct {
             .param_types = param_types,
             .nondet_count = exec_plan.nondet_count,
             .schema_seq = self.schema_seq,
-            .output_column_names = col_names,
+            .output_column_names = output_column_names,
             .arena = arena,
         };
-
         self.queries.put(h, rq) catch |e| {
             rq.arena.deinit();
             self.alloc.destroy(rq);
             return e;
         };
         return h;
+    }
+
+    /// Register a SQL string in the default database. Delegates to registerForDb.
+    pub fn register(self: *SqlRegistry, sql: []const u8) RegistryError!QueryHash {
+        return self.registerForDb(sql, @import("schema.zig").default_database_id);
     }
 
     pub fn lookup(self: *const SqlRegistry, h: QueryHash) ?*const RegisteredQuery {

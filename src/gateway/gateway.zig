@@ -437,11 +437,15 @@ pub const Gateway = struct {
         };
         self.metrics.queries_registered.inc();
         self.client_seq += 1;
+        // Encode the db-scoped query envelope before submitting to the log.
+        var payload_buf: std.ArrayList(u8) = .empty;
+        defer payload_buf.deinit(self.alloc);
+        try executor_mod.encodeSchemaPayload(.query, executor_mod.default_database_id, sql, self.alloc, &payload_buf);
         // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
         var pending: sequencer_mod.PendingSubmit = undefined;
         const result = try self.sequencer.submitBytes(
             &pending,
-            sql,
+            payload_buf.items,
             self.client_id,
             self.client_seq,
             .schema_change,
@@ -675,16 +679,37 @@ pub const Gateway = struct {
         self.error_detail_len = 0;
         try self.fold_executors[0].validateDdl(sql);
         self.client_seq += 1;
+        // Choose payload kind: cluster-level DDL (CREATE/DROP DATABASE) vs db-scoped DDL.
+        const kind: executor_mod.SchemaPayloadKind = if (isClusterDdl(sql)) .cluster else .ddl;
+        var payload_buf: std.ArrayList(u8) = .empty;
+        defer payload_buf.deinit(self.alloc);
+        try executor_mod.encodeSchemaPayload(kind, executor_mod.default_database_id, sql, self.alloc, &payload_buf);
         // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
         var pending: sequencer_mod.PendingSubmit = undefined;
         const result = try self.sequencer.submitBytes(
             &pending,
-            sql,
+            payload_buf.items,
             self.client_id,
             self.client_seq,
             .schema_change,
         ).awaitCommit(self.io);
         try self.waitAllFoldExecutors(result.seq);
+    }
+
+    /// Returns true for CREATE/DROP DATABASE which are cluster-level operations.
+    fn isClusterDdl(sql: []const u8) bool {
+        const s = std.mem.trimStart(u8, sql, " \t\r\n");
+        if (s.len < 7) return false;
+        // Match "create database" or "drop database" (case-insensitive).
+        if (std.ascii.startsWithIgnoreCase(s, "create")) {
+            const rest = std.mem.trimStart(u8, s[6..], " \t");
+            return std.ascii.startsWithIgnoreCase(rest, "database");
+        }
+        if (std.ascii.startsWithIgnoreCase(s, "drop")) {
+            const rest = std.mem.trimStart(u8, s[4..], " \t");
+            return std.ascii.startsWithIgnoreCase(rest, "database");
+        }
+        return false;
     }
 
     /// Get the current committed sequence number.

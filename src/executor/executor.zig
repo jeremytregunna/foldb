@@ -83,6 +83,59 @@ pub const CdcEffect = cdc_mod.CdcEffect;
 pub const CdcOperation = cdc_mod.CdcOperation;
 pub const BeforeImages = cdc_mod.BeforeImages;
 
+// ─── Schema-change payload envelope ─────────────────────────────────────────
+//
+// All schema_change log entries carry a 5-byte header:
+//   [1 byte: SchemaPayloadKind][4 bytes: database_id, little-endian][sql text...]
+//
+// This allows FoldExecutors to route DDL and query registration to the correct
+// per-database SchemaRegistry. Payloads shorter than 5 bytes or with an unknown
+// kind byte are silently skipped (the entry still advances the seq counter).
+
+pub const DatabaseId = u32;
+pub const default_database_id: DatabaseId = 1;
+
+pub const SchemaPayloadKind = enum(u8) {
+    /// DDL SQL (CREATE TABLE, DROP TABLE, etc.) scoped to database_id.
+    ddl = 0x01,
+    /// Query registration SQL scoped to database_id.
+    query = 0x02,
+    /// Cluster-level DDL (CREATE DATABASE, DROP DATABASE) — database_id unused.
+    cluster = 0x03,
+};
+
+pub const DecodedSchemaPayload = struct {
+    kind: SchemaPayloadKind,
+    db_id: DatabaseId,
+    sql: []const u8,
+};
+
+pub fn encodeSchemaPayload(
+    kind: SchemaPayloadKind,
+    db_id: DatabaseId,
+    sql: []const u8,
+    alloc: std.mem.Allocator,
+    buf: *std.ArrayList(u8),
+) !void {
+    try buf.append(alloc, @intFromEnum(kind));
+    var db_bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &db_bytes, db_id, .little);
+    try buf.appendSlice(alloc, &db_bytes);
+    try buf.appendSlice(alloc, sql);
+}
+
+pub fn decodeSchemaPayload(payload: []const u8) ?DecodedSchemaPayload {
+    if (payload.len < 5) return null;
+    const kind: SchemaPayloadKind = switch (payload[0]) {
+        @intFromEnum(SchemaPayloadKind.ddl) => .ddl,
+        @intFromEnum(SchemaPayloadKind.query) => .query,
+        @intFromEnum(SchemaPayloadKind.cluster) => .cluster,
+        else => return null,
+    };
+    const db_id = std.mem.readInt(u32, payload[1..5], .little);
+    return .{ .kind = kind, .db_id = db_id, .sql = payload[5..] };
+}
+
 pub const Executor = struct {
     storage: *Storage,
     registry: QueryRegistry,
