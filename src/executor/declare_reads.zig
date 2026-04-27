@@ -7,8 +7,8 @@
 ///   - For each table, for each partition in `read_set_hint` that is not
 ///     `my_partition`, emit a sentinel ForeignRead with key = "" (meaning "send me
 ///     your full scan slice for this table").
-///   - Point-lookups (pk_lookup) are unimplemented in the planner and never generated;
-///     if they are in future, they resolve to this same conservative path.
+///   - Point-lookups (pk_lookup) are handled via the same conservative full-table-scan
+///     path: the table is added to the read set and a sentinel ForeignRead is emitted.
 ///
 /// The sentinel key "" is recognised by the serve-and-wait loop in FoldExecutor,
 /// which responds by sending all rows it has for that (partition, table).

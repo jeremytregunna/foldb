@@ -672,7 +672,7 @@ pub fn canonicalize(q: ast.ParsedQuery, alloc: std.mem.Allocator) !QueryHash {
 
 /// Compute a database-scoped QueryHash for a ParsedQuery.
 /// The 4-byte little-endian database_id is prepended before hashing so the same
-/// SQL in two different databases produces different hashes (spec §multi-db Step 3).
+/// SQL in two different databases produces different hashes.
 pub fn canonicalizeForDb(q: ast.ParsedQuery, db_id: u32, alloc: std.mem.Allocator) !QueryHash {
     var w = CanonWriter.init(alloc);
     defer w.deinit();

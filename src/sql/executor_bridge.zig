@@ -359,7 +359,7 @@ pub const SqlExecutor = struct {
     }
 
     /// Execute a SELECT plan and return collected rows.
-    /// Used for testing and by the gateway (M6).
+    /// Used for testing and by the gateway.
     pub fn querySelect(
         self: *SqlExecutor,
         plan: plan_mod.ExecutionPlan,
@@ -389,7 +389,7 @@ pub const SqlExecutor = struct {
     }
 
     /// Execute a plan directly (without going through the log).
-    /// Used by the gateway (M6) to run queries and return result sets.
+    /// Used by the gateway to run queries and return result sets.
     pub fn executePlanDirect(
         self: *SqlExecutor,
         plan: plan_mod.ExecutionPlan,
@@ -503,7 +503,7 @@ pub const SqlExecutor = struct {
     ) SqlExecError!void {
         switch (stmt) {
             .select => |node| {
-                // Execute SELECT and discard results (results returned via gateway in M6)
+                // Execute SELECT and discard results (results returned via gateway)
                 var rows: std.ArrayList([]const ?ColumnValue) = .empty;
                 defer {
                     for (rows.items) |r| self.alloc.free(r);

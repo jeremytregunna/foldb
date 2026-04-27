@@ -182,6 +182,24 @@ pub const SqlRegistry = struct {
         return self.queries.get(h);
     }
 
+    /// Remove all queries registered under the given database id.
+    /// Called when a database is dropped so its query memory is reclaimed.
+    pub fn evictQueriesForDb(self: *SqlRegistry, db_id: u32) void {
+        var to_evict: std.ArrayListUnmanaged(QueryHash) = .empty;
+        defer to_evict.deinit(self.alloc);
+        var it = self.queries.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.*.db_id == db_id)
+                to_evict.append(self.alloc, entry.key_ptr.*) catch continue;
+        }
+        for (to_evict.items) |h| {
+            if (self.queries.fetchRemove(h)) |kv| {
+                kv.value.deinit();
+                self.alloc.destroy(kv.value);
+            }
+        }
+    }
+
     /// Remove a registered query by hash. No-op if the hash is not registered.
     pub fn unregister(self: *SqlRegistry, h: QueryHash) void {
         if (self.queries.fetchRemove(h)) |entry| {

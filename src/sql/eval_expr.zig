@@ -198,7 +198,7 @@ pub fn evalExpr(e: *plan_mod.PlanExpr, ctx: EvalCtx) SqlExecError!plan_mod.Value
 
         .table_column => |tc| {
             // In a join context, the combined row has left then right columns.
-            // table_idx and col_idx were set by the planner; for M5 we treat the
+            // table_idx and col_idx were set by the planner; we treat the
             // absolute position as table_idx * table_width + col_idx — but since
             // the planner now emits .column for resolved refs, this path is only
             // hit for unresolved cases. Return null safely.

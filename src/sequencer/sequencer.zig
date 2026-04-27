@@ -1,6 +1,6 @@
 /// Sequencer: assigns global seq numbers to TxnIntents and routes to partition logs.
 ///
-/// Uses an internal RaftNode (single-node for M7) for durable ordering decisions.
+/// Uses an internal RaftNode for durable ordering decisions.
 /// Batches intents into epochs; each epoch decision is replicated before forwarding
 /// intents to their assigned data partition logs.
 const std = @import("std");

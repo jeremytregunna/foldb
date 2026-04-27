@@ -3,6 +3,8 @@
 pub fn humanize(err: anyerror) []const u8 {
     return switch (err) {
         // Schema errors
+        error.DatabaseNotFound => "Database not found",
+        error.DatabaseAlreadyExists => "Database already exists",
         error.TableNotFound => "Table not found",
         error.TableAlreadyExists => "Table already exists",
         error.ColumnNotFound => "Column not found",

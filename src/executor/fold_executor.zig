@@ -24,8 +24,7 @@ pub const ExecResult = executor_bridge.ExecResult;
 pub const ResolvedValue = executor_bridge.ResolvedValue;
 
 pub const FoldExecutor = struct {
-    /// Cluster-wide schema: all databases. DDL is applied to the database named by
-    /// each log entry's db_id (Step 2). Until Step 2, all DDL goes to default_database_id.
+    /// Cluster-wide schema: all databases. DDL is applied to the database named by each log entry's db_id.
     cluster: sql_mod.ClusterSchema,
     registry: sql_mod.SqlRegistry,
     sql_exec: sql_mod.SqlExecutor,
@@ -90,8 +89,7 @@ pub const FoldExecutor = struct {
         return fe;
     }
 
-    /// Returns the schema for the default database. Until Step 2 (log envelope),
-    /// all DDL operates on the default database.
+    /// Returns the schema for the default database.
     fn defaultDb(self: *FoldExecutor) *sql_mod.SchemaRegistry {
         return self.cluster.getDb(sql_mod.default_database_id).?;
     }
@@ -496,7 +494,13 @@ pub const FoldExecutor = struct {
                     }
                 }
             },
-            .create_database, .drop_database => {}, // validated at execution time (Step 6)
+            .create_database => |cd| {
+                if (self.cluster.getDbByName(cd.name) != null) return error.DatabaseAlreadyExists;
+            },
+            .drop_database => |dd| {
+                if (!dd.if_exists and self.cluster.getDbByName(dd.name) == null)
+                    return error.DatabaseNotFound;
+            },
             else => return error.TypeCheckError,
         }
     }
@@ -526,8 +530,9 @@ pub const FoldExecutor = struct {
                     return error.DatabaseNotFound;
                 };
                 self.cluster.dropDatabase(db_id) catch |e| switch (e) {
-                    error.DatabaseNotFound => if (!dd.if_exists) return e,
+                    error.DatabaseNotFound => if (!dd.if_exists) return error.DatabaseNotFound,
                 };
+                self.registry.evictQueriesForDb(db_id);
             },
             else => {},
         }

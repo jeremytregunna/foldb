@@ -1,6 +1,6 @@
 /// WASM module integration for foldb server-side logic.
 ///
-/// Strategy for M5:
+/// Strategy:
 ///   - Validate WASM module at registration time (no threads, no non-whitelisted imports,
 ///     no nondeterministic opcodes).
 ///   - Provide a pure-Zig evaluator for simple scalar functions (integer arithmetic,
@@ -688,9 +688,9 @@ pub fn readSleb128(data: []const u8) ?struct { i64, usize } {
     return null;
 }
 
-// ─── Wasmtime FFI scaffold (NOT wired up for M5) ──────────────────────────────
+// ─── Wasmtime FFI scaffold (not wired up) ─────────────────────────────────────
 //
-// TODO (M6+): wire this up via translate-c in build.zig:
+// TODO: wire this up via translate-c in build.zig:
 //
 //   const translate_c = b.addTranslateC(.{
 //       .root_source_file = b.path("src/sql/wasmtime.h"),

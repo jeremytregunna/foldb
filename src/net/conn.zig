@@ -62,6 +62,8 @@ pub const Conn = struct {
     users: []const config_mod.UserEntry,
     /// Active database for this connection. Set during handshake; updated by USE DATABASE.
     current_db_id: u32,
+    /// Trace extension bytes from the current request frame, echoed in the response.
+    pending_trace: ?[frame.TRACE_EXT_SIZE]u8 = null,
 
     fn init(io: std.Io, stream: net.Stream, gw: *gateway_mod.Gateway, users: []const config_mod.UserEntry, alloc: std.mem.Allocator) Conn {
         // SAFETY: reader, writer, read_buf, and write_buf are all initialized in run() before use.
@@ -80,6 +82,7 @@ pub const Conn = struct {
             .gw = gw,
             .users = users,
             .current_db_id = gateway_mod.default_database_id,
+            .pending_trace = null,
         };
     }
 
@@ -98,6 +101,10 @@ pub const Conn = struct {
         return if (self.negotiated) self.max_payload else frame.PRE_HELLO_CAP;
     }
 
+    fn tracePtr(self: *const Conn) ?*const [frame.TRACE_EXT_SIZE]u8 {
+        return if (self.pending_trace) |*t| t else null;
+    }
+
     // ---- send helpers ----
 
     fn sendError(self: *Conn, stream_id: u64, code: msg.ErrorCode, severity: msg.Severity, text: []const u8) void {
@@ -105,7 +112,7 @@ pub const Conn = struct {
         defer out.deinit(self.alloc);
         msg.encodeError(&out, self.alloc, code, severity, text, "") catch return;
         const flags: Flags = if (stream_id != 0) .final_only else .none;
-        frame.sendFrame(&self.writer.interface, stream_id, .err, flags, null, out.items) catch |err| std.log.warn("sendError: {}", .{err});
+        frame.sendFrame(&self.writer.interface, stream_id, .err, flags, self.tracePtr(), out.items) catch |err| std.log.warn("sendError: {}", .{err});
     }
 
     fn sendFatalError(self: *Conn, code: msg.ErrorCode, text: []const u8) void {
@@ -125,7 +132,7 @@ pub const Conn = struct {
             .client_wall_micros = client_wall_micros,
             .server_wall_micros = server_us,
         });
-        try frame.sendFrame(&self.writer.interface, 0, .pong, .none, null, out.items);
+        try frame.sendFrame(&self.writer.interface, 0, .pong, .none, self.tracePtr(), out.items);
     }
 
     // ---- TLS negotiation ----
@@ -248,9 +255,7 @@ pub const Conn = struct {
                 return;
             }
             const flags: Flags = @bitCast(hdr.flags);
-            if (flags.trace) {
-                _ = try frame.readTraceExt(&self.reader.interface); // consume but not yet echoed
-            }
+            self.pending_trace = if (flags.trace) try frame.readTraceExt(&self.reader.interface) else null;
             const payload = try frame.readPayload(&self.reader.interface, hdr.payload_len, self.alloc);
             defer self.alloc.free(payload);
             const kind: Kind = @enumFromInt(hdr.kind);
@@ -355,7 +360,7 @@ pub const Conn = struct {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(self.alloc);
         try msg.encodeRegistered(&out, self.alloc, .{ .query_hash = result.hash, .param_tags = &.{}, .columns = &.{} });
-        try frame.sendFrame(&self.writer.interface, stream_id, .registered, .final_only, null, out.items);
+        try frame.sendFrame(&self.writer.interface, stream_id, .registered, .final_only, self.tracePtr(), out.items);
     }
 
     fn handleUseDatabase(self: *Conn, stream_id: u64, db_name: []const u8) !void {
@@ -373,7 +378,7 @@ pub const Conn = struct {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(self.alloc);
         try msg.encodeRegistered(&out, self.alloc, .{ .query_hash = hash, .param_tags = &.{}, .columns = &.{} });
-        try frame.sendFrame(&self.writer.interface, stream_id, .registered, .final_only, null, out.items);
+        try frame.sendFrame(&self.writer.interface, stream_id, .registered, .final_only, self.tracePtr(), out.items);
     }
 
     fn handleRegisterDdl(self: *Conn, stream_id: u64, sql: []const u8) !void {
@@ -398,7 +403,7 @@ pub const Conn = struct {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(self.alloc);
         try msg.encodeRegistered(&out, self.alloc, .{ .query_hash = hash, .param_tags = &.{}, .columns = &.{} });
-        try frame.sendFrame(&self.writer.interface, stream_id, .registered, .final_only, null, out.items);
+        try frame.sendFrame(&self.writer.interface, stream_id, .registered, .final_only, self.tracePtr(), out.items);
     }
 
     // ---- Execute ----
@@ -413,7 +418,7 @@ pub const Conn = struct {
             var out: std.ArrayListUnmanaged(u8) = .empty;
             defer out.deinit(self.alloc);
             try msg.encodeExecOk(&out, self.alloc, .{ .rows_affected = 0, .committed_seq = self.gw.currentSeq() });
-            try frame.sendFrame(&self.writer.interface, stream_id, .exec_ok, .final_only, null, out.items);
+            try frame.sendFrame(&self.writer.interface, stream_id, .exec_ok, .final_only, self.tracePtr(), out.items);
             return;
         }
         const params = try self.typedValuesToColumnValues(ex.params);
@@ -445,7 +450,7 @@ pub const Conn = struct {
             var out: std.ArrayListUnmanaged(u8) = .empty;
             defer out.deinit(self.alloc);
             try msg.encodeExecOk(&out, self.alloc, .{ .rows_affected = exec_result.rows_affected, .committed_seq = self.gw.currentSeq() });
-            try frame.sendFrame(&self.writer.interface, stream_id, .exec_ok, .final_only, null, out.items);
+            try frame.sendFrame(&self.writer.interface, stream_id, .exec_ok, .final_only, self.tracePtr(), out.items);
         }
     }
 
@@ -511,7 +516,7 @@ pub const Conn = struct {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(self.alloc);
         try msg.encodeSubscribeAck(&out, self.alloc, resolved.items);
-        try frame.sendFrame(&self.writer.interface, stream_id, .subscribe_ack, .more_only, null, out.items);
+        try frame.sendFrame(&self.writer.interface, stream_id, .subscribe_ack, .more_only, self.tracePtr(), out.items);
         try self.drainSubscription(stream_id, sub);
     }
 
@@ -613,7 +618,7 @@ pub const Conn = struct {
                 var out: std.ArrayListUnmanaged(u8) = .empty;
                 defer out.deinit(self.alloc);
                 try msg.encodeExecOk(&out, self.alloc, .{ .rows_affected = 0, .committed_seq = frame.NO_COMMIT_SEQ });
-                try frame.sendFrame(&self.writer.interface, stream_id, .exec_ok, .final_only, null, out.items);
+                try frame.sendFrame(&self.writer.interface, stream_id, .exec_ok, .final_only, self.tracePtr(), out.items);
                 return true;
             },
             .cancel => {
@@ -670,7 +675,7 @@ pub const Conn = struct {
             try wire_effects.append(self.alloc, .{ .table_id = effect.table_id, .key = effect.key, .op = op, .before = before, .after = after });
         }
         try msg.encodeCdcEvent(&out, self.alloc, ev.seq, ev.epoch, wire_effects.items);
-        try frame.sendFrame(&self.writer.interface, stream_id, .cdc_event, .none, null, out.items);
+        try frame.sendFrame(&self.writer.interface, stream_id, .cdc_event, .none, self.tracePtr(), out.items);
     }
 
     // ---- AckCdc (outside subscription drain) ----
@@ -697,7 +702,7 @@ pub const Conn = struct {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(self.alloc);
         try msg.encodeExecOk(&out, self.alloc, .{ .rows_affected = 0, .committed_seq = frame.NO_COMMIT_SEQ });
-        try frame.sendFrame(&self.writer.interface, stream_id, .exec_ok, .final_only, null, out.items);
+        try frame.sendFrame(&self.writer.interface, stream_id, .exec_ok, .final_only, self.tracePtr(), out.items);
     }
 
     // ---- result encoding ----
@@ -710,7 +715,7 @@ pub const Conn = struct {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(self.alloc);
         try msg.encodeExecOk(&out, self.alloc, .{ .rows_affected = @intCast(rs.rows.len), .committed_seq = frame.NO_COMMIT_SEQ });
-        try frame.sendFrame(&self.writer.interface, stream_id, .exec_ok, .final_only, null, out.items);
+        try frame.sendFrame(&self.writer.interface, stream_id, .exec_ok, .final_only, self.tracePtr(), out.items);
     }
 
     fn sendRowsBeginFrame(self: *Conn, stream_id: u64, rs: *gateway_mod.ResultSet) !void {
@@ -733,7 +738,7 @@ pub const Conn = struct {
             cd.* = .{ .name = name, .type_tag = 0x00, .nullable = true };
         }
         try msg.encodeRowsBegin(&out, self.alloc, .{ .columns = cds });
-        try frame.sendFrame(&self.writer.interface, stream_id, .rows_begin, .more_only, null, out.items);
+        try frame.sendFrame(&self.writer.interface, stream_id, .rows_begin, .more_only, self.tracePtr(), out.items);
     }
 
     fn sendRowsBatchFrame(self: *Conn, stream_id: u64, rs: gateway_mod.ResultSet) !void {
@@ -757,7 +762,7 @@ pub const Conn = struct {
         defer self.alloc.free(const_rows);
         for (wire_rows.items, 0..) |row, i| const_rows[i] = row;
         try msg.encodeRowsBatch(&out, self.alloc, const_rows);
-        try frame.sendFrame(&self.writer.interface, stream_id, .rows_batch, .more_only, null, out.items);
+        try frame.sendFrame(&self.writer.interface, stream_id, .rows_batch, .more_only, self.tracePtr(), out.items);
     }
 
     // ---- type conversion helpers ----
