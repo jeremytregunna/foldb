@@ -62,6 +62,17 @@ pub const AbortCode = executor_mod.AbortCode;
 
 pub const SqlExecError = eval_expr_mod.SqlExecError;
 
+/// A row fetched from a foreign partition and provided to this executor before plan
+/// execution.  key="" is a sentinel meaning "all rows for this table from that partition".
+/// Populated by FoldExecutor before calling run() for multi-partition txns; empty slice
+/// means single-partition mode (no interception).
+pub const ForeignRowEntry = struct {
+    from_partition: u32,
+    table_id: TableId,
+    key: []const u8,
+    row: ?Row,
+};
+
 /// Result of executing a SELECT plan.
 pub const ResultSet = struct {
     columns: []const []const u8,
@@ -113,6 +124,11 @@ pub const SqlExecutor = struct {
     /// When non-null, only mutations whose key hashes to this partition are applied.
     /// Set by FoldExecutor at init time; null means apply all (single-partition or direct).
     filter_partition: ?u32 = null,
+    /// Total data partition count. Used with filter_partition to route keys.
+    part_count: u32 = 1,
+    /// Foreign rows received from peer partitions via exchange before this execution.
+    /// Set by FoldExecutor for multi-partition txns; slice is borrowed (lifetime = run() call).
+    pending_foreign_rows: []const ForeignRowEntry = &.{},
     error_detail: [256]u8,
     error_detail_len: usize = 0,
 
@@ -476,7 +492,9 @@ pub const SqlExecutor = struct {
 
         // If there are no pending mutations for this table, fast path.
         const has_pending = if (ctx.pending_mutations) |pm| blk: {
-            for (pm.items) |m| { if (m.table_id == s.table_id) break :blk true; }
+            for (pm.items) |m| {
+                if (m.table_id == s.table_id) break :blk true;
+            }
             break :blk false;
         } else false;
 
@@ -485,101 +503,111 @@ pub const SqlExecutor = struct {
                 const r = try self.rowToValues(row, s.columns, ctx.alloc);
                 try out.append(ctx.alloc, r);
             }
-            return;
-        }
+        } else {
 
-        // Build a key → values map from storage, then overlay pending mutations.
-        // This gives read-your-own-writes semantics within a transaction block.
-        const Entry = struct { key: []u8, vals: ?[]?ColumnValue };
-        var rows: std.ArrayList(Entry) = .empty;
-        defer {
-            for (rows.items) |e| {
-                ctx.alloc.free(e.key);
-                if (e.vals) |v| {
-                    for (v) |cv| if (cv) |c| c.freeIfOwned(ctx.alloc);
-                    ctx.alloc.free(v);
-                }
-            }
-            rows.deinit(ctx.alloc);
-        }
-
-        while (iter.next() catch return error.StorageReadError) |row| {
-            const key = try ctx.alloc.dupe(u8, row.key);
-            const vals = try self.rowToValues(row, s.columns, ctx.alloc);
-            // rowToValues returns []const ?ColumnValue; we need []?ColumnValue for mutation
-            const mutable_vals = try ctx.alloc.alloc(?ColumnValue, vals.len);
-            @memcpy(mutable_vals, vals);
-            ctx.alloc.free(vals); // free the const slice, keep the mutable copy
-            try rows.append(ctx.alloc, .{ .key = key, .vals = mutable_vals });
-        }
-
-        // Apply pending mutations in order (matches execution order).
-        for (ctx.pending_mutations.?.items) |m| {
-            if (m.table_id != s.table_id) continue;
-            switch (m.kind) {
-                .delete => {
-                    var i: usize = 0;
-                    while (i < rows.items.len) {
-                        if (std.mem.eql(u8, rows.items[i].key, m.key)) {
-                            const e = rows.orderedRemove(i);
-                            ctx.alloc.free(e.key);
-                            if (e.vals) |v| {
-                                for (v) |cv| if (cv) |c| c.freeIfOwned(ctx.alloc);
-                                ctx.alloc.free(v);
-                            }
-                        } else i += 1;
+            // Build a key → values map from storage, then overlay pending mutations.
+            // This gives read-your-own-writes semantics within a transaction block.
+            const Entry = struct { key: []u8, vals: ?[]?ColumnValue };
+            var rows: std.ArrayList(Entry) = .empty;
+            defer {
+                for (rows.items) |e| {
+                    ctx.alloc.free(e.key);
+                    if (e.vals) |v| {
+                        for (v) |cv| if (cv) |c| c.freeIfOwned(ctx.alloc);
+                        ctx.alloc.free(v);
                     }
-                },
-                .update => {
-                    const new_vals = m.values orelse continue;
-                    var found = false;
-                    for (rows.items) |*e| {
-                        if (std.mem.eql(u8, e.key, m.key)) {
-                            // Replace values with mutation's new values.
-                            if (e.vals) |old| {
-                                for (old) |cv| if (cv) |c| c.freeIfOwned(ctx.alloc);
-                                ctx.alloc.free(old);
+                }
+                rows.deinit(ctx.alloc);
+            }
+
+            while (iter.next() catch return error.StorageReadError) |row| {
+                const key = try ctx.alloc.dupe(u8, row.key);
+                const vals = try self.rowToValues(row, s.columns, ctx.alloc);
+                // rowToValues returns []const ?ColumnValue; we need []?ColumnValue for mutation
+                const mutable_vals = try ctx.alloc.alloc(?ColumnValue, vals.len);
+                @memcpy(mutable_vals, vals);
+                ctx.alloc.free(vals); // free the const slice, keep the mutable copy
+                try rows.append(ctx.alloc, .{ .key = key, .vals = mutable_vals });
+            }
+
+            // Apply pending mutations in order (matches execution order).
+            for (ctx.pending_mutations.?.items) |m| {
+                if (m.table_id != s.table_id) continue;
+                switch (m.kind) {
+                    .delete => {
+                        var i: usize = 0;
+                        while (i < rows.items.len) {
+                            if (std.mem.eql(u8, rows.items[i].key, m.key)) {
+                                const e = rows.orderedRemove(i);
+                                ctx.alloc.free(e.key);
+                                if (e.vals) |v| {
+                                    for (v) |cv| if (cv) |c| c.freeIfOwned(ctx.alloc);
+                                    ctx.alloc.free(v);
+                                }
+                            } else i += 1;
+                        }
+                    },
+                    .update => {
+                        const new_vals = m.values orelse continue;
+                        var found = false;
+                        for (rows.items) |*e| {
+                            if (std.mem.eql(u8, e.key, m.key)) {
+                                // Replace values with mutation's new values.
+                                if (e.vals) |old| {
+                                    for (old) |cv| if (cv) |c| c.freeIfOwned(ctx.alloc);
+                                    ctx.alloc.free(old);
+                                }
+                                const duped = try ctx.alloc.alloc(?ColumnValue, new_vals.len);
+                                for (new_vals, 0..) |v, i| duped[i] = try v.dupe(ctx.alloc);
+                                e.vals = duped;
+                                found = true;
+                                break;
                             }
+                        }
+                        if (!found) {
+                            // UPDATE that didn't match in storage — add as new row.
+                            const key = try ctx.alloc.dupe(u8, m.key);
                             const duped = try ctx.alloc.alloc(?ColumnValue, new_vals.len);
                             for (new_vals, 0..) |v, i| duped[i] = try v.dupe(ctx.alloc);
-                            e.vals = duped;
-                            found = true;
-                            break;
+                            try rows.append(ctx.alloc, .{ .key = key, .vals = duped });
                         }
-                    }
-                    if (!found) {
-                        // UPDATE that didn't match in storage — add as new row.
-                        const key = try ctx.alloc.dupe(u8, m.key);
-                        const duped = try ctx.alloc.alloc(?ColumnValue, new_vals.len);
-                        for (new_vals, 0..) |v, i| duped[i] = try v.dupe(ctx.alloc);
-                        try rows.append(ctx.alloc, .{ .key = key, .vals = duped });
-                    }
-                },
-                .insert => {
-                    const new_vals = m.values orelse continue;
-                    // Only add if key not already present (duplicate insert = conflict).
-                    const already_there = for (rows.items) |e| {
-                        if (std.mem.eql(u8, e.key, m.key)) break true;
-                    } else false;
-                    if (!already_there) {
-                        const key = try ctx.alloc.dupe(u8, m.key);
-                        const duped = try ctx.alloc.alloc(?ColumnValue, new_vals.len);
-                        for (new_vals, 0..) |v, i| duped[i] = try v.dupe(ctx.alloc);
-                        try rows.append(ctx.alloc, .{ .key = key, .vals = duped });
-                    }
-                },
+                    },
+                    .insert => {
+                        const new_vals = m.values orelse continue;
+                        // Only add if key not already present (duplicate insert = conflict).
+                        const already_there = for (rows.items) |e| {
+                            if (std.mem.eql(u8, e.key, m.key)) break true;
+                        } else false;
+                        if (!already_there) {
+                            const key = try ctx.alloc.dupe(u8, m.key);
+                            const duped = try ctx.alloc.alloc(?ColumnValue, new_vals.len);
+                            for (new_vals, 0..) |v, i| duped[i] = try v.dupe(ctx.alloc);
+                            try rows.append(ctx.alloc, .{ .key = key, .vals = duped });
+                        }
+                    },
+                }
             }
-        }
 
-        // Output the overlaid rows. Deep-copy so out owns independent values
-        // (the defer above frees the rows map; out is freed by the caller).
-        for (rows.items) |e| {
-            if (e.vals) |v| {
-                const r = try ctx.alloc.alloc(?ColumnValue, v.len);
-                errdefer ctx.alloc.free(r);
-                for (v, 0..) |cv, i| r[i] = if (cv) |c| try c.dupe(ctx.alloc) else null;
-                try out.append(ctx.alloc, r);
+            // Output the overlaid rows. Deep-copy so out owns independent values
+            // (the defer above frees the rows map; out is freed by the caller).
+            for (rows.items) |e| {
+                if (e.vals) |v| {
+                    const r = try ctx.alloc.alloc(?ColumnValue, v.len);
+                    errdefer ctx.alloc.free(r);
+                    for (v, 0..) |cv, i| r[i] = if (cv) |c| try c.dupe(ctx.alloc) else null;
+                    try out.append(ctx.alloc, r);
+                }
             }
+        } // end else (mutation-overlay path)
+
+        // Append rows received from peer partitions via exchange (single-Storage mode).
+        // In PartitionedStorage mode pending_foreign_rows is always empty — no-op.
+        for (self.pending_foreign_rows) |entry| {
+            if (entry.table_id != s.table_id) continue;
+            if (entry.key.len == 0) continue; // sentinel key — not a real row
+            const r = entry.row orelse continue; // null = key not found in peer
+            const projected = try self.rowToValues(r, s.columns, ctx.alloc);
+            try out.append(ctx.alloc, projected);
         }
     }
 
@@ -984,13 +1012,17 @@ pub const SqlExecutor = struct {
 
                     // Apply schema-defined defaults for omitted columns; enforce NOT NULL.
                     for (tbl.columns, 0..) |col, ci| {
-                        const provided = for (ins.column_ids) |cid| { if (cid == col.id) break true; } else false;
+                        const provided = for (ins.column_ids) |cid| {
+                            if (cid == col.id) break true;
+                        } else false;
                         if (!provided) {
                             if (col.default_value) |dv| {
                                 full_values[ci].freeIfOwned(ctx.alloc);
                                 full_values[ci] = columnDefaultToValue(dv);
                             } else {
-                                const is_pk = for (tbl.primary_key) |pk| { if (pk == col.id) break true; } else false;
+                                const is_pk = for (tbl.primary_key) |pk| {
+                                    if (pk == col.id) break true;
+                                } else false;
                                 if (col.nullable == .not_null and !is_pk) {
                                     self.setDetail("null value in column \"{s}\" violates not-null constraint", .{col.name});
                                     return error.NullViolation;
@@ -1497,7 +1529,9 @@ pub const SqlExecutor = struct {
         for (tbl.columns, 0..) |col, i| {
             if (!col.unique) continue;
             // PK uniqueness is already enforced by appendInsertMutation.
-            const is_pk = for (tbl.primary_key) |pk_id| { if (pk_id == col.id) break true; } else false;
+            const is_pk = for (tbl.primary_key) |pk_id| {
+                if (pk_id == col.id) break true;
+            } else false;
             if (is_pk) continue;
             if (i >= row_values.len) continue;
             const new_val = row_values[i];
