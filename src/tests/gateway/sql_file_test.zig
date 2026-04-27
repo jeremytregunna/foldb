@@ -73,3 +73,11 @@ test "sql: combinations" {
 test "sql: null" {
     try runner.run(@embedFile("sql/null.sql"), testing.allocator);
 }
+
+test "sql: fk" {
+    try runner.run(@embedFile("sql/fk.sql"), testing.allocator);
+}
+
+test "sql: json" {
+    try runner.run(@embedFile("sql/json.sql"), testing.allocator);
+}

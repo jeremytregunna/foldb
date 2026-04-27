@@ -751,6 +751,16 @@ pub fn build(b: *std.Build) void {
     gateway_module.addImport("errors.zig", errors_module);
     gateway_module.addImport("config.zig", config_module);
 
+    // SQL multi-partition tests — exercises filter_partition with partition_count=2
+    const sql_partition_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/executor/sql_partition_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sql_partition_test_module.addImport("gateway.zig", gateway_module);
+    const sql_partition_tests = b.addTest(.{ .root_module = sql_partition_test_module });
+    const run_sql_partition_tests = b.addRunArtifact(sql_partition_tests);
+
     // Sim transaction DST test
     const sim_txn_dst_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/sim/txn_dst_test.zig"),
@@ -1345,6 +1355,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_driver_tests.step);
     test_step.dependOn(&run_recovery_tests.step);
     test_step.dependOn(&run_cross_partition_tests.step);
+    test_step.dependOn(&run_sql_partition_tests.step);
     test_step.dependOn(&run_sql_lexer_tests.step);
     test_step.dependOn(&run_sql_parser_tests.step);
     test_step.dependOn(&run_sql_registry_tests.step);
