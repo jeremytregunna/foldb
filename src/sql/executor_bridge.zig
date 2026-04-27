@@ -626,8 +626,13 @@ pub const SqlExecutor = struct {
         }
         try self.executeScanInner(f.input, ctx, &inner, depth + 1);
         for (inner.items) |row| {
+            // Per-row arena so allocating predicate sub-expressions (JSON access,
+            // string concatenation) are freed once the bool result is obtained.
+            var eval_arena = std.heap.ArenaAllocator.init(ctx.alloc);
+            defer eval_arena.deinit();
             var row_ctx = ctx;
             row_ctx.row = row;
+            row_ctx.alloc = eval_arena.allocator();
             const v = try evalExpr(f.predicate, row_ctx);
             if (v.toBool() orelse false) {
                 const r = try SqlExecutor.dupeRow(row, ctx.alloc);
@@ -1219,7 +1224,11 @@ pub const SqlExecutor = struct {
             // Apply WHERE filter (already applied above when FROM is present).
             if (from_rows.items.len == 0) {
                 if (upd.filter) |f| {
-                    const v = try evalExpr(f, row_ctx);
+                    var eval_arena = std.heap.ArenaAllocator.init(ctx.alloc);
+                    defer eval_arena.deinit();
+                    var filter_ctx = row_ctx;
+                    filter_ctx.alloc = eval_arena.allocator();
+                    const v = try evalExpr(f, filter_ctx);
                     if (!(v.toBool() orelse false)) continue;
                 }
             }
@@ -1320,8 +1329,11 @@ pub const SqlExecutor = struct {
             if (del.filter != null or del.using_table_ids.len > 0) {
                 const target_vals = row_vals.?;
                 const passes = if (del.using_table_ids.len == 0) blk: {
+                    var eval_arena = std.heap.ArenaAllocator.init(ctx.alloc);
+                    defer eval_arena.deinit();
                     var row_ctx = ctx;
                     row_ctx.row = target_vals;
+                    row_ctx.alloc = eval_arena.allocator();
                     const v = try evalExpr(del.filter.?, row_ctx);
                     break :blk v.toBool() orelse false;
                 } else blk: {
@@ -1683,8 +1695,13 @@ pub const SqlExecutor = struct {
                     },
                     .not_matched => |nm| {
                         if (found_target_idx != null) continue :when_loop;
+                        const target_col_count = tbl.columns.len;
+                        const padded = try ctx.alloc.alloc(?ColumnValue, target_col_count + src_row.len);
+                        defer ctx.alloc.free(padded);
+                        @memset(padded[0..target_col_count], null);
+                        @memcpy(padded[target_col_count..], src_row);
                         var row_ctx = ctx;
-                        row_ctx.row = src_row;
+                        row_ctx.row = padded;
 
                         if (nm.cond) |c| {
                             const nv = evalExpr(c, row_ctx) catch plan_mod.Value.null_val;

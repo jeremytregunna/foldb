@@ -81,3 +81,7 @@ test "sql: fk" {
 test "sql: json" {
     try runner.run(@embedFile("sql/json.sql"), testing.allocator);
 }
+
+test "sql: merge" {
+    try runner.run(@embedFile("sql/merge.sql"), testing.allocator);
+}

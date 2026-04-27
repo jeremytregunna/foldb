@@ -273,15 +273,34 @@ pub const TypeChecker = struct {
     }
 
     fn checkMerge(self: *TypeChecker, stmt: ast.MergeStmt, params: []const ast.SqlType) TypeCheckError!void {
-        _ = self.schema.getTable(stmt.target.name) orelse return error.TableNotFound;
-        const scope: []const ScopeEntry = &.{};
-        const ctx = self.makeCtx(params, scope);
+        const target_tbl = self.schema.getTable(stmt.target.name) orelse return error.TableNotFound;
+        var scope_list: std.ArrayList(ScopeEntry) = .empty;
+        defer scope_list.deinit(self.alloc);
+        try scope_list.append(self.alloc, .{
+            .alias = stmt.target.alias orelse stmt.target.name,
+            .table = target_tbl,
+        });
+        // Add source table to scope so ON condition and WHEN clauses can reference it.
+        switch (stmt.source.ref) {
+            .named => |n| {
+                const src_tbl = self.schema.getTable(n.name) orelse return error.TableNotFound;
+                try scope_list.append(self.alloc, .{ .alias = n.alias orelse n.name, .table = src_tbl });
+            },
+            else => {},
+        }
+        const ctx = self.makeCtx(params, scope_list.items);
         const on_t = try self.inferExpr(stmt.on, ctx);
         if (!on_t.eql(.bool)) return error.TypeMismatch;
         for (stmt.whens) |w| {
             switch (w) {
                 .matched => |m| {
                     if (m.cond) |c| _ = try self.inferExpr(c, ctx);
+                    switch (m.action) {
+                        .update => |asgns| {
+                            for (asgns) |a| _ = try self.inferExpr(a.value, ctx);
+                        },
+                        else => {},
+                    }
                 },
                 .not_matched => |nm| {
                     if (nm.cond) |c| _ = try self.inferExpr(c, ctx);
