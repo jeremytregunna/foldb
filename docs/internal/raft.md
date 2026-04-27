@@ -73,9 +73,13 @@ Config changes use joint consensus (two phases): a `pending_config` is tracked d
 
 ## Transport
 
-`TcpTransport` uses a connection-per-message contract: `send()` opens a new TCP connection, writes one message, and closes the connection immediately. The receiver side mirrors this: `pollOnce()` accepts one connection, reads one message, and closes the accepted fd. `pollOnce()` is non-blocking (O_NONBLOCK on accept) — it returns `false` when no message is waiting, and `true` after delivering one message to an internal inbox queue. `drainInbox()` moves all buffered messages out of the inbox into caller-owned storage for dispatch.
+Two transport implementations exist for different contexts:
 
-`SendFaultHook` is a function pointer (`?*const fn(to: NodeId, msg: Message, ctx: *anyopaque) bool`) injected before a send. When set, it can drop the message by returning `false`; used for deterministic simulation testing (DST) to exercise message-loss scenarios without a real network.
+**`InProcessBus`** is the simulation transport. All nodes share a single bus instance. Messages are enqueued in-order and delivered via `deliverOne()`, which the simulation driver calls to control delivery order. Partitions are simulated by adding node IDs to a drop-set (`partition()`); `healAll()` clears it. `dropAll()` discards queued messages to simulate loss. This is the transport used for deterministic simulation testing (DST) — no network, no threads, full control.
+
+**`TcpTransport`** is the production transport. `send()` connects to a peer lazily on the first message and keeps the connection open for subsequent sends. On write failure the connection is closed and will be re-established on the next send, relying on Raft retransmission to recover the lost message. On the receive side, `pollOnce()` drains the OS accept queue into an `inbound` list, then probes each tracked inbound connection with a non-blocking peek. When data is present, it reads a complete length-prefixed message (blocking) and appends an `Envelope` to an internal inbox. Dead connections are closed and removed. `pollOnce()` returns `true` if at least one message was received, `false` otherwise. `drainInbox()` moves all buffered envelopes into caller-owned storage for dispatch.
+
+`SendFaultHook` (`drop_fn: ?*const fn(?*anyopaque, NodeId) bool`) can be injected into `TcpTransport` before sends. When set, returning `true` silently drops the outbound message; used for fault injection in integration tests.
 
 `listen_port = 0` requests an OS-assigned port; the actual bound port is retrieved via `boundPort()`. `addPeer()` can be called after `init()`, enabling two-phase setup where nodes start with port 0 and fix up peer addresses once all nodes are listening.
 
@@ -83,8 +87,8 @@ Config changes use joint consensus (two phases): a `pending_config` is tracked d
 
 - `src/raft/raft.zig` — module exports and top-level types
 - `src/raft/node.zig` — per-node Raft state machine: propose, tick, message handlers; defines Output and Config
-- `src/raft/cluster.zig` — multi-node cluster coordination
-- `src/raft/rpc.zig` — RPC message definitions and encoding
-- `src/raft/transport.zig` — `TcpTransport` implementation: connection-per-message TCP send/receive, non-blocking `pollOnce`, `drainInbox`, and `SendFaultHook` for DST fault injection
+- `src/raft/cluster.zig` — simulation cluster helpers: `SimCluster` (fixed membership), `DynSimCluster` (dynamic membership), `NetworkSim` / `NetworkConfig` for latency/partition modeling
+- `src/raft/rpc.zig` — RPC message types (`AppendEntriesArgs`, `RequestVoteArgs`, etc.) and binary serialization; wire format is little-endian with a 4-byte length prefix
+- `src/raft/transport.zig` — `InProcessBus` (simulation) and `TcpTransport` (production); `SendFaultHook` for fault injection in integration tests
 - `src/raft/persistent_state.zig` — durable term and voted_for storage
 - `src/raft/types.zig` — shared types: Term, RaftRole

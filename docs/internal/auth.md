@@ -19,7 +19,11 @@ token = base64-std(HMAC-SHA256(key=auth_secret, msg=name + ":" + password))
 
 ### Constant-time comparison
 
-Token comparison uses a branchless XOR accumulator that always scans every configured user entry. This prevents timing attacks from revealing which entry matched.
+Token comparison uses a branchless XOR accumulator that always scans every configured user entry. This prevents timing attacks from revealing which entry matched. The length check is a fast-path that returns false immediately when lengths differ; this is intentional and safe because all valid tokens are exactly 44 bytes — token length is not a secret.
+
+### Database selection at auth time
+
+The Auth frame carries an optional `database_name` field. If non-empty, the server resolves the named database after a successful credential check and sets it as the connection's initial database context (equivalent to `USE DATABASE` being the first statement). If the database does not exist, the connection is closed with `Error(AuthFailed, Fatal)` — there is no separate "database not found" error at this stage. An empty `database_name` leaves the connection without a database context until an explicit `USE DATABASE` statement.
 
 ### No plain-text auth
 
@@ -29,9 +33,10 @@ The `Plain` method (`0x01`) is removed from the wire protocol. Servers do not ad
 
 ## Invariants
 
-1. `auth_secret` is never loaded into the gateway, executor, or storage layer — only in the CLI commands `gen-secret` and `add-user`.
+1. `auth_secret` is parsed from config by `serve` but never forwarded to the gateway, network handler, or storage layer. Only `add-user` reads it to derive a token.
 2. The server's `users` slice contains only pre-derived tokens; no crypto happens per-connection.
 3. Failed auth closes the connection immediately with `Error(AuthFailed, Fatal)`. No partial session is possible.
+4. A non-empty `database_name` in the Auth frame that does not resolve to a known database also closes the connection with `Error(AuthFailed, Fatal)` — the error code is the same as a bad credential.
 
 ---
 

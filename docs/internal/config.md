@@ -17,12 +17,12 @@ The config subsystem loads node configuration from a JSON file. All fields are o
 | `partition_count` | `1` | Number of data and log partitions. Fixed at startup; must match across all nodes. |
 | `listen_addr` | `0.0.0.0` | TCP bind address for the client-facing server. |
 | `listen_port` | `7432` | TCP port. |
-| `peers` | `[]` | Peer addresses for Raft (e.g. `"192.168.1.2:7432"`). Empty = single-node mode. |
+| `peers` | `[]` | Peer nodes for Raft. Each entry is an object with `id` (u64, matching that peer's `node_id`) and `addr` (`"host:port"`). Empty = single-node mode. |
 | `max_epoch_size` | `10000` | Maximum intents per sequencer epoch. |
 | `election_timeout_min_ms` | `150` | Raft election timeout lower bound. |
 | `election_timeout_max_ms` | `300` | Raft election timeout upper bound. |
 | `heartbeat_interval_ms` | `50` | Raft leader heartbeat interval. |
-| `s3_endpoint` | `""` | Endpoint URL, e.g. `"http://1.2.3.4:9000"` or `"https://s3.example.com"`. Bare `host[:port]` without a scheme is also accepted (defaults to port 443). The S3 client handles hostname resolution at connect time. |
+| `s3_endpoint` | `""` | Endpoint URL, e.g. `"http://1.2.3.4:9000"` or `"https://s3.example.com"`. `https://` without an explicit port defaults to 443; `http://` without an explicit port defaults to 80. Bare `host[:port]` without a scheme is also accepted (defaults to port 443). The S3 client handles hostname resolution at connect time. |
 | `s3_bucket` | `""` | S3 bucket name. |
 | `s3_access_key` | `""` | S3 access key. |
 | `s3_secret_key` | `""` | S3 secret key. |
@@ -58,6 +58,7 @@ Tokens are derived offline: `add-user --config <path> --name <name> --password <
 - `listen_port` must be ≥ 1. `from_slice` rejects zero with `error.InvalidConfig`.
 - `election_timeout_min_ms` must be strictly less than `election_timeout_max_ms`. `from_slice` enforces this and rejects equal or inverted values with `error.InvalidConfig`.
 - `partition_count` sizes internal arrays at startup. Changing it while data exists under `storage_dir` produces incorrect behaviour.
+- Each peer's `id` must match the `node_id` that peer was started with and must be unique across the cluster. IDs are stable Raft identifiers; reusing or swapping them corrupts term/vote state.
 - A rotated `auth_secret` invalidates all existing tokens.
 
 ## Source Files

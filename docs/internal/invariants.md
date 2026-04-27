@@ -6,7 +6,7 @@ targets for TLA+ verification, particularly the multi-partition execution cluste
 
 ---
 
-## Core types (§4)
+## Core types
 
 **Explicit:**
 
@@ -14,7 +14,7 @@ targets for TLA+ verification, particularly the multi-partition execution cluste
 
 ---
 
-## System-level (§1)
+## System-level
 
 **Explicit:**
 
@@ -27,7 +27,7 @@ targets for TLA+ verification, particularly the multi-partition execution cluste
 
 ---
 
-## Log (§5.6)
+## Log
 
 **Explicit:**
 
@@ -45,7 +45,7 @@ targets for TLA+ verification, particularly the multi-partition execution cluste
 
 ---
 
-## Storage (§6.9)
+## Storage
 
 **Explicit:**
 
@@ -61,7 +61,7 @@ targets for TLA+ verification, particularly the multi-partition execution cluste
 
 ---
 
-## Fold Executor (§7.6)
+## Fold Executor
 
 **Explicit:**
 
@@ -77,7 +77,7 @@ targets for TLA+ verification, particularly the multi-partition execution cluste
 
 ---
 
-## Multi-partition execution (§7.3)
+## Multi-partition execution
 
 All implied. None are stated as formal invariants in the spec; highest TLA+ value.
 
@@ -91,7 +91,7 @@ All implied. None are stated as formal invariants in the spec; highest TLA+ valu
 
 ---
 
-## Sequencer (§8.5)
+## Sequencer
 
 **Explicit:**
 
@@ -106,7 +106,7 @@ All implied. None are stated as formal invariants in the spec; highest TLA+ valu
 
 ---
 
-## Gateway (§9.5)
+## Gateway
 
 **Explicit:**
 
@@ -122,7 +122,7 @@ All implied. None are stated as formal invariants in the spec; highest TLA+ valu
 
 ---
 
-## Schema (§10.5)
+## Schema
 
 **Implied:**
 
@@ -132,7 +132,7 @@ All implied. None are stated as formal invariants in the spec; highest TLA+ valu
 
 ---
 
-## CDC (§12)
+## CDC
 
 **Implied:**
 
@@ -142,7 +142,7 @@ All implied. None are stated as formal invariants in the spec; highest TLA+ valu
 
 ---
 
-## Operations (§13)
+## Operations
 
 **Implied:**
 

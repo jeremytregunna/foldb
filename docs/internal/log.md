@@ -20,8 +20,8 @@ The log is partitioned into N **log partitions** (default 64, configurable at cl
 
 ## Invariants
 
-- `appendEntry()` requires `seq == current_seq + 1`. Violation returns `SeqOutOfOrder`.
-- `appendEntryAt()` requires `seq > current_seq`; `current_seq` jumps to the written seq, which may leave a real gap in the sequence space. Used by data partition logs driven by the sequencer, not by Raft followers (which use `appendEntry()` and receive entries contiguously).
+- `append_entry()` requires `seq == current_seq + 1`. Violation returns `SeqOutOfOrder`.
+- `append_entry_at()` requires `seq > current_seq`; `current_seq` jumps to the written seq, which may leave a real gap in the sequence space. Used by data partition logs driven by the sequencer, not by Raft followers (which use `append_entry()` and receive entries contiguously).
 - Sealed segments are immutable. Only the active (current) segment accepts writes.
 - A segment seals automatically at 10,000 entries and a new one is created.
 - `seal()` is idempotent. Once sealed, no further appends are accepted.
@@ -34,15 +34,15 @@ The log does not interpret payload semantics — callers are responsible for ser
 
 ## Caller Responsibilities
 
-- Enforce valid sequence numbers before calling `appendEntry`.
+- Enforce valid sequence numbers before calling `append_entry`.
 - Serialize payloads; the log treats them as opaque bytes.
 - Own memory returned by `read()` — callers must deinit returned entries.
-- Call `notifySnapshot(seq)` before truncating the prefix, to prevent live snapshotted entries from being discarded.
+- Call `notify_snapshot(seq)` before truncating the prefix, to prevent live snapshotted entries from being discarded.
 
 ## Truncation
 
-- **Prefix truncation** (`truncate_prefix`): Discards entries older than a snapshot point. Safe only after `notifySnapshot`.
-- **Suffix truncation** (`truncateSuffix`): Resolves Raft log conflicts by removing entries newer than a given seq. Can unseal segments to restore an older active tail.
+- **Prefix truncation** (`truncate_prefix`): Discards entries older than a snapshot point. Safe only after `notify_snapshot`.
+- **Suffix truncation** (`truncate_suffix`): Resolves Raft log conflicts by removing entries newer than a given seq. Can unseal segments to restore an older active tail.
 
 ## Error Conditions
 
@@ -55,9 +55,13 @@ The log does not interpret payload semantics — callers are responsible for ser
 | `DiskFull` | No space to write new entry or segment |
 | `SegmentNotFound` | Read requested seq not present in any segment |
 
-## Subscription (Planned)
+## Executor Notification
 
-The spec defines a `subscribe(from: Seq) !Subscription` API for streaming ordered entries to executors as they are committed. The current implementation uses synchronous polling (`read(from_seq, max)`) instead. Streaming subscription is not yet implemented.
+The spec defines a `subscribe(from: Seq) !Subscription` API for streaming ordered entries to executors as they are committed; that interface is not yet implemented.
+
+The current mechanism is polling with change detection: `Log` maintains an `append_epoch` atomic counter incremented by `notifyAppend()` after every append. Executors call `waitForEntries(from_seq)`, which spins on a 100 µs nanosleep until either `current_seq >= from_seq` or the epoch counter changes (indicating a new append or a shutdown signal). `LogMux` mirrors this interface across multiple partitioned logs.
+
+`stop()` on an executor calls `LogMux.notifyAppend()` to unblock any thread blocked in `waitForEntries`.
 
 ## What the Log Does Not Do
 
@@ -78,3 +82,4 @@ Metrics: `entries_appended`, `bytes_appended`, `entries_read`, `bytes_read`, `cu
 - `src/log/config_change.zig` — config change entry encoding
 - `src/log/crc.zig` — CRC32c implementation
 - `src/log/mod.zig` — module exports
+- `src/log/mux.zig` — LogMux: merges N partitioned logs into a single seq-ordered stream for executor consumption

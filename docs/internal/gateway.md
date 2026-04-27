@@ -10,12 +10,18 @@ Accepts client requests, validates and enriches them, resolves nondeterminism, a
 
 | Operation | Purpose |
 |---|---|
-| `register(sql)` | Parse, type-check, and cache a query by hash |
+| `register(sql)` | Parse, type-check, and cache a query by hash (default database) |
+| `registerForDb(sql, db_id)` | Same as `register`, scoped to a specific database |
+| `applyDdl(sql)` | Validate and replicate a DDL statement via Raft |
+| `applyDdlForDb(sql, db_id)` | Same as `applyDdl`, scoped to a specific database |
 | `execute(hash, params)` | Submit a DML mutation |
 | `querySelect(hash, params)` | Execute a SELECT against current state |
 | `readAt(hash, params, seq)` | Historical read at a specific sequence number |
+| `getDatabaseId(name)` | Resolve a database name to its numeric ID |
 
-All operations require the query to be pre-registered. An unregistered hash returns `QueryNotFound`.
+All DML and SELECT operations require the query to be pre-registered. An unregistered hash returns `QueryNotFound`.
+
+`CREATE DATABASE` and `DROP DATABASE` are cluster-level DDL — `applyDdl` detects these by prefix and routes them with a `.cluster` payload kind so all nodes update the cluster catalog regardless of the active database context.
 
 ## Nondeterminism Resolution
 
@@ -30,9 +36,9 @@ Resolved values are bundled into the intent payload. Clients may supply pre-reso
 
 The gateway enforces three domain boundaries:
 
-1. **DML entry**: After sequencer commit, `validateTxnEntry()` verifies the CRC of the serialized payload and decodes parameters against the registered query's type schema. Corrupted entries abort cleanly without reaching storage.
+1. **DML entry**: After sequencer commit, the executor constructs a `ValidatedTxnEntry` from the raw log entry — this verifies the CRC of the serialized payload and decodes parameters against the registered query's type schema. The executor core accepts only this type; corrupted entries abort cleanly without reaching storage.
 2. **SELECT/read**: Parameters are decoded and count-checked against the query's type schema before execution.
-3. **DDL replay**: On restart, schema and query registry rebuild idempotently — duplicate `CREATE` statements are silently dropped.
+3. **DDL replay**: On restart, `replayFromLog()` rebuilds the schema and query registry idempotently — duplicate `CREATE` statements are silently dropped.
 
 ## Reconnaissance
 
@@ -49,18 +55,21 @@ Each client operation is assigned a stable `client_seq` that is preserved across
 ## Coordination
 
 - **Sequencer**: DML mutations are submitted via `Sequencer.submitBytes()`, which assigns a global sequence number and writes the intent to the appropriate partition log after Raft replication of the ordering decision.
-- **Executor**: Reads committed entries, validates them, and applies mutations to storage. Constraint violations and missing query hashes are returned as abort codes.
-- **Storage**: SELECTs and `readAt` queries are served directly from storage without sequencer involvement.
+- **FoldExecutor**: One per data partition, each running on a dedicated OS thread pinned to a CPU. Reads committed entries from a shared `LogMux`, constructs `ValidatedTxnEntry` values, and applies mutations to its partition's storage. Constraint violations and missing query hashes are returned as abort codes. The gateway waits for all FoldExecutors to advance past a committed seq before returning to the caller.
+- **Storage**: SELECTs and `readAt` queries bypass the sequencer and are served via `PartitionedStorage`, which fans the read out across all partition storages so every partition's data is visible.
 
 ## Storage Backend
 
-The gateway manages `partition_count` storage instances, created at init under `{storage_dir}/p0`, `{storage_dir}/p1`, etc. All internal calls (`SqlExecutor`, `reconnaissanceScan`, `applyDdlToSchema`, `flushAll`) route through a `PartitionedStorage` wrapper.
+The gateway manages `partition_count` storage instances, created at init under `{storage_dir}/p0`, `{storage_dir}/p1`, etc. Each storage is owned by the gateway and handed to its corresponding FoldExecutor at init. A `PartitionedStorage` wrapper over all storages is used for two things: reconnaissance scans (which must see across partitions to build read/write set hints) and cross-partition reads (`querySelect`/`readAt`). FoldExecutors write directly to their single assigned storage, not through `PartitionedStorage`.
+
+Log partitions are independent of data partitions. `log_partition_count` (default: same as `partition_count`) controls the number of sequencer log partitions and can be tuned independently for write throughput.
 
 S3 object store support is configured via `Options`:
 
 | Field | Purpose |
 |---|---|
-| `s3_endpoint_ip` / `s3_endpoint_host` / `s3_endpoint_port` | Endpoint address for connection and Host header |
+| `s3_endpoint_host` / `s3_endpoint_port` | Endpoint hostname and port for connection and Host header |
+| `s3_io` | `std.Io` context required for async S3 I/O; must be non-null when S3 credentials are provided (returns `IoRequiredForS3` otherwise) |
 | `s3_access_key` / `s3_secret_key` / `s3_region` | AWS credentials and signing region |
 | `s3_bucket` | Bucket name |
 | `s3_bucket_style` | `.path` (S3-compatible servers) or `.virtual_hosted` (AWS S3) |
@@ -89,7 +98,7 @@ Extended error detail is available via `lastDetail()`.
 - Does not handle authentication or authorization — that is the network layer's responsibility.
 - Does not perform cross-partition joins.
 - Does not use pessimistic locking — concurrency is optimistic, validated in storage.
-- Does not support dynamic cluster reconfiguration — multi-node Raft replication via `TcpTransport` is supported, but adding or removing nodes at runtime is not.
+- Does not fully support dynamic cluster reconfiguration — sequencer nodes can be added or removed at runtime via `addSequencerNode` / `removeSequencerNode`, but only the ordering layer is affected. New nodes do not automatically receive data partition storage state; that must be bootstrapped separately.
 
 ## Source Files
 

@@ -8,27 +8,33 @@ Accepts atomic mutation batches from the executor, persists them to an LSM-struc
 
 ## Data Partitioning
 
-Data is partitioned independently of log partitions. Data partitioning is by primary key hash (default) or range (opt-in per table, for natural-order scans). Partition count is fixed at table creation.
+Data is partitioned by primary key hash (`wyhash(0, key) % N`). Partition count is fixed at table creation. The `PartitionedStorage` wrapper routes reads and writes by this formula; `partitionFor(key, N)` in `partition_util.zig` exposes the same formula so executor and gateway code can compute partition IDs without holding a `PartitionedStorage`.
 
 ## Guarantees
 
 - **MVCC reads**: `get()` and `scan()` return a consistent view at a caller-specified `seq`. Visibility rule: a row version is visible if its `write_seq <= at_seq`. Reads return the most recent visible version.
 - **Atomic apply**: All mutations in a single `apply(mutations, seq)` call are committed atomically. No partial writes are observable.
 - **Durability**: Data survives process restarts via a disk-resident LSM (L0–L2 local levels; L3 optional object store). The block cache is ephemeral — it provides no durability guarantee.
-- **Index consistency**: Secondary indexes (JSON path and HNSW vector) are kept in sync with base-table mutations synchronously within each `apply()`. Index backfill runs automatically when a new index is registered.
+- **Index consistency**: Secondary indexes (JSON path and HNSW vector) are kept in sync with base-table mutations synchronously within each `apply()`. If index maintenance fails after the base-table write, all indexes are cleared and rebuilt from base-table state before the error is returned. Index backfill runs automatically when a new index is registered.
 - **Snapshot isolation on vector search**: HNSW search respects sequence visibility — deleted and future-seq nodes are hidden from results.
 
 ## Invariants
 
-- **LSM structure**: L0 is unordered; L1–L2 are key-range partitioned. Compaction deduplicates by key (keeping the newest seq). Each level tracks `seq_min/seq_max` for visibility filtering.
+- **LSM structure**: L0 is unordered; L1–L2 are key-range partitioned. Each SSTable file carries `seq_min` / `seq_max` metadata used to skip files that cannot satisfy the caller's `at_seq`. Compaction deduplicates by key (keeping the newest seq).
 - **Block cache**: 2-clock LRU, 32 MiB default. Not persisted across restarts. L3 cache misses trigger a download from the object store.
-- **HNSW vector index**: Fully in-memory; rebuilt from base-table scan on recovery. Deletes are soft-tombstoned — physical pruning happens after compaction, not on each delete.
+- **HNSW vector index**: Fully in-memory; rebuilt from base-table scan on recovery. Deletes are soft-tombstoned — physical pruning happens after L0 compaction fires, not on each delete.
 - **Sequence monotonicity**: `apply()` is called with strictly increasing sequence numbers. Storage does not validate this — it is the executor's responsibility.
-- **PartitionedStorage routing**: The caller must use a consistent key hash (`wyhash(key) % N`) for all routing decisions. `scan` fans out to all partitions and merge-sorts by key — correctness depends on each partition holding disjoint key ranges (by hash mod N).
+- **PartitionedStorage routing**: The caller must use a consistent key hash (`wyhash(0, key) % N`) for all routing decisions. `scan` fans out to all partitions and merge-sorts by key — correctness depends on each partition holding disjoint key ranges (by hash mod N).
+
+## Read Tracking (OCC)
+
+`Storage` exposes a `read_tracker: ?*ReadTracker` field. When set, every `get()` and `scan()` records `(table_id, key, row_seq)` into the tracker. The executor attaches a tracker around handler calls to detect read-write conflicts against `recon_seq` (optimistic concurrency control).
+
+Limitation: phantom reads from `scan()` (new keys inserted into a range after the recon seq) are not currently tracked. Range predicate tracking is a known gap.
 
 ## Read Path
 
-Multi-level merge: memtable → L0 (newest-first) → L1–L2 (binary search) → L3 (remote). Returns the first match satisfying the seq visibility rule.
+Multi-level merge: memtable → L0 (newest-first) → L1–L2 (binary search by file key range) → L3 (remote). Returns the first match satisfying the seq visibility rule. Files whose `seq_min > at_seq` are skipped.
 
 ## Write Path
 
@@ -43,18 +49,14 @@ Mutations route to the memtable. When the memtable fills, it is flushed to L0. W
 
 ## Snapshots
 
-A snapshot captures table state at a given seq and writes a manifest to the object store (if configured). A post-snapshot hook signals the executor to truncate logs and evict idempotency caches. L3 consistency is best-effort — object store PUTs may lag or fail.
+A snapshot captures table state at a given seq and writes a manifest to the object store (if configured). A `PostSnapshotHook` is called after each successful snapshot with the snapshot seq; the executor uses this to trigger log truncation and idempotency cache eviction. L3 consistency is best-effort — object store PUTs may lag or fail.
 
 **Object store is optional.** When S3 is not configured, snapshots are disabled and the log is never truncated. Recovery requires full log replay. See `docs/internal/config.md`.
-
-## Learned Indexes
-
-For large, stable, read-heavy tables, the in-memory level index can be replaced with a small learned model (piecewise linear regression, RMI design) that predicts key position within ±32 entries, followed by a bounded binary search. This is an optimization only — it is disabled if model error exceeds a threshold, falling back to standard binary search.
 
 ## Integration with Other Subsystems
 
 - **Executor → Storage**: Executor calls `apply(mutations, seq)` with fully validated, pre-image-aware mutations.
-- **Storage → Log**: Via a `SnapshotLogWriter` callback, storage signals the executor to write snapshot markers, enabling log prefix truncation.
+- **Storage → Log**: Via a `SnapshotLogWriter` callback in `SnapshotPolicy`, storage signals the executor to write snapshot markers, enabling log prefix truncation.
 - **Storage → CDC**: After a successful `apply()`, the executor dispatches CDC events using before-images sourced from storage reads taken prior to the apply.
 
 ## Error Conditions
@@ -75,6 +77,7 @@ For large, stable, read-heavy tables, the in-memory level index can be replaced 
 ## Source Files
 
 - `src/storage/storage.zig` — top-level API: apply, get, scan, index registration; also contains `PartitionedStorage` (routing wrapper over `[]*Storage`) and re-exports `S3Config`, `S3ObjectStore`, `BucketStyle`
+- `src/storage/partition_util.zig` — `partitionFor(key, N)` helper; same hash formula as `PartitionedStorage.partitionIdx`, extracted so executor/gateway can route without a full `PartitionedStorage`
 - `src/storage/lsm.zig` — LSM tree: level management, compaction, visibility merge
 - `src/storage/memtable.zig` — in-memory write buffer
 - `src/storage/sstable.zig` — sorted string table format for L1/L2
@@ -90,4 +93,4 @@ For large, stable, read-heavy tables, the in-memory level index can be replaced 
 - `src/storage/codec.zig` — row serialization and deserialization
 - `src/storage/vector_codec.zig` — vector value encoding
 - `src/storage/crc.zig` — CRC validation for storage blocks
-- `src/storage/types.zig` — shared types: ColumnValue, Mutation, TableSchema
+- `src/storage/types.zig` — shared types: ColumnValue, Mutation, TableSchema, ReadTracker, ReadEntry
