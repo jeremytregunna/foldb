@@ -69,6 +69,9 @@ pub const TypeChecker = struct {
             .alter_table => |q| try self.checkAlterTable(q),
             .drop_table => {},
             .describe_table => {},
+            .describe_transaction => {},
+            .show_transactions => {},
+            .drop_transaction => {},
             .transaction => |q| try self.checkTransaction(q),
         }
     }

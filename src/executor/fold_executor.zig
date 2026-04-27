@@ -496,6 +496,14 @@ pub const FoldExecutor = struct {
         if (parsed.stmts.len == 0) return;
         const stmt = parsed.stmts[0];
 
+        // drop_transaction doesn't modify the schema; handle it before applyDdl.
+        if (stmt == .drop_transaction) {
+            var hash: sql_mod.QueryHash = undefined;
+            _ = std.fmt.hexToBytes(&hash, stmt.drop_transaction.hash_hex) catch return;
+            self.registry.unregister(hash);
+            return;
+        }
+
         const drop_table_id: ?storage_mod.TableId = if (stmt == .drop_table) blk: {
             const dt = stmt.drop_table;
             const tbl = self.schema.getTable(dt.name) orelse {
@@ -603,7 +611,7 @@ pub const FoldExecutor = struct {
         const rq = self.registry.lookup(hash) orelse return false;
         for (rq.plan.stmts) |stmt| {
             switch (stmt) {
-                .select, .describe_table => {},
+                .select, .describe_table, .describe_transaction, .show_transactions => {},
                 else => return false,
             }
         }
@@ -624,6 +632,12 @@ pub const FoldExecutor = struct {
 
         if (rq.plan.stmts.len > 0 and rq.plan.stmts[0] == .describe_table) {
             return self.buildDescribeResult(rq.plan.stmts[0].describe_table, alloc);
+        }
+        if (rq.plan.stmts.len > 0 and rq.plan.stmts[0] == .describe_transaction) {
+            return self.buildDescribeTransactionResult(rq.plan.stmts[0].describe_transaction, alloc);
+        }
+        if (rq.plan.stmts.len > 0 and rq.plan.stmts[0] == .show_transactions) {
+            return self.buildShowTransactionsResult(alloc);
         }
 
         const decoded_params = try decodeParams(params, rq.param_types, alloc);
@@ -776,6 +790,56 @@ pub const FoldExecutor = struct {
             built += 1;
         }
         return sql_mod.ResultSet{ .columns = columns, .rows = rows, .alloc = alloc };
+    }
+
+    fn buildDescribeTransactionResult(self: *FoldExecutor, hash_hex: []const u8, alloc: std.mem.Allocator) !sql_mod.ResultSet {
+        var hash: sql_mod.QueryHash = undefined;
+        _ = std.fmt.hexToBytes(&hash, hash_hex) catch return error.TableNotFound;
+        const rq = self.registry.lookup(hash) orelse return error.TableNotFound;
+
+        const columns = try alloc.alloc([]const u8, 2);
+        columns[0] = try alloc.dupe(u8, "hash");
+        columns[1] = try alloc.dupe(u8, "sql");
+
+        const rows = try alloc.alloc([]const ?storage_mod.ColumnValue, 1);
+        const row = try alloc.alloc(?storage_mod.ColumnValue, 2);
+        row[0] = .{ .string = try alloc.dupe(u8, hash_hex) };
+        row[1] = .{ .string = try alloc.dupe(u8, rq.sql_text) };
+        rows[0] = row;
+
+        return sql_mod.ResultSet{ .columns = columns, .rows = rows, .alloc = alloc };
+    }
+
+    fn buildShowTransactionsResult(self: *FoldExecutor, alloc: std.mem.Allocator) !sql_mod.ResultSet {
+        const columns = try alloc.alloc([]const u8, 2);
+        columns[0] = try alloc.dupe(u8, "hash");
+        columns[1] = try alloc.dupe(u8, "sql");
+
+        var rows_list: std.ArrayList([]const ?storage_mod.ColumnValue) = .empty;
+        errdefer {
+            for (rows_list.items) |r| {
+                for (r) |v| if (v) |cv| cv.freeIfOwned(alloc);
+                alloc.free(r);
+            }
+            rows_list.deinit(alloc);
+        }
+
+        var it = self.registry.queries.iterator();
+        while (it.next()) |entry| {
+            const rq = entry.value_ptr.*;
+            var hex_buf: [64]u8 = undefined;
+            for (rq.hash, 0..) |b, i| _ = std.fmt.bufPrint(hex_buf[i * 2 .. i * 2 + 2], "{x:0>2}", .{b}) catch {};
+            const row = try alloc.alloc(?storage_mod.ColumnValue, 2);
+            row[0] = .{ .string = try alloc.dupe(u8, &hex_buf) };
+            row[1] = .{ .string = try alloc.dupe(u8, rq.sql_text) };
+            try rows_list.append(alloc, row);
+        }
+
+        return sql_mod.ResultSet{
+            .columns = columns,
+            .rows = try rows_list.toOwnedSlice(alloc),
+            .alloc = alloc,
+        };
     }
 };
 

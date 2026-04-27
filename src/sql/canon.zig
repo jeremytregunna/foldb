@@ -131,6 +131,17 @@ pub const CanonWriter = struct {
                 try self.writeByte(0x14);
                 try self.writeStr(q.name);
             },
+            .describe_transaction => |q| {
+                try self.writeByte(0x15);
+                try self.writeStr(q.hash_hex);
+            },
+            .show_transactions => {
+                try self.writeByte(0x16);
+            },
+            .drop_transaction => |q| {
+                try self.writeByte(0x17);
+                try self.writeStr(q.hash_hex);
+            },
             .transaction => |q| {
                 try self.writeByte(0x20);
                 try self.writeTransaction(q);

@@ -209,6 +209,14 @@ pub const SqlRegistry = struct {
         return self.queries.get(h);
     }
 
+    /// Remove a registered query by hash. No-op if the hash is not registered.
+    pub fn unregister(self: *SqlRegistry, h: QueryHash) void {
+        if (self.queries.fetchRemove(h)) |entry| {
+            entry.value.deinit();
+            self.alloc.destroy(entry.value);
+        }
+    }
+
     /// Apply DDL to the schema registry, bumping schema_seq.
     /// Validates that no registered queries would break.
     pub fn applyDdl(self: *SqlRegistry, stmt: ast.Stmt) RegistryError!void {

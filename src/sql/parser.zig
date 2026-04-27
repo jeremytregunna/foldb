@@ -126,7 +126,7 @@ pub const Parser = struct {
             .kw_merge => .{ .merge = try self.parseMerge() },
             .kw_create => try self.parseCreate(),
             .kw_alter => .{ .alter_table = try self.parseAlter() },
-            .kw_drop => .{ .drop_table = try self.parseDropTable() },
+            .kw_drop => try self.parseDrop(),
             .kw_with => try self.parseWithStmt(),
             .kw_transaction => .{ .transaction = try self.parseTransaction() },
             else => {
@@ -136,9 +136,20 @@ pub const Parser = struct {
                     return error.UnsupportedSyntax;
                 }
                 if (t.kind == .ident and std.ascii.eqlIgnoreCase(t.text(self.src), "describe")) {
+                    if (try self.eatIdent("transaction")) {
+                        const hex = try self.parseHashHex();
+                        return .{ .describe_transaction = .{ .hash_hex = hex } };
+                    }
                     const name = try self.expectIdent();
                     assert(name.len > 0);
                     return .{ .describe_table = .{ .name = name } };
+                }
+                if (t.kind == .ident and std.ascii.eqlIgnoreCase(t.text(self.src), "show")) {
+                    if (!try self.eatIdent("transactions")) {
+                        self.err_msg = "expected TRANSACTIONS after SHOW";
+                        return error.UnexpectedToken;
+                    }
+                    return .{ .show_transactions = {} };
                 }
                 self.err_pos = t.span.start;
                 self.err_msg = "unexpected statement";
@@ -899,7 +910,23 @@ pub const Parser = struct {
         return .{ .table = table, .action = action };
     }
 
-    // ─── DROP TABLE ──────────────────────────────────────────────────────
+    // ─── DROP ────────────────────────────────────────────────────────────
+
+    fn parseDrop(self: *Parser) ParseError!ast.Stmt {
+        _ = try self.expect(.kw_drop);
+        if (try self.eatIdent("transaction")) {
+            const hex = try self.parseHashHex();
+            return .{ .drop_transaction = .{ .hash_hex = hex } };
+        }
+        _ = try self.expect(.kw_table);
+        const if_exists = if (try self.eatIdent("if")) blk: {
+            _ = try self.expectIdent(); // "exists"
+            break :blk true;
+        } else false;
+        const name = try self.expectIdent();
+        assert(name.len > 0);
+        return .{ .drop_table = .{ .name = name, .if_exists = if_exists } };
+    }
 
     fn parseDropTable(self: *Parser) ParseError!ast.DropTableStmt {
         _ = try self.expect(.kw_drop);
@@ -911,6 +938,22 @@ pub const Parser = struct {
         const name = try self.expectIdent();
         assert(name.len > 0);
         return .{ .name = name, .if_exists = if_exists };
+    }
+
+    /// Parse a single-quoted 64-character hex string (for DESCRIBE/DROP TRANSACTION).
+    fn parseHashHex(self: *Parser) ParseError![]const u8 {
+        const t = try self.advance();
+        if (t.kind != .lit_string) {
+            self.err_msg = "expected quoted 64-character hex hash";
+            return error.UnexpectedToken;
+        }
+        const raw = t.text(self.src);
+        const inner = raw[1 .. raw.len - 1]; // strip quotes
+        if (inner.len != 64) {
+            self.err_msg = "transaction hash must be exactly 64 hex characters";
+            return error.UnexpectedToken;
+        }
+        return try self.arena.dupe(u8, inner);
     }
 
     // ─── TRANSACTION BLOCK ───────────────────────────────────────────────

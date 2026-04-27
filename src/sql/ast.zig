@@ -428,6 +428,14 @@ pub const DescribeTableStmt = struct {
     name: []const u8,
 };
 
+pub const DescribeTransactionStmt = struct {
+    hash_hex: []const u8, // 64-char lowercase hex string
+};
+
+pub const DropTransactionStmt = struct {
+    hash_hex: []const u8, // 64-char lowercase hex string
+};
+
 pub const Stmt = union(enum) {
     select: SelectStmt,
     insert: InsertStmt,
@@ -439,6 +447,9 @@ pub const Stmt = union(enum) {
     alter_table: AlterTableStmt,
     drop_table: DropTableStmt,
     describe_table: DescribeTableStmt,
+    describe_transaction: DescribeTransactionStmt,
+    show_transactions: void,
+    drop_transaction: DropTransactionStmt,
     transaction: TransactionBlock,
 };
 

@@ -288,7 +288,8 @@ fn classify(sql: []const u8) SqlKind {
     const kw = s[0..end];
     if (std.ascii.eqlIgnoreCase(kw, "select") or
         std.ascii.eqlIgnoreCase(kw, "with") or
-        std.ascii.eqlIgnoreCase(kw, "describe")) return .select;
+        std.ascii.eqlIgnoreCase(kw, "describe") or
+        std.ascii.eqlIgnoreCase(kw, "show")) return .select;
     if (std.ascii.eqlIgnoreCase(kw, "insert") or
         std.ascii.eqlIgnoreCase(kw, "update") or
         std.ascii.eqlIgnoreCase(kw, "delete") or
@@ -426,6 +427,7 @@ fn dispatch(
     c: *client_mod.Client,
     sql_with_semi: []const u8,
     hashes: *std.ArrayListUnmanaged(QueryHash),
+    session_sql: *std.StringHashMapUnmanaged([]u8),
     alloc: std.mem.Allocator,
     out: *Out,
 ) !void {
@@ -440,6 +442,17 @@ fn dispatch(
         return;
     };
     try hashes.append(alloc, hash);
+
+    // Record hash → SQL text for \hashes and \lookup.
+    {
+        var full_buf: [64]u8 = undefined;
+        const full = hashFull(hash, &full_buf);
+        const gop = try session_sql.getOrPut(alloc, full);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = try alloc.dupe(u8, full);
+            gop.value_ptr.* = try alloc.dupe(u8, sql);
+        }
+    }
 
     switch (kind) {
         .ddl => {
@@ -628,6 +641,16 @@ pub fn main(init: std.process.Init) !void {
     var session_hashes: std.ArrayListUnmanaged(QueryHash) = .empty;
     defer session_hashes.deinit(alloc);
 
+    var session_sql: std.StringHashMapUnmanaged([]u8) = .empty;
+    defer {
+        var it = session_sql.iterator();
+        while (it.next()) |entry| {
+            alloc.free(entry.key_ptr.*);
+            alloc.free(entry.value_ptr.*);
+        }
+        session_sql.deinit(alloc);
+    }
+
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(alloc);
 
@@ -668,9 +691,40 @@ pub fn main(init: std.process.Init) !void {
                 const sql = try std.fmt.allocPrint(alloc, "describe {s};", .{tname});
                 defer alloc.free(sql);
                 historyPush(&history, sql, alloc) catch |err| std.log.warn("historyPush: {}", .{err});
-                dispatch(&c, sql, &session_hashes, alloc, &out) catch |e| try out.print("error: {}\n", .{e});
+                dispatch(&c, sql, &session_hashes, &session_sql, alloc, &out) catch |e| try out.print("error: {}\n", .{e});
                 continue;
             }
+        }
+
+        if (std.mem.eql(u8, trimmed, "\\hashes")) {
+            historyPush(&history, trimmed, alloc) catch |err| std.log.warn("historyPush: {}", .{err});
+            if (session_sql.count() == 0) {
+                try out.print("(no transactions registered this session)\n", .{});
+            } else {
+                var it = session_sql.iterator();
+                while (it.next()) |entry| {
+                    try out.print("{s}\n  {s}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+                }
+            }
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, trimmed, "\\lookup ")) {
+            historyPush(&history, trimmed, alloc) catch |err| std.log.warn("historyPush: {}", .{err});
+            const hex_str = std.mem.trim(u8, trimmed[8..], " \t");
+            if (hex_str.len != 64) {
+                try out.print("error: expected 64-character hex hash\n", .{});
+                continue;
+            }
+            if (session_sql.get(hex_str)) |sql_text| {
+                try out.print("{s}\n", .{sql_text});
+                continue;
+            }
+            // Not in session — ask the server.
+            const describe_sql = try std.fmt.allocPrint(alloc, "DESCRIBE TRANSACTION '{s}';", .{hex_str});
+            defer alloc.free(describe_sql);
+            dispatch(&c, describe_sql, &session_hashes, &session_sql, alloc, &out) catch |e| try out.print("error: {}\n", .{e});
+            continue;
         }
 
         if (std.mem.startsWith(u8, trimmed, "\\call ")) {
@@ -721,7 +775,7 @@ pub fn main(init: std.process.Init) !void {
             if (buf.items.len > 1) historyPush(&history, buf.items, alloc) catch |err| std.log.warn("historyPush: {}", .{err});
 
             var disconnected = false;
-            dispatch(&c, buf.items, &session_hashes, alloc, &out) catch |e| {
+            dispatch(&c, buf.items, &session_hashes, &session_sql, alloc, &out) catch |e| {
                 if (!isConnError(e)) {
                     try out.print("error: {}\n", .{e});
                 } else {
@@ -729,7 +783,7 @@ pub fn main(init: std.process.Init) !void {
                     c.deinit();
                     if (tryReconnect(io, host, port, alloc, &out)) |new_c| {
                         c = new_c;
-                        dispatch(&c, buf.items, &session_hashes, alloc, &out) catch |err| std.log.warn("dispatch on reconnect: {}", .{err});
+                        dispatch(&c, buf.items, &session_hashes, &session_sql, alloc, &out) catch |err| std.log.warn("dispatch on reconnect: {}", .{err});
                     } else {
                         disconnected = true;
                     }

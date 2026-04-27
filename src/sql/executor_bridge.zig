@@ -509,6 +509,9 @@ pub const SqlExecutor = struct {
             .assert => |a| try self.executeAssert(a, ctx),
             .merge => |m| try self.executeMerge(m, ctx, mutations),
             .describe_table => {},
+            .describe_transaction => {},
+            .show_transactions => {},
+            .drop_transaction => {},
         }
     }
 

@@ -402,6 +402,9 @@ pub const StmtPlan = union(enum) {
     assert: AssertPlan,
     merge: MergePlan,
     describe_table: []const u8, // table name (arena-owned)
+    describe_transaction: []const u8, // hash_hex (arena-owned)
+    show_transactions: void,
+    drop_transaction: []const u8, // hash_hex (arena-owned)
 };
 
 // ─── CTE tracking ────────────────────────────────────────────────────────────
@@ -527,6 +530,9 @@ pub const Planner = struct {
             .merge => |q| .{ .merge = try self.planMerge(q) },
             .create_table, .create_index, .alter_table, .drop_table => error.UnsupportedOperation,
             .describe_table => |dt| .{ .describe_table = dt.name },
+            .describe_transaction => |dt| .{ .describe_transaction = dt.hash_hex },
+            .show_transactions => .{ .show_transactions = {} },
+            .drop_transaction => |dt| .{ .drop_transaction = dt.hash_hex },
             .transaction => error.UnsupportedOperation,
         };
     }
