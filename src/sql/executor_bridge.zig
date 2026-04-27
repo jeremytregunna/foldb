@@ -98,9 +98,57 @@ pub const result_ring_size: u32 = 256;
 
 comptime {
     std.debug.assert(std.math.isPowerOfTwo(result_ring_size));
+
+    // Determinism enforcement (spec §7.4): EvalCtx must use logical time (Seq = u64),
+    // not wall-clock types, and must not carry an RNG.
+    if (!@hasField(eval_expr_mod.EvalCtx, "seq")) {
+        @compileError("EvalCtx must have seq field for logical time (spec §7.4 rule 1)");
+    }
+    if (@FieldType(eval_expr_mod.EvalCtx, "seq") != u64) {
+        @compileError("EvalCtx.seq must be u64 (Seq) — use logical time, not wall clock");
+    }
+    if (@hasField(eval_expr_mod.EvalCtx, "rng") or @hasField(eval_expr_mod.EvalCtx, "rand") or @hasField(eval_expr_mod.EvalCtx, "random")) {
+        @compileError("EvalCtx must not carry an RNG — use ctx.resolved (spec §7.4 rule 2)");
+    }
 }
 
 pub const ResultSlot = struct { seq: Seq, result: ExecResult };
+
+/// Tagged union over single-partition and all-partitions storage.
+/// Allows SqlExecutor to be used for both write-path execution (single *Storage)
+/// and non-transactional read-path queries (all-partition *PartitionedStorage).
+pub const SqlStorage = union(enum) {
+    single: *storage_mod.Storage,
+    all: *storage_mod.PartitionedStorage,
+
+    pub fn get(self: SqlStorage, table_id: storage_mod.TableId, key: []const u8, at_seq: storage_mod.Seq) !?storage_mod.Row {
+        return switch (self) {
+            .single => |s| s.get(table_id, key, at_seq),
+            .all => |ps| ps.get(table_id, key, at_seq),
+        };
+    }
+
+    pub fn scan(self: SqlStorage, table_id: storage_mod.TableId, range: storage_mod.KeyRange, at_seq: storage_mod.Seq, alloc: std.mem.Allocator) !storage_mod.ScanIterator {
+        return switch (self) {
+            .single => |s| s.scan(table_id, range, at_seq, alloc),
+            .all => |ps| ps.scan(table_id, range, at_seq, alloc),
+        };
+    }
+
+    pub fn apply(self: SqlStorage, mutations: []const storage_mod.Mutation, at_seq: storage_mod.Seq) !void {
+        return switch (self) {
+            .single => |s| s.apply(mutations, at_seq),
+            .all => |ps| ps.apply(mutations, at_seq),
+        };
+    }
+
+    pub fn vectorSearch(self: SqlStorage, index_id: storage_mod.IndexId, query: []const f32, k: u32, at_seq: storage_mod.Seq, alloc: std.mem.Allocator) ![]storage_mod.Match {
+        return switch (self) {
+            .single => |s| s.vectorSearch(index_id, query, k, at_seq, alloc),
+            .all => |ps| ps.vectorSearch(index_id, query, k, at_seq, alloc),
+        };
+    }
+};
 
 /// High-level SQL executor wrapping the storage and SQL registry.
 ///
@@ -111,7 +159,7 @@ pub const ResultSlot = struct { seq: Seq, result: ExecResult };
 /// the result from the ring. The release/acquire pair guarantees the ring slot is
 /// visible before the gateway reads it.
 pub const SqlExecutor = struct {
-    storage: *storage_mod.PartitionedStorage,
+    storage: SqlStorage,
     registry: *registry_mod.SqlRegistry,
     schema: *schema_mod.SchemaRegistry,
     // Written by the apply thread (release), read by the gateway thread (acquire).
@@ -142,7 +190,25 @@ pub const SqlExecutor = struct {
     }
 
     pub fn init(
+        storage: *storage_mod.Storage,
+        registry: *registry_mod.SqlRegistry,
+        schema: *schema_mod.SchemaRegistry,
+        alloc: std.mem.Allocator,
+    ) SqlExecutor {
+        return initStorage(.{ .single = storage }, registry, schema, alloc);
+    }
+
+    pub fn initAll(
         storage: *storage_mod.PartitionedStorage,
+        registry: *registry_mod.SqlRegistry,
+        schema: *schema_mod.SchemaRegistry,
+        alloc: std.mem.Allocator,
+    ) SqlExecutor {
+        return initStorage(.{ .all = storage }, registry, schema, alloc);
+    }
+
+    fn initStorage(
+        storage: SqlStorage,
         registry: *registry_mod.SqlRegistry,
         schema: *schema_mod.SchemaRegistry,
         alloc: std.mem.Allocator,
@@ -371,7 +437,7 @@ pub const SqlExecutor = struct {
         if (self.filter_partition) |fp| {
             var i: usize = 0;
             while (i < mutations.items.len) {
-                if (self.storage.partitionIdx(mutations.items[i].key) != fp) {
+                if (storage_mod.partitionFor(mutations.items[i].key, self.part_count) != fp) {
                     const m = mutations.orderedRemove(i);
                     self.alloc.free(m.key);
                     if (m.values) |vs| {
@@ -385,10 +451,15 @@ pub const SqlExecutor = struct {
         }
 
         // Capture before-images for CDC (before storage.apply).
+        // CDC only runs on the write path, which always uses single-partition storage.
         var before: ?cdc_mod.BeforeImages = null;
         if (self.cdc) |cdc| {
             if (mutations.items.len > 0) {
-                before = cdc.capture_before_images(mutations.items, self.storage, write_seq, self.alloc) catch |e| blk: {
+                const single_storage = switch (self.storage) {
+                    .single => |s| s,
+                    .all => unreachable,
+                };
+                before = cdc.capture_before_images(mutations.items, single_storage, write_seq, self.alloc) catch |e| blk: {
                     // Before-image capture failed; record the error but continue — the
                     // transaction must still commit. CDC dispatch is skipped below to avoid
                     // emitting an incomplete change event.
@@ -1167,7 +1238,7 @@ pub const SqlExecutor = struct {
         // Cleanup of key+values on error is handled by the errdefers in executeInsert.
         if (ins.on_conflict == null) {
             const own_key = self.filter_partition == null or
-                self.storage.partitionIdx(key) == self.filter_partition.?;
+                storage_mod.partitionFor(key, self.part_count) == self.filter_partition.?;
             if (own_key) {
                 var existing = self.storage.get(ins.table_id, key, ctx.seq -| 1) catch return error.StorageReadError;
                 if (existing) |*ex| {

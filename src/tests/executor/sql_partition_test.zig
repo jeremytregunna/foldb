@@ -292,3 +292,38 @@ test "sql partition: 2-partition TRANSACTION block aborts atomically on ASSERT f
     defer rs.deinit();
     try testing.expectEqual(@as(usize, 0), rs.rows.len);
 }
+
+// Verify that log partitions and data partitions are truly independent (spec §5.2, §6.6).
+// A gateway with 1 data partition and 2 log partitions must correctly route committed
+// entries from either log partition to the single FoldExecutor via LogMux.
+test "sql partition: split topology — 2 log partitions, 1 data partition" {
+    const alloc = testing.allocator;
+    const dir = try makeTempDir(alloc, "f");
+    defer {
+        removeDir(alloc, dir);
+        alloc.free(dir);
+    }
+
+    const gw = try Gateway.init(dir, alloc, .{
+        .partition_count = 1,
+        .log_partition_count = 2,
+    });
+    defer gw.deinit();
+
+    try gw.applyDdl("CREATE TABLE things (id INT64 NOT NULL, val INT64 NOT NULL, PRIMARY KEY (id))");
+
+    const ins = (try gw.register("INSERT INTO things (id, val) VALUES ($1, $2)")).hash;
+    const sel = (try gw.register("SELECT id, val FROM things")).hash;
+
+    // Insert enough rows that seq % 2 sends entries to both log partitions.
+    var i: i64 = 1;
+    while (i <= 8) : (i += 1) {
+        const r = try gw.execute(ins, &[_]ColumnValue{ .{ .int64 = i }, .{ .int64 = i * 10 } }, &.{});
+        try testing.expectEqual(@as(u64, 1), r.rows_affected);
+    }
+
+    // The single FoldExecutor must see all 8 rows via LogMux merging both log partitions.
+    var rs = try gw.querySelect(sel, &.{}, &.{});
+    defer rs.deinit();
+    try testing.expectEqual(@as(usize, 8), rs.rows.len);
+}

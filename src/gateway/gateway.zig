@@ -120,6 +120,8 @@ pub const Gateway = struct {
         rand: RandSource = .{},
         disk_fault: ?storage_mod.DiskFaultHook = null,
         partition_count: u32 = 1,
+        /// Number of log partitions for write throughput (spec §5.2). 0 = same as partition_count.
+        log_partition_count: u32 = 0,
         recon_strategy: ReconStrategy = .early_exit,
         node_id: u64 = 1,
         tick_interval_ms: u32 = 10,
@@ -169,7 +171,6 @@ pub const Gateway = struct {
         // Storage does not own its dir string; each dir is freed in deinit via s.dir.
         const pc = opts.partition_count;
         std.debug.assert(pc >= 1);
-        std.debug.assert(pc <= 64); // PartitionSet bitmask is u64.
         const storages = try alloc.alloc(*storage_mod.Storage, pc);
         errdefer alloc.free(storages);
         var n_inited: usize = 0;
@@ -240,6 +241,7 @@ pub const Gateway = struct {
 
         const seq_cfg = sequencer_mod.Config{
             .partition_count = opts.partition_count,
+            .log_partition_count = opts.log_partition_count,
             .node_id = opts.node_id,
             .tick_interval_ms = opts.tick_interval_ms,
             .election_timeout_min_ms = opts.election_timeout_min_ms,
@@ -247,24 +249,19 @@ pub const Gateway = struct {
             .heartbeat_interval_ms = opts.heartbeat_interval_ms,
             .peers = opts.peers,
         };
-        // Create partition logs here so Gateway controls log lifecycle independently
-        // of the Sequencer (spec §5.2, §6.6). Ownership transfers to Sequencer.initWithLogs.
-        const partition_logs = try sequencer_mod.createPartitionLogs(
-            storage_dir,
-            opts.node_id,
-            opts.partition_count,
-            alloc,
-        );
-        gw.sequencer = try sequencer_mod.Sequencer.initWithLogs(storage_dir, partition_logs, seq_cfg, alloc);
+        // Sequencer owns and creates its log partition logs (spec §5.2, §6.6).
+        // N log partitions are independent of M data partition storages.
+        gw.sequencer = try sequencer_mod.Sequencer.init(storage_dir, seq_cfg, alloc);
         errdefer gw.sequencer.deinit();
         if (!opts.defer_sequencer_start) try gw.sequencer.start();
 
         gw.cdc = try cdc_mod.CdcManager.init(alloc);
         errdefer gw.cdc.deinit();
 
-        // Build a LogMux over all partition logs so every FoldExecutor reads the full stream.
-        const log_refs = try alloc.alloc(*log_mod.Log, gw.sequencer.partition_logs.len);
-        for (gw.sequencer.partition_logs, 0..) |*l, i| log_refs[i] = l;
+        // Build a LogMux over all log partition logs so every FoldExecutor reads the full stream.
+        const log_partition_logs = gw.sequencer.logPartitionLogs();
+        const log_refs = try alloc.alloc(*log_mod.Log, log_partition_logs.len);
+        for (log_partition_logs, 0..) |*l, i| log_refs[i] = l;
         gw.log_mux = log_mod.LogMux.init(log_refs, alloc);
         errdefer gw.log_mux.deinit();
 
@@ -286,7 +283,7 @@ pub const Gateway = struct {
                 &gw.log_mux,
                 @intCast(i),
                 @intCast(pc),
-                null, // exchange bus deferred — protocol needs validation before activation
+                if (pc > 1) &gw.exchange_bus else null,
                 cpu_id,
                 alloc,
             );

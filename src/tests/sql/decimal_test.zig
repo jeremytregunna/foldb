@@ -185,13 +185,11 @@ test "decimal add: 1.5 + 2.5 = 4.0" {
     defer alloc.free(path);
     var store = try Storage.init(path, alloc);
     defer store.deinit();
-    var ps = try eb.PartitionedStorage.fromSingle(&store, alloc);
-    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = eb.SqlExecutor.init(&ps, &reg, &sr, alloc);
+    var exec = eb.SqlExecutor.init(&store, &reg, &sr, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -207,13 +205,11 @@ test "decimal sub: 3.0 - 1.5 = 1.5" {
     defer alloc.free(path);
     var store = try Storage.init(path, alloc);
     defer store.deinit();
-    var ps = try eb.PartitionedStorage.fromSingle(&store, alloc);
-    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = eb.SqlExecutor.init(&ps, &reg, &sr, alloc);
+    var exec = eb.SqlExecutor.init(&store, &reg, &sr, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -229,13 +225,11 @@ test "decimal mul: 2.5 * 4.0 = 10.0" {
     defer alloc.free(path);
     var store = try Storage.init(path, alloc);
     defer store.deinit();
-    var ps = try eb.PartitionedStorage.fromSingle(&store, alloc);
-    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = eb.SqlExecutor.init(&ps, &reg, &sr, alloc);
+    var exec = eb.SqlExecutor.init(&store, &reg, &sr, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -251,13 +245,11 @@ test "decimal div: 5.0 / 2.0 = 2.5" {
     defer alloc.free(path);
     var store = try Storage.init(path, alloc);
     defer store.deinit();
-    var ps = try eb.PartitionedStorage.fromSingle(&store, alloc);
-    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = eb.SqlExecutor.init(&ps, &reg, &sr, alloc);
+    var exec = eb.SqlExecutor.init(&store, &reg, &sr, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -273,13 +265,11 @@ test "decimal div: 1.0 / 3.0 has at least 9 correct decimal places" {
     defer alloc.free(path);
     var store = try Storage.init(path, alloc);
     defer store.deinit();
-    var ps = try eb.PartitionedStorage.fromSingle(&store, alloc);
-    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = eb.SqlExecutor.init(&ps, &reg, &sr, alloc);
+    var exec = eb.SqlExecutor.init(&store, &reg, &sr, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -295,13 +285,11 @@ test "decimal div by zero returns error" {
     defer alloc.free(path);
     var store = try Storage.init(path, alloc);
     defer store.deinit();
-    var ps = try eb.PartitionedStorage.fromSingle(&store, alloc);
-    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = eb.SqlExecutor.init(&ps, &reg, &sr, alloc);
+    var exec = eb.SqlExecutor.init(&store, &reg, &sr, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -317,13 +305,11 @@ test "decimal negation: -3.14" {
     defer alloc.free(path);
     var store = try Storage.init(path, alloc);
     defer store.deinit();
-    var ps = try eb.PartitionedStorage.fromSingle(&store, alloc);
-    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = eb.SqlExecutor.init(&ps, &reg, &sr, alloc);
+    var exec = eb.SqlExecutor.init(&store, &reg, &sr, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -342,13 +328,11 @@ test "decimal + int promotion: 1.5 + 2 = 3.5" {
     defer alloc.free(path);
     var store = try Storage.init(path, alloc);
     defer store.deinit();
-    var ps = try eb.PartitionedStorage.fromSingle(&store, alloc);
-    defer ps.deinit();
     var sr = schema_mod.SchemaRegistry.init(alloc);
     defer sr.deinit();
     var reg = registry_mod.SqlRegistry.init(alloc, &sr);
     defer reg.deinit();
-    var exec = eb.SqlExecutor.init(&ps, &reg, &sr, alloc);
+    var exec = eb.SqlExecutor.init(&store, &reg, &sr, alloc);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();

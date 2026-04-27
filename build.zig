@@ -420,6 +420,13 @@ pub fn build(b: *std.Build) void {
     cdc_module.addImport("log.zig", log_module);
     cdc_module.addImport("observability.zig", observability_module);
 
+    // Deterministic std shim — approved import surface for execution-path modules (spec §7.4).
+    const deterministic_std_module = b.createModule(.{
+        .root_source_file = b.path("src/executor/deterministic_std.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Exchange types module (named so exchange.zig is compiled once, shared across executor/exchange_bus modules)
     const exchange_module = b.createModule(.{
         .root_source_file = b.path("src/executor/exchange.zig"),
@@ -544,6 +551,7 @@ pub fn build(b: *std.Build) void {
     fold_executor_module.addImport("observability.zig", observability_module);
     fold_executor_module.addImport("exchange_bus.zig", exchange_bus_module);
     fold_executor_module.addImport("exchange.zig", exchange_module);
+    fold_executor_module.addImport("deterministic_std.zig", deterministic_std_module);
 
     // SQL lexer tests
     const sql_lexer_test_module = b.createModule(.{

@@ -29,10 +29,11 @@ pub const FoldExecutor = struct {
     sql_exec: sql_mod.SqlExecutor,
     /// Arena for storage-layer column slice allocations during DDL. Owned.
     storage_schema_arena: std.heap.ArenaAllocator,
-    /// This partition's own Storage — used for DDL registration and exchange fetch. Borrowed.
+    /// This partition's own Storage — used for writes, DDL, and exchange fetch. Borrowed.
     storage: *storage_mod.Storage,
-    /// All-partitions routing view — passed to SqlExecutor for reads. Borrowed from Gateway.
-    partitioned: *storage_mod.PartitionedStorage,
+    /// All-partitions view used only for the direct querySelect/readAt read paths.
+    /// These paths are non-transactional and bypass the exchange protocol. Borrowed.
+    read_storage: *storage_mod.PartitionedStorage,
     /// Merged log stream across all log partitions. Borrowed from Gateway.
     log_mux: *log_mod.LogMux,
     /// Which partition this executor services.
@@ -43,13 +44,17 @@ pub const FoldExecutor = struct {
     bus: ?*ExchangeBus,
     /// CPU to pin this executor's thread to.
     cpu_id: u32,
+    /// When true, runMultiPartition uses direct read_storage reads instead of the
+    /// live SPSC bus. Set during replayFromLog() so recovering nodes re-derive
+    /// cross-partition foreign rows from local storage without needing live peers.
+    replay_mode: bool = false,
     shutdown: std.atomic.Value(bool),
     thread: ?std.Thread,
     alloc: std.mem.Allocator,
 
     pub fn init(
         storage: *storage_mod.Storage,
-        partitioned: *storage_mod.PartitionedStorage,
+        read_storage: *storage_mod.PartitionedStorage,
         cdc: *cdc_mod.CdcManager,
         log_mux: *log_mod.LogMux,
         partition_id: u32,
@@ -63,7 +68,7 @@ pub const FoldExecutor = struct {
         fe.alloc = alloc;
         fe.storage_schema_arena = std.heap.ArenaAllocator.init(alloc);
         fe.storage = storage;
-        fe.partitioned = partitioned;
+        fe.read_storage = read_storage;
         fe.log_mux = log_mux;
         fe.partition_id = partition_id;
         fe.part_count = part_count;
@@ -73,7 +78,7 @@ pub const FoldExecutor = struct {
         fe.thread = null;
         fe.schema = sql_mod.SchemaRegistry.init(alloc);
         fe.registry = sql_mod.SqlRegistry.init(alloc, &fe.schema);
-        fe.sql_exec = sql_mod.SqlExecutor.init(partitioned, &fe.registry, &fe.schema, alloc);
+        fe.sql_exec = sql_mod.SqlExecutor.init(storage, &fe.registry, &fe.schema, alloc);
         fe.sql_exec.initCdc(cdc);
         fe.sql_exec.filter_partition = partition_id;
         fe.sql_exec.part_count = part_count;
@@ -192,10 +197,19 @@ pub const FoldExecutor = struct {
         const decoded = validated.decoded;
         const seq = validated.seq;
 
-        // Single-partition or no read hint — execute directly.
-        const is_multi = for (decoded.read_set_hint) |pid| {
-            if (pid != self.partition_id) break true;
-        } else false;
+        // Determine if this is truly a multi-partition transaction.
+        // Both conditions must hold: the transaction spans multiple partitions (any_foreign),
+        // AND my partition is one of them (my_in_hint).  If only one partition is in the
+        // hints, every executor runs directly — the ones without data produce no mutations.
+        var any_foreign = false;
+        var my_in_hint = false;
+        for (decoded.read_set_hint) |pid| {
+            if (pid == self.partition_id) my_in_hint = true else any_foreign = true;
+        }
+        for (decoded.write_set_hint) |pid| {
+            if (pid == self.partition_id) my_in_hint = true else any_foreign = true;
+        }
+        const is_multi = my_in_hint and any_foreign;
         if (!is_multi) {
             _ = try self.sql_exec.run(entry);
             return;
@@ -221,25 +235,50 @@ pub const FoldExecutor = struct {
             &foreign_reads,
         );
 
-        // Collect the set of target partitions we'll send requests to.
+        // Collect the set of target partitions we need responses from.
         var targets: std.AutoHashMapUnmanaged(u32, void) = .empty;
         defer targets.deinit(alloc);
-        for (foreign_reads.items) |fr| {
-            _ = fr;
-        }
         for (decoded.read_set_hint) |pid| {
             if (pid != self.partition_id) try targets.put(alloc, pid, {});
         }
+        for (decoded.write_set_hint) |pid| {
+            if (pid != self.partition_id) try targets.put(alloc, pid, {});
+        }
 
+        // Phase B: acquire foreign rows.
+        // During live execution: peer-to-peer SPSC serve-and-wait.
+        // During replay: direct reads from read_storage (all partitions visible locally).
+        var accumulated: std.ArrayList(ForeignRowEntry) = .empty;
+        defer accumulated.deinit(alloc);
+
+        if (self.replay_mode) {
+            try self.fetchForeignRowsDirect(foreign_reads.items, seq, &accumulated, alloc);
+        } else {
+            try self.serveAndWait(bus, seq, &targets, foreign_reads.items, &accumulated, alloc);
+        }
+
+        // Phase C: execute with foreign rows populated.
+        self.sql_exec.pending_foreign_rows = accumulated.items;
+        defer self.sql_exec.pending_foreign_rows = &.{};
+        _ = try self.sql_exec.run(entry);
+    }
+
+    /// Live execution Phase B: send requests to peers, serve their requests, accumulate responses.
+    fn serveAndWait(
+        self: *FoldExecutor,
+        bus: *ExchangeBus,
+        seq: Seq,
+        targets: *std.AutoHashMapUnmanaged(u32, void),
+        foreign_reads: []const ForeignRead,
+        accumulated: *std.ArrayList(ForeignRowEntry),
+        alloc: std.mem.Allocator,
+    ) !void {
         // Send ExchangeRequests to each target partition.
         var target_it = targets.keyIterator();
         while (target_it.next()) |pid| {
-            // Collect reads destined for this target.
             var reads_for_target: std.ArrayList(ForeignRead) = .empty;
             defer reads_for_target.deinit(alloc);
-            for (foreign_reads.items) |fr| {
-                try reads_for_target.append(alloc, fr);
-            }
+            for (foreign_reads) |fr| try reads_for_target.append(alloc, fr);
             const req = ExchangeMsg{ .request = .{
                 .seq = seq,
                 .from = self.partition_id,
@@ -249,22 +288,17 @@ pub const FoldExecutor = struct {
             while (!bus.push(self.partition_id, pid.*, req)) std.Thread.yield() catch {};
         }
 
-        // Phase B: serve-and-wait loop.
-        // Service incoming requests from peers; accumulate our responses.
-        var accumulated: std.ArrayList(ForeignRowEntry) = .empty;
-        defer accumulated.deinit(alloc);
         var responses_received: u32 = 0;
         const responses_needed: u32 = targets.count();
 
         while (responses_received < responses_needed) {
-            // Service incoming requests TO ME from any peer.
             for (0..self.part_count) |peer_idx| {
                 const peer: u32 = @intCast(peer_idx);
                 if (peer == self.partition_id) continue;
                 while (bus.pop(peer, self.partition_id)) |msg| {
                     switch (msg) {
                         .request => |req| {
-                            if (req.seq != seq) break; // wrong seq — out of order, shouldn't happen
+                            if (req.seq != seq) break;
                             const fetched = try self.fetchForRequest(req, seq, alloc);
                             const resp = ExchangeMsg{ .response = .{
                                 .seq = seq,
@@ -286,7 +320,7 @@ pub const FoldExecutor = struct {
                             }
                             if (targets.contains(resp.from)) {
                                 responses_received += 1;
-                                _ = targets.remove(resp.from); // mark as received
+                                _ = targets.remove(resp.from);
                             }
                         },
                     }
@@ -294,11 +328,55 @@ pub const FoldExecutor = struct {
             }
             if (responses_received < responses_needed) std.Thread.yield() catch {};
         }
+    }
 
-        // Phase C: execute with foreign rows populated.
-        self.sql_exec.pending_foreign_rows = accumulated.items;
-        defer self.sql_exec.pending_foreign_rows = &.{};
-        _ = try self.sql_exec.run(entry);
+    /// Replay Phase B: derive foreign rows directly from read_storage (all partitions visible).
+    /// Produces the same ForeignRowEntry slice that serveAndWait would have produced,
+    /// without requiring live peers or the SPSC bus (spec §7.3 replay path).
+    fn fetchForeignRowsDirect(
+        self: *FoldExecutor,
+        foreign_reads: []const ForeignRead,
+        seq: Seq,
+        accumulated: *std.ArrayList(ForeignRowEntry),
+        alloc: std.mem.Allocator,
+    ) !void {
+        const read_seq: Seq = if (seq > 0) seq - 1 else 0;
+        for (foreign_reads) |fr| {
+            if (fr.key.len == 0) {
+                // Sentinel: full scan across all partitions for this table.
+                var iter = self.read_storage.scan(fr.table_id, storage_mod.KeyRange.all(), read_seq, alloc) catch continue;
+                defer iter.deinit();
+                while (iter.next() catch break) |row| {
+                    const key_copy = alloc.dupe(u8, row.key) catch continue;
+                    const vals_copy = alloc.dupe(storage_mod.ColumnValue, row.values) catch {
+                        alloc.free(key_copy);
+                        continue;
+                    };
+                    try accumulated.append(alloc, .{
+                        .from_partition = 0, // single-node: partition identity not needed
+                        .table_id = fr.table_id,
+                        .key = key_copy,
+                        .row = .{ .key = key_copy, .seq = row.seq, .values = vals_copy, .is_tombstone = row.is_tombstone },
+                    });
+                }
+            } else {
+                const row_opt = self.read_storage.get(fr.table_id, fr.key, read_seq) catch null;
+                var cloned_row: ?storage_mod.Row = null;
+                if (row_opt) |row| {
+                    var r = row;
+                    defer r.deinit(alloc);
+                    const key_copy = try alloc.dupe(u8, r.key);
+                    const vals_copy = try alloc.dupe(storage_mod.ColumnValue, r.values);
+                    cloned_row = .{ .key = key_copy, .seq = r.seq, .values = vals_copy, .is_tombstone = r.is_tombstone };
+                }
+                try accumulated.append(alloc, .{
+                    .from_partition = 0,
+                    .table_id = fr.table_id,
+                    .key = fr.key,
+                    .row = cloned_row,
+                });
+            }
+        }
     }
 
     /// Fetch the rows requested by `req` from this executor's own storage at seq-1.
@@ -551,7 +629,10 @@ pub const FoldExecutor = struct {
         const decoded_params = try decodeParams(params, rq.param_types, alloc);
         defer alloc.free(decoded_params);
 
-        var rows = try self.sql_exec.querySelect(
+        // Use a temporary executor backed by the all-partitions PartitionedStorage so
+        // non-transactional reads (querySelect/readAt) see data from every partition.
+        var read_exec = sql_mod.SqlExecutor.initAll(self.read_storage, &self.registry, &self.schema, alloc);
+        var rows = try read_exec.querySelect(
             rq.plan,
             decoded_params,
             nondet,
@@ -581,7 +662,8 @@ pub const FoldExecutor = struct {
         const decoded_params = try decodeParams(params, rq.param_types, alloc);
         defer alloc.free(decoded_params);
 
-        var rows = try self.sql_exec.querySelect(rq.plan, decoded_params, &.{}, seq + 1, alloc);
+        var read_exec = sql_mod.SqlExecutor.initAll(self.read_storage, &self.registry, &self.schema, alloc);
+        var rows = try read_exec.querySelect(rq.plan, decoded_params, &.{}, seq + 1, alloc);
         const rows_slice = try rows.toOwnedSlice(alloc);
         const columns_slice = try dupeStringSlice(rq.output_column_names, alloc);
 
@@ -607,6 +689,12 @@ pub const FoldExecutor = struct {
 
     /// Replay all committed log entries synchronously. Called by Gateway.init() before start().
     pub fn replayFromLog(self: *FoldExecutor) !void {
+        // Use direct storage reads for cross-partition foreign rows during replay:
+        // the live SPSC bus is not active, but read_storage (all partitions) can
+        // re-derive the same values the exchange would have provided (spec §7.3).
+        self.replay_mode = true;
+        defer self.replay_mode = false;
+
         const batch = 256;
 
         // Pass 1: schema — DDL and query registration only.
@@ -641,22 +729,9 @@ pub const FoldExecutor = struct {
             }
             if (entries.len == 0) break;
             for (entries) |e| {
-                if (e.header.kind == .txn_intent) {
-                    // Execution errors during replay (e.g. bad params from a previously
-                    // aborted txn) are non-fatal: advance seq and continue.
-                    const r = self.sql_exec.run(e) catch |err| {
-                        std.log.warn("FoldExecutor: replay seq={d} err={} (skipping)", .{ e.header.seq, err });
-                        self.sql_exec.advanceSeq(e.header.seq);
-                        from_seq = e.header.seq + 1;
-                        continue;
-                    };
-                    if (r == .ok) if (r.ok.result_set) |rs| {
-                        var mutable = rs;
-                        mutable.deinit();
-                    };
-                } else {
-                    self.sql_exec.advanceSeq(e.header.seq);
-                }
+                // Route through applyEntry so multi-partition txns use fetchForeignRowsDirect
+                // (replay_mode=true) instead of the live SPSC bus.
+                self.applyEntry(e);
                 from_seq = e.header.seq + 1;
             }
             if (entries.len < batch) break;

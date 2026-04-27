@@ -88,12 +88,18 @@ pub const Sequencer = struct {
     last_applied_path: []u8,
     batcher: EpochBatcher,
     idempotency: IdempotencyCache,
-    /// Data partition logs, one per data partition. // data partitions
+    /// Log partition logs, one per log partition. Routed to by seq % log_partition_count.
     partition_logs: []Log,
     /// Number of log partitions for write throughput routing (spec §5.2).
-    /// Independent of partition_logs.len once Phase 6 is complete; until then
-    /// defaults to partition_logs.len so existing broadcast behaviour is preserved.
+    /// Configurable independently of data partition count; defaults to data partition count.
     log_partition_count: u32,
+    /// Number of data partitions (storage sharding). Independent of log_partition_count.
+    data_partition_count: u32,
+    /// Per-log-partition append counter for load-weighted routing (spec §8.2).
+    /// Incremented each time a seq is routed to that partition; decayed periodically.
+    log_append_counts: []u64,
+    /// Seq at which log_append_counts were last decayed.
+    log_load_decay_seq: Seq = 0,
     next_seq: Seq,
     next_epoch: EpochNum,
     alloc: std.mem.Allocator,
@@ -112,8 +118,9 @@ pub const Sequencer = struct {
 
     /// Initialize a Sequencer at the given base path.
     /// Creates:
-    ///   {base_path}/seq_raft/    — sequencer's ordering log
-    ///   {base_path}/log_p{n}/    — data partition logs (0..partition_count-1)
+    ///   {base_path}/seq_raft/    — sequencer's own Raft ordering log
+    ///   {base_path}/log_p{n}/    — N log partition logs (0..log_partition_count-1)
+    /// Log partition count defaults to partition_count when not explicitly set.
     pub fn init(base_path: []const u8, cfg: Config, alloc: std.mem.Allocator) !Sequencer {
         assert(base_path.len > 0);
         assert(cfg.partition_count > 0);
@@ -140,11 +147,17 @@ pub const Sequencer = struct {
         var raft_node = try initRaftNode(cfg, &raft_log, alloc);
         errdefer raft_node.deinit();
 
-        const partition_logs = try createPartitionLogs(base_path, cfg.node_id, cfg.partition_count, alloc);
+        // Log partition count is independent of data partition count (spec §5.2, §6.6).
+        const lpc: u32 = if (cfg.log_partition_count > 0) cfg.log_partition_count else cfg.partition_count;
+        const partition_logs = try createPartitionLogs(base_path, cfg.node_id, lpc, alloc);
         errdefer {
             for (partition_logs) |*pl| pl.deinit();
             alloc.free(partition_logs);
         }
+
+        const log_append_counts = try alloc.alloc(u64, lpc);
+        errdefer alloc.free(log_append_counts);
+        @memset(log_append_counts, 0);
 
         var max_seq: Seq = 0;
         for (partition_logs) |pl| {
@@ -157,8 +170,6 @@ pub const Sequencer = struct {
             try transport.listen(cfg.listen_port);
             for (cfg.peers) |p| try transport.addPeer(p.id, p.addr);
         }
-
-        const lpc: u32 = if (cfg.log_partition_count > 0) cfg.log_partition_count else cfg.partition_count;
         return Sequencer{
             .raft = raft_node,
             .raft_log = raft_log,
@@ -168,6 +179,8 @@ pub const Sequencer = struct {
             .idempotency = IdempotencyCache.init(alloc),
             .partition_logs = partition_logs,
             .log_partition_count = lpc,
+            .data_partition_count = cfg.partition_count,
+            .log_append_counts = log_append_counts,
             .next_seq = max_seq + 1,
             .next_epoch = 1,
             .alloc = alloc,
@@ -175,72 +188,6 @@ pub const Sequencer = struct {
             .tick_interval_ms = cfg.tick_interval_ms,
             .last_applied = persisted_last_applied,
             // queue is intentionally left undefined here; start() calls queue.init() before use.
-            .queue = undefined,
-        };
-    }
-
-    /// Like init but accepts pre-created partition logs (caller transfers ownership).
-    /// Use this when the calling layer (e.g. Gateway) needs to create and hold a
-    /// reference to the logs independently of Sequencer lifetime — the foundation
-    /// for separating log-partition count from data-partition count (spec §5.2, §6.6).
-    /// Sequencer takes ownership: deinit will deinit each log and free the slice.
-    pub fn initWithLogs(
-        base_path: []const u8,
-        partition_logs: []Log,
-        cfg: Config,
-        alloc: std.mem.Allocator,
-    ) !Sequencer {
-        assert(base_path.len > 0);
-        assert(partition_logs.len > 0);
-
-        const base_pathz = try std.heap.page_allocator.allocSentinel(u8, base_path.len, 0);
-        defer std.heap.page_allocator.free(base_pathz);
-        @memcpy(base_pathz[0..base_path.len], base_path);
-        _ = std.os.linux.mkdir(base_pathz.ptr, 0o755);
-
-        const raft_path = try std.fmt.allocPrint(alloc, "{s}/seq_raft", .{base_path});
-        errdefer alloc.free(raft_path);
-        const last_applied_path = try std.fmt.allocPrint(alloc, "{s}/last_applied.bin", .{base_path});
-        errdefer alloc.free(last_applied_path);
-
-        var persisted_last_applied: Seq = 0;
-        readLastApplied(last_applied_path, &persisted_last_applied);
-
-        const seq_partition_id: PartitionId = std.math.maxInt(PartitionId);
-        var raft_log = try Log.init_partitioned(raft_path, cfg.node_id, seq_partition_id, alloc);
-        errdefer raft_log.deinit();
-
-        var raft_node = try initRaftNode(cfg, &raft_log, alloc);
-        errdefer raft_node.deinit();
-
-        var max_seq: Seq = 0;
-        for (partition_logs) |pl| {
-            if (pl.current_seq > max_seq) max_seq = pl.current_seq;
-        }
-
-        var transport = raft_mod.TcpTransport.init(alloc, cfg.node_id);
-        errdefer transport.deinit();
-        if (cfg.peers.len > 0) {
-            try transport.listen(cfg.listen_port);
-            for (cfg.peers) |p| try transport.addPeer(p.id, p.addr);
-        }
-
-        const lpc: u32 = if (cfg.log_partition_count > 0) cfg.log_partition_count else @intCast(partition_logs.len);
-        return Sequencer{
-            .raft = raft_node,
-            .raft_log = raft_log,
-            .raft_path = raft_path,
-            .last_applied_path = last_applied_path,
-            .batcher = EpochBatcher.init(alloc, cfg.max_epoch_size),
-            .idempotency = IdempotencyCache.init(alloc),
-            .partition_logs = partition_logs,
-            .log_partition_count = lpc,
-            .next_seq = max_seq + 1,
-            .next_epoch = 1,
-            .alloc = alloc,
-            .transport = transport,
-            .tick_interval_ms = cfg.tick_interval_ms,
-            .last_applied = persisted_last_applied,
             .queue = undefined,
         };
     }
@@ -262,6 +209,7 @@ pub const Sequencer = struct {
         self.alloc.free(self.last_applied_path);
         for (self.partition_logs) |*pl| pl.deinit();
         self.alloc.free(self.partition_logs);
+        self.alloc.free(self.log_append_counts);
         self.batcher.deinit();
         self.idempotency.deinit();
         self.transport.deinit();
@@ -272,13 +220,18 @@ pub const Sequencer = struct {
     }
 
     pub fn partitionCount(self: *const Sequencer) u32 {
-        return @intCast(self.partition_logs.len);
+        return self.data_partition_count;
     }
 
     /// Number of log partitions used for write-throughput routing (spec §5.2).
-    /// Distinct from partitionCount() once log and data partitions are fully separated.
     pub fn logPartitionCount(self: *const Sequencer) u32 {
         return self.log_partition_count;
+    }
+
+    /// The log partition logs owned by this Sequencer. Each FoldExecutor's LogMux
+    /// should span all of these so every executor sees the full global log stream.
+    pub fn logPartitionLogs(self: *Sequencer) []Log {
+        return self.partition_logs;
     }
 
     pub fn isLeader(self: *const Sequencer) bool {
@@ -517,11 +470,33 @@ pub const Sequencer = struct {
         return .{ .pending = pending };
     }
 
-    /// Route one intent to one log partition: seq % log_partition_count.
-    /// One seq consumed per intent; replaces commitBroadcast in Phase 6.
+    /// Route one intent to the least-loaded log partition (spec §8.2).
+    /// Breaks ties with seq % log_partition_count for determinism. Decays counters
+    /// every 4096 commits to prevent stale bias from past bursts.
+    /// Each intent lands in exactly one log partition; LogMux merges all partitions
+    /// so every FoldExecutor sees every entry regardless of which partition it landed in.
     pub fn commitRoute(self: *Sequencer, client_id: u64, client_seq_num: u64, submit: ValidatedSubmit) !SubmitResult {
         const seq = self.next_seq;
-        const partition: PartitionId = @intCast(seq % @as(Seq, self.logPartitionCount()));
+        const lpc = self.logPartitionCount();
+
+        // Decay counters every 4096 commits to prevent stale bias.
+        if (seq -% self.log_load_decay_seq >= 4096) {
+            for (self.log_append_counts) |*c| c.* >>= 1;
+            self.log_load_decay_seq = seq;
+        }
+
+        // Pick least-loaded partition; break ties by seq % lpc.
+        const tiebreak: PartitionId = @intCast(seq % @as(Seq, lpc));
+        var best: PartitionId = tiebreak;
+        var best_count: u64 = self.log_append_counts[tiebreak];
+        for (self.log_append_counts, 0..) |count, i| {
+            if (count < best_count) {
+                best = @intCast(i);
+                best_count = count;
+            }
+        }
+        const partition: PartitionId = best;
+        self.log_append_counts[partition] += 1;
         const entry = OrderingEntry{
             .seq = seq,
             .partition = partition,
@@ -601,11 +576,8 @@ fn initRaftNode(cfg: Config, raft_log: *Log, alloc: std.mem.Allocator) !raft_mod
     return raft_node;
 }
 
-/// Allocate and initialize partition logs at {base_path}/log_p{0..count-1}.
-/// Caller owns the returned slice and each Log within it; call deinit on each
-/// and free the slice when done. Called by Gateway before Sequencer.initWithLogs
-/// so log lifecycle is decoupled from the ordering layer (spec §5.2, §6.6).
-pub fn createPartitionLogs(base_path: []const u8, node_id: NodeId, count: u32, alloc: std.mem.Allocator) ![]Log {
+/// Allocate and initialize log partition logs at {base_path}/log_p{0..count-1}.
+fn createPartitionLogs(base_path: []const u8, node_id: NodeId, count: u32, alloc: std.mem.Allocator) ![]Log {
     assert(count > 0);
     const logs = try alloc.alloc(Log, count);
     errdefer alloc.free(logs);

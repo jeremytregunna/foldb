@@ -298,7 +298,6 @@ test "Sequencer: commitRoute assigns monotonic seqs one per intent" {
         testing.allocator.free(path);
     }
 
-    // partition_count must match log_partition_count until Phase 5 separates them.
     var seq = try Sequencer.init(path, .{ .partition_count = 1, .log_partition_count = 1 }, testing.allocator);
     defer seq.deinit();
     try seq.start();
@@ -315,29 +314,40 @@ test "Sequencer: commitRoute assigns monotonic seqs one per intent" {
     try testing.expectEqual(@as(u64, 3), r3.seq);
 }
 
-test "Sequencer: commitRoute cycles partitions by seq mod log_partition_count" {
-    const path = try makeTempDir("route_cycle");
+test "Sequencer: commitRoute spreads load across log partitions" {
+    const path = try makeTempDir("route_spread");
     defer {
         removeDirRecursive(path);
         testing.allocator.free(path);
     }
 
-    // partition_count must match log_partition_count until Phase 5 separates them.
-    var seq = try Sequencer.init(path, .{ .partition_count = 3, .log_partition_count = 3 }, testing.allocator);
+    // 4 log partitions, 1 data partition — partitions are now independent.
+    var seq = try Sequencer.init(path, .{ .partition_count = 1, .log_partition_count = 4 }, testing.allocator);
     defer seq.deinit();
     try seq.start();
 
     const payload = try minimalIntentPayload(testing.allocator);
     defer testing.allocator.free(payload);
 
-    const r1 = try seq.commitRoute(1, 1, .{ .client_id = 1, .client_seq = 1, .intent_payload = payload, .entry_kind = .txn_intent });
-    const r2 = try seq.commitRoute(1, 2, .{ .client_id = 1, .client_seq = 2, .intent_payload = payload, .entry_kind = .txn_intent });
-    const r3 = try seq.commitRoute(1, 3, .{ .client_id = 1, .client_seq = 3, .intent_payload = payload, .entry_kind = .txn_intent });
-    const r4 = try seq.commitRoute(1, 4, .{ .client_id = 1, .client_seq = 4, .intent_payload = payload, .entry_kind = .txn_intent });
+    // Commit 100 intents and count how many land in each log partition.
+    var counts = [_]u32{0} ** 4;
+    var client_seq: u64 = 1;
+    while (client_seq <= 100) : (client_seq += 1) {
+        const r = try seq.commitRoute(1, client_seq, .{
+            .client_id = 1,
+            .client_seq = client_seq,
+            .intent_payload = payload,
+            .entry_kind = .txn_intent,
+        });
+        counts[r.partition] += 1;
+    }
 
-    // seq 1 % 3 = 1, seq 2 % 3 = 2, seq 3 % 3 = 0, seq 4 % 3 = 1
-    try testing.expectEqual(@as(u32, 1), r1.partition);
-    try testing.expectEqual(@as(u32, 2), r2.partition);
-    try testing.expectEqual(@as(u32, 0), r3.partition);
-    try testing.expectEqual(@as(u32, 1), r4.partition);
+    // With load-weighted routing no single partition should receive more than 30% of entries.
+    for (counts) |c| {
+        try testing.expect(c <= 30);
+    }
+    // And every partition must have received at least one entry.
+    for (counts) |c| {
+        try testing.expect(c >= 1);
+    }
 }
