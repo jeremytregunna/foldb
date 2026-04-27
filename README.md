@@ -32,13 +32,13 @@ Full config reference (all fields, with defaults shown as comments):
   "partition_count": 1,              // number of partitions
   "listen_addr": "0.0.0.0",          // optional, default: 0.0.0.0
   "listen_port": 7432,               // optional, default: 7432
-  "peers": [],                       // optional — list of peer addresses, e.g. ["10.0.0.2:7432"]
+  "peers": [],                       // optional — list of peer objects, e.g. [{"id": 2, "addr": "10.0.0.2:7432"}]
   "max_epoch_size": 10000,           // optional — max transactions per Raft epoch
   "election_timeout_min_ms": 150,    // optional — Raft election timeout range
   "election_timeout_max_ms": 300,
   "heartbeat_interval_ms": 50,       // optional — Raft heartbeat interval
 
-  // S3 — optional, but all four fields are required together or not at all.
+  // S3 — optional, but all five fields are required together or not at all.
   // Without S3, snapshots and log truncation are disabled; recovery replays
   // the full log from the beginning. Fine for development, not for production.
   "s3_endpoint": "http://127.0.0.1:9000",
