@@ -469,7 +469,11 @@ pub const SchemaRegistry = struct {
         assert(id > 0);
         _ = self.tables.remove(name);
         _ = self.tables_by_id.remove(id);
-        for (tbl.columns) |col| self.alloc.free(col.name);
+        for (tbl.columns) |col| {
+            self.alloc.free(col.name);
+            if (col.default_value) |dv| if (dv == .string_val) self.alloc.free(dv.string_val);
+            if (col.check_expr) |ce| freeExpr(self.alloc, ce);
+        }
         self.alloc.free(tbl.columns);
         self.alloc.free(tbl.primary_key);
         for (tbl.indexes) |idx| {

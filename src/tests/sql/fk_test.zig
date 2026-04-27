@@ -194,8 +194,8 @@ test "FK: INSERT into child with missing parent is rejected" {
     defer alloc.free(params_raw);
     var e = try makeEntry(alloc, 1, &ins_child, params_raw);
     defer e.deinit(alloc);
-    const result = f.exec.run(e);
-    try testing.expect(result == error.ForeignKeyViolation);
+    const result = try f.exec.run(e);
+    try testing.expect(result == .abort);
 }
 
 test "FK: DELETE parent with no children succeeds" {
@@ -226,8 +226,8 @@ test "FK: DELETE parent referenced by child is rejected" {
     defer alloc.free(params_raw);
     var e = try makeEntry(alloc, 3, &del_parent, params_raw);
     defer e.deinit(alloc);
-    const result = f.exec.run(e);
-    try testing.expect(result == error.ForeignKeyViolation);
+    const result = try f.exec.run(e);
+    try testing.expect(result == .abort);
 }
 
 test "FK: DELETE child then parent succeeds" {
@@ -277,8 +277,8 @@ test "FK: UPDATE child FK column to missing parent is rejected" {
     defer alloc.free(params_raw);
     var e = try makeEntry(alloc, 3, &upd_child, params_raw);
     defer e.deinit(alloc);
-    const result = f.exec.run(e);
-    try testing.expect(result == error.ForeignKeyViolation);
+    const result = try f.exec.run(e);
+    try testing.expect(result == .abort);
 }
 
 test "FK: violation error detail names the constraint and table" {

@@ -254,6 +254,8 @@ pub const SqlExecutor = struct {
             return switch (e) {
                 error.AssertionFailed => .{ .abort = .{ .code = .constraint_violation, .detail = "assertion failed" } },
                 error.ConstraintViolation => .{ .abort = .{ .code = .constraint_violation, .detail = "constraint violation" } },
+                error.NullViolation => .{ .abort = .{ .code = .constraint_violation, .detail = "not-null violation" } },
+                error.ForeignKeyViolation => .{ .abort = .{ .code = .constraint_violation, .detail = "foreign key violation" } },
                 else => return e,
             };
         };
@@ -972,7 +974,10 @@ pub const SqlExecutor = struct {
                                 full_values[ci] = columnDefaultToValue(dv);
                             } else {
                                 const is_pk = for (tbl.primary_key) |pk| { if (pk == col.id) break true; } else false;
-                                if (col.nullable == .not_null and !is_pk) return error.NullViolation;
+                                if (col.nullable == .not_null and !is_pk) {
+                                    self.setDetail("null value in column \"{s}\" violates not-null constraint", .{col.name});
+                                    return error.NullViolation;
+                                }
                             }
                         }
                     }
@@ -1001,7 +1006,10 @@ pub const SqlExecutor = struct {
                         if (row[i]) |cv| {
                             values[i] = try cv.dupe(ctx.alloc);
                         } else {
-                            if (col.nullable == .not_null) return error.NullViolation;
+                            if (col.nullable == .not_null) {
+                                self.setDetail("null value in column \"{s}\" violates not-null constraint", .{col.name});
+                                return error.NullViolation;
+                            }
                             values[i] = defaultValue(col.typ);
                         }
                     }
@@ -1472,9 +1480,7 @@ pub const SqlExecutor = struct {
             var it = self.storage.scan(tbl.id, KeyRange.all(), ctx.seq -| 1, ctx.alloc) catch return error.StorageReadError;
             defer it.deinit();
             while (it.next() catch return error.StorageReadError) |row| {
-                var mutable_row = row;
-                defer mutable_row.deinit(ctx.alloc);
-                if (i < mutable_row.values.len and columnValuesEqual(new_val, mutable_row.values[i])) {
+                if (i < row.values.len and columnValuesEqual(new_val, row.values[i])) {
                     self.setDetail("duplicate value violates unique constraint on column \"{s}\"", .{col.name});
                     return error.ConstraintViolation;
                 }

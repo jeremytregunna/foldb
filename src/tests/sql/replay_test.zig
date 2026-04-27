@@ -652,9 +652,9 @@ test "DST: FK violation aborts deterministically — both replicas reject identi
     const result_a = fa.exec.run(e);
     const result_b = fb.exec.run(e);
 
-    // Both must agree: either both succeed or both fail with the same error tag
-    try testing.expect(result_a == error.ForeignKeyViolation);
-    try testing.expect(result_b == error.ForeignKeyViolation);
+    // Both must agree: both abort with constraint violation
+    try testing.expect((try result_a) == .abort);
+    try testing.expect((try result_b) == .abort);
 
     // Storage must be identical (empty — no rows committed)
     try fa.storage.flushAll();

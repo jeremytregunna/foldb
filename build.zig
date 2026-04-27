@@ -1278,6 +1278,19 @@ pub fn build(b: *std.Build) void {
     const gateway_join_tests = b.addTest(.{ .root_module = gateway_join_test_module });
     const run_gateway_join_tests = b.addRunArtifact(gateway_join_tests);
 
+    // SQL file runner tests
+    const sql_file_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/gateway/sql_file_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sql_file_test_module.addImport("gateway.zig", gateway_module);
+    sql_file_test_module.addImport("storage.zig", storage_module);
+    sql_file_test_module.addImport("sql.zig", sql_module);
+    sql_file_test_module.addImport("sequencer.zig", sequencer_module);
+    const sql_file_tests = b.addTest(.{ .root_module = sql_file_test_module });
+    const run_sql_file_tests = b.addRunArtifact(sql_file_tests);
+
     // Gateway replay (DST)
     const gateway_replay_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/gateway/replay_test.zig"),
@@ -1360,6 +1373,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_seq_reconfig_tests.step);
     test_step.dependOn(&run_seq_follower_submit_tests.step);
     test_step.dependOn(&run_gw_multinode_tests.step);
+    test_step.dependOn(&run_sql_file_tests.step);
 
     // Deterministic simulation tests
     const dst_step = b.step("dst-test", "Run deterministic simulation tests");
