@@ -56,27 +56,33 @@ SELECT id, val / 4 FROM t_expr WHERE id = 4;
 -- @result
 -- @  4 | 10
 
--- IS NULL and IS NOT NULL via ALTER TABLE (inserting literal NULL fails with TypeMismatch)
-CREATE TABLE t_expr_null (id INT64 NOT NULL PRIMARY KEY, val INT64 NOT NULL);
-INSERT INTO t_expr_null (id, val) VALUES (1, 10);
+-- IS NULL and IS NOT NULL
+-- Use ALTER TABLE to produce NULL values; old rows get NULL for the new column
+CREATE TABLE t_null (id INT64 NOT NULL PRIMARY KEY, val INT64 NOT NULL);
+INSERT INTO t_null (id, val) VALUES (1, 10);
 -- @rows 1
-INSERT INTO t_expr_null (id, val) VALUES (2, 20);
+INSERT INTO t_null (id, val) VALUES (2, 20);
 -- @rows 1
-ALTER TABLE t_expr_null ADD COLUMN opt INT64 NULL;
+ALTER TABLE t_null ADD COLUMN opt INT64 NULL;
 -- Insert new row with opt set; old rows have opt = NULL
-INSERT INTO t_expr_null (id, val, opt) VALUES (3, 30, 42);
+INSERT INTO t_null (id, val, opt) VALUES (3, 30, 42);
 -- @rows 1
 
 -- IS NULL: rows 1 and 2 have null opt
-SELECT id FROM t_expr_null WHERE opt IS NULL ORDER BY id;
+SELECT id FROM t_null WHERE opt IS NULL ORDER BY id;
 -- @result
 -- @  1
 -- @  2
 
 -- IS NOT NULL: row 3 has opt=42
-SELECT id FROM t_expr_null WHERE opt IS NOT NULL ORDER BY id;
+SELECT id FROM t_null WHERE opt IS NOT NULL ORDER BY id;
 -- @result
 -- @  3
+
+-- INSERT NULL into NOT NULL column returns error
+CREATE TABLE t_not_null (id INT64 NOT NULL PRIMARY KEY, val INT64 NOT NULL);
+INSERT INTO t_not_null (id, val) VALUES (1, NULL);
+-- @error not-null
 
 -- String concat
 CREATE TABLE t_expr_str (id INT64 NOT NULL PRIMARY KEY, label STRING NOT NULL);
@@ -147,5 +153,6 @@ SELECT id FROM t_expr WHERE val <= 30 ORDER BY id;
 -- @  3
 
 DROP TABLE t_expr;
-DROP TABLE t_expr_null;
+DROP TABLE t_null;
+DROP TABLE t_not_null;
 DROP TABLE t_expr_str;

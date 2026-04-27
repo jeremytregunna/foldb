@@ -46,5 +46,11 @@ CREATE TABLE t_distinct_empty (id INT64 NOT NULL PRIMARY KEY, item_id INT64 NOT 
 SELECT DISTINCT item_id FROM t_distinct_empty;
 -- @result
 
+-- DISTINCT + ORDER BY + LIMIT returns limited count of distinct values
+-- (t_distinct has item_id values 1,1,1,2 so DISTINCT item_id = [1,2])
+SELECT DISTINCT item_id FROM t_distinct ORDER BY item_id LIMIT 1;
+-- @result
+-- @  1
+
 DROP TABLE t_distinct;
 DROP TABLE t_distinct_empty;

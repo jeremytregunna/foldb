@@ -142,6 +142,37 @@ SELECT id, LEAD(amount) OVER (PARTITION BY dept ORDER BY id) FROM t_win_sales OR
 -- @  4 | 60
 -- @  5 | NULL
 
+-- SUM OVER partition (running aggregate: default frame is RANGE UNBOUNDED PRECEDING TO CURRENT ROW)
+CREATE TABLE t_wsum (id INT64 NOT NULL PRIMARY KEY, dept INT64 NOT NULL, amount INT64 NOT NULL);
+INSERT INTO t_wsum (id, dept, amount) VALUES (1, 10, 100);
+-- @rows 1
+INSERT INTO t_wsum (id, dept, amount) VALUES (2, 10, 200);
+-- @rows 1
+INSERT INTO t_wsum (id, dept, amount) VALUES (3, 20, 50);
+-- @rows 1
+
+SELECT id, SUM(amount) OVER (PARTITION BY dept ORDER BY id) FROM t_wsum ORDER BY id;
+-- @result
+-- @  1 | 100
+-- @  2 | 300
+-- @  3 | 50
+
+-- COUNT OVER global window (no PARTITION BY) — running count
+SELECT id, COUNT(id) OVER (ORDER BY id) FROM t_wsum ORDER BY id;
+-- @result
+-- @  1 | 1
+-- @  2 | 2
+-- @  3 | 3
+
+-- AVG OVER partition (running average, integer division)
+SELECT id, AVG(amount) OVER (PARTITION BY dept ORDER BY id) FROM t_wsum ORDER BY id;
+-- @result
+-- @  1 | 100
+-- @  2 | 150
+-- @  3 | 50
+
+DROP TABLE t_wsum;
+
 DROP TABLE t_win_sales;
 DROP TABLE t_win_lag2;
 DROP TABLE t_win_lag_def;

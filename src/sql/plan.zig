@@ -792,7 +792,9 @@ pub const Planner = struct {
             sort_node.* = .{ .sort = .{ .input = node, .keys = try keys.toOwnedSlice(self.arena) } };
             node = sort_node;
         }
-        if (q.limit != null or q.offset != null) {
+        // Skip LIMIT here when DISTINCT is present — it will be applied after
+        // deduplication in planSelectProject to avoid cutting rows before DISTINCT.
+        if ((q.limit != null or q.offset != null) and !q.distinct) {
             const limit_node = try self.arena.create(PlanNode);
             limit_node.* = .{ .limit = .{
                 .input = node,
@@ -824,6 +826,17 @@ pub const Planner = struct {
         if (proj_items.items.len == 0) return base;
         const proj_node = try self.arena.create(PlanNode);
         proj_node.* = .{ .project = .{ .input = base, .exprs = try proj_items.toOwnedSlice(self.arena), .distinct = q.distinct } };
+        // When DISTINCT is present, LIMIT was skipped in planSelectOrderLimit so that
+        // deduplication runs first. Apply it here, after the project node.
+        if (q.distinct and (q.limit != null or q.offset != null)) {
+            const limit_node = try self.arena.create(PlanNode);
+            limit_node.* = .{ .limit = .{
+                .input = proj_node,
+                .limit = if (q.limit) |l| try self.planExpr(l) else null,
+                .offset = if (q.offset) |o| try self.planExpr(o) else null,
+            } };
+            return limit_node;
+        }
         return proj_node;
     }
 

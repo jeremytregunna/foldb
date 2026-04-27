@@ -208,6 +208,7 @@ pub fn computeWindowFnForAll(
         defer ctx.alloc.free(sorted);
 
         // Stable insertion sort by order_by keys
+        if (sorted.len == 0) continue;
         for (1..sorted.len) |i| {
             const key_idx = sorted[i];
             var j: usize = i;
@@ -385,6 +386,62 @@ pub fn computeWindowFnForAll(
                 row_ctx.row = rows[sorted[frame_pos]];
                 const v = evalExpr(wf.args[0], row_ctx) catch continue;
                 results[ri][fn_idx] = planValueToColumnValue(v, ctx.alloc) catch null;
+            }
+        } else if (std.ascii.eqlIgnoreCase(wf.fn_name, "sum") or
+            std.ascii.eqlIgnoreCase(wf.fn_name, "count") or
+            std.ascii.eqlIgnoreCase(wf.fn_name, "avg") or
+            std.ascii.eqlIgnoreCase(wf.fn_name, "min") or
+            std.ascii.eqlIgnoreCase(wf.fn_name, "max"))
+        {
+            const is_count = std.ascii.eqlIgnoreCase(wf.fn_name, "count");
+            const is_avg = std.ascii.eqlIgnoreCase(wf.fn_name, "avg");
+            const is_min = std.ascii.eqlIgnoreCase(wf.fn_name, "min");
+            const is_max = std.ascii.eqlIgnoreCase(wf.fn_name, "max");
+
+            for (sorted, 0..) |ri, pos| {
+                const bounds = computeFrameBounds(wf.frame, pos, sorted, rows, wf.order_by, ctx);
+                var agg_sum: i128 = 0;
+                var agg_count: i64 = 0;
+                var agg_min: ?i128 = null;
+                var agg_max: ?i128 = null;
+
+                var fi: usize = bounds.start;
+                while (fi <= bounds.end and fi < sorted.len) : (fi += 1) {
+                    const frame_ri = sorted[fi];
+                    var row_ctx = ctx;
+                    row_ctx.row = rows[frame_ri];
+
+                    if (is_count and wf.args.len == 0) {
+                        agg_count += 1; // COUNT(*)
+                        continue;
+                    }
+                    if (wf.args.len == 0) continue;
+                    const v = evalExpr(wf.args[0], row_ctx) catch continue;
+                    if (v == .null_val) continue;
+                    const n: i128 = switch (v) {
+                        .int_val => |iv| @intCast(iv),
+                        .uint_val => |uv| @intCast(uv),
+                        .decimal_val => |d| d.coefficient,
+                        else => continue,
+                    };
+                    agg_count += 1;
+                    agg_sum += n;
+                    if (is_min) agg_min = if (agg_min) |m| @min(m, n) else n;
+                    if (is_max) agg_max = if (agg_max) |m| @max(m, n) else n;
+                }
+
+                results[ri][fn_idx] = if (is_count)
+                    .{ .int64 = agg_count }
+                else if (agg_count == 0)
+                    null
+                else if (is_avg)
+                    .{ .int64 = @intCast(@divTrunc(agg_sum, agg_count)) }
+                else if (is_min)
+                    .{ .int64 = @intCast(agg_min.?) }
+                else if (is_max)
+                    .{ .int64 = @intCast(agg_max.?) }
+                else // sum
+                    .{ .int64 = @intCast(agg_sum) };
             }
         }
         // Unknown window functions leave result as null

@@ -732,6 +732,7 @@ pub const SqlExecutor = struct {
         // Stable insertion sort — deterministic for reproducible test output.
         var sorted = try ctx.alloc.dupe([]const ?ColumnValue, inner.items);
         defer ctx.alloc.free(sorted);
+        if (sorted.len == 0) return;
         for (1..sorted.len) |i| {
             const key = sorted[i];
             var j: usize = i;
@@ -960,6 +961,14 @@ pub const SqlExecutor = struct {
                     for (ins.column_ids, 0..) |col_id, i| {
                         const pv = try evalExpr(row[i], ctx);
                         const col = tbl.columnById(col_id) orelse return error.ColumnNotFound;
+                        // NULL literal: reject for NOT NULL columns, leave defaultValue for nullable.
+                        if (pv == .null_val) {
+                            if (col.nullable == .not_null) {
+                                self.setDetail("null value in column \"{s}\" violates not-null constraint", .{col.name});
+                                return error.NullViolation;
+                            }
+                            continue; // leave full_values[pos] as defaultValue
+                        }
                         const pos: usize = @intCast(col_id);
                         full_values[pos].freeIfOwned(ctx.alloc);
                         full_values[pos] = try planValueToTypedColumnValue(pv, col.typ, ctx.alloc);
