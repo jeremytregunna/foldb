@@ -420,6 +420,14 @@ pub fn build(b: *std.Build) void {
     cdc_module.addImport("log.zig", log_module);
     cdc_module.addImport("observability.zig", observability_module);
 
+    // Exchange types module (named so exchange.zig is compiled once, shared across executor/exchange_bus modules)
+    const exchange_module = b.createModule(.{
+        .root_source_file = b.path("src/executor/exchange.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exchange_module.addImport("storage.zig", storage_module);
+
     // Executor module
     const executor_module = b.createModule(.{
         .root_source_file = b.path("src/executor/executor.zig"),
@@ -454,13 +462,13 @@ pub fn build(b: *std.Build) void {
     const recovery_tests = b.addTest(.{ .root_module = recovery_test_module });
     const run_recovery_tests = b.addRunArtifact(recovery_tests);
 
-    // ExchangeBus module (exchange.zig resolved as relative file; needs storage.zig named import)
+    // ExchangeBus module
     const exchange_bus_module = b.createModule(.{
         .root_source_file = b.path("src/executor/exchange_bus.zig"),
         .target = target,
         .optimize = optimize,
     });
-    exchange_bus_module.addImport("storage.zig", storage_module);
+    exchange_bus_module.addImport("exchange.zig", exchange_module);
 
     // ExchangeBus unit tests
     const exchange_bus_test_module = b.createModule(.{
@@ -551,6 +559,10 @@ pub fn build(b: *std.Build) void {
     fold_executor_module.addImport("storage.zig", storage_module);
     fold_executor_module.addImport("log.zig", log_module);
     fold_executor_module.addImport("cdc.zig", cdc_module);
+    fold_executor_module.addImport("executor.zig", executor_module);
+    fold_executor_module.addImport("observability.zig", observability_module);
+    fold_executor_module.addImport("exchange_bus.zig", exchange_bus_module);
+    fold_executor_module.addImport("exchange.zig", exchange_module);
 
     // SQL lexer tests
     const sql_lexer_test_module = b.createModule(.{

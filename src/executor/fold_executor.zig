@@ -7,10 +7,18 @@ const storage_mod = @import("storage.zig");
 const log_mod = @import("log.zig");
 const cdc_mod = @import("cdc.zig");
 const executor_bridge = @import("executor_bridge.zig");
+const executor_mod = @import("executor.zig");
+const exchange_bus_mod = @import("exchange_bus.zig");
+const declare_reads_mod = @import("declare_reads.zig");
 
 const assert = std.debug.assert;
 const Seq = log_mod.Seq;
 const LogEntry = log_mod.LogEntry;
+const ExchangeBus = exchange_bus_mod.ExchangeBus;
+const ExchangeMsg = exchange_bus_mod.ExchangeMsg;
+const ForeignRead = exchange_bus_mod.ForeignRead;
+const FetchedRow = exchange_bus_mod.FetchedRow;
+const ForeignRowEntry = sql_mod.executor_bridge.ForeignRowEntry;
 
 pub const ExecResult = executor_bridge.ExecResult;
 pub const ResolvedValue = executor_bridge.ResolvedValue;
@@ -27,6 +35,10 @@ pub const FoldExecutor = struct {
     log_mux: *log_mod.LogMux,
     /// Which partition this executor services.
     partition_id: u32,
+    /// Total data partition count (1 = single-partition mode, no exchange).
+    part_count: u32,
+    /// Peer-to-peer exchange bus. Null in single-partition mode.
+    bus: ?*ExchangeBus,
     /// CPU to pin this executor's thread to.
     cpu_id: u32,
     shutdown: std.atomic.Value(bool),
@@ -38,6 +50,8 @@ pub const FoldExecutor = struct {
         cdc: *cdc_mod.CdcManager,
         log_mux: *log_mod.LogMux,
         partition_id: u32,
+        part_count: u32,
+        bus: ?*ExchangeBus,
         cpu_id: u32,
         alloc: std.mem.Allocator,
     ) !*FoldExecutor {
@@ -48,6 +62,8 @@ pub const FoldExecutor = struct {
         fe.partitioned = partitioned;
         fe.log_mux = log_mux;
         fe.partition_id = partition_id;
+        fe.part_count = part_count;
+        fe.bus = bus;
         fe.cpu_id = cpu_id;
         fe.shutdown = .init(false);
         fe.thread = null;
@@ -56,6 +72,7 @@ pub const FoldExecutor = struct {
         fe.sql_exec = sql_mod.SqlExecutor.init(partitioned, &fe.registry, &fe.schema, alloc);
         fe.sql_exec.initCdc(cdc);
         fe.sql_exec.filter_partition = partition_id;
+        fe.sql_exec.part_count = part_count;
         return fe;
     }
 
@@ -125,10 +142,17 @@ pub const FoldExecutor = struct {
                 self.sql_exec.advanceSeq(entry.header.seq);
             },
             .txn_intent => {
-                _ = self.sql_exec.run(entry) catch |err| {
-                    std.log.warn("FoldExecutor: run seq={d} err={}", .{ entry.header.seq, err });
-                    self.sql_exec.advanceSeq(entry.header.seq);
-                };
+                if (self.bus != null) {
+                    self.runMultiPartition(entry) catch |err| {
+                        std.log.warn("FoldExecutor[{d}]: multi-partition seq={d} err={}", .{ self.partition_id, entry.header.seq, err });
+                        self.sql_exec.advanceSeq(entry.header.seq);
+                    };
+                } else {
+                    _ = self.sql_exec.run(entry) catch |err| {
+                        std.log.warn("FoldExecutor: run seq={d} err={}", .{ entry.header.seq, err });
+                        self.sql_exec.advanceSeq(entry.header.seq);
+                    };
+                }
             },
             // Route all non-txn entries through sql_exec.run so snapshot_marker
             // entries trigger notify_snapshot on the log.
@@ -137,6 +161,191 @@ pub const FoldExecutor = struct {
                 self.sql_exec.advanceSeq(entry.header.seq);
             },
         }
+    }
+
+    // ---- Multi-partition rendezvous (spec §7.3) ----
+
+    /// Peer-to-peer value exchange for cross-partition txns.
+    /// Declare foreign reads → send requests via SPSC bus → serve-and-wait →
+    /// run SQL plan with pre-fetched foreign rows → apply own mutations.
+    fn runMultiPartition(self: *FoldExecutor, entry: LogEntry) !void {
+        const bus = self.bus orelse {
+            // No bus wired — fall back to direct execution (single-partition mode).
+            _ = try self.sql_exec.run(entry);
+            return;
+        };
+
+        var arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        // Decode intent to get read_set_hint.
+        var validated = executor_mod.validate_txn_entry(entry, alloc) catch {
+            _ = try self.sql_exec.run(entry);
+            return;
+        };
+        defer validated.decoded.deinit();
+        const decoded = validated.decoded;
+        const seq = validated.seq;
+
+        // Single-partition or no read hint — execute directly.
+        const is_multi = for (decoded.read_set_hint) |pid| {
+            if (pid != self.partition_id) break true;
+        } else false;
+        if (!is_multi) {
+            _ = try self.sql_exec.run(entry);
+            return;
+        }
+
+        // Look up the plan to call declareReads.
+        const rq = self.sql_exec.registry.lookup(decoded.query_hash.*) orelse {
+            _ = try self.sql_exec.run(entry);
+            return;
+        };
+
+        // Phase A: declare which foreign rows we need.
+        var foreign_reads: std.ArrayList(ForeignRead) = .empty;
+        defer {
+            for (foreign_reads.items) |fr| if (fr.key.len > 0) alloc.free(fr.key);
+            foreign_reads.deinit(alloc);
+        }
+        try declare_reads_mod.declareReads(
+            rq.plan,
+            self.partition_id,
+            decoded.read_set_hint,
+            alloc,
+            &foreign_reads,
+        );
+
+        // Collect the set of target partitions we'll send requests to.
+        var targets: std.AutoHashMapUnmanaged(u32, void) = .empty;
+        defer targets.deinit(alloc);
+        for (foreign_reads.items) |fr| {
+            _ = fr;
+        }
+        for (decoded.read_set_hint) |pid| {
+            if (pid != self.partition_id) try targets.put(alloc, pid, {});
+        }
+
+        // Send ExchangeRequests to each target partition.
+        var target_it = targets.keyIterator();
+        while (target_it.next()) |pid| {
+            // Collect reads destined for this target.
+            var reads_for_target: std.ArrayList(ForeignRead) = .empty;
+            defer reads_for_target.deinit(alloc);
+            for (foreign_reads.items) |fr| {
+                try reads_for_target.append(alloc, fr);
+            }
+            const req = ExchangeMsg{ .request = .{
+                .seq = seq,
+                .from = self.partition_id,
+                .to = pid.*,
+                .reads = reads_for_target.items,
+            } };
+            while (!bus.push(self.partition_id, pid.*, req)) std.Thread.yield() catch {};
+        }
+
+        // Phase B: serve-and-wait loop.
+        // Service incoming requests from peers; accumulate our responses.
+        var accumulated: std.ArrayList(ForeignRowEntry) = .empty;
+        defer accumulated.deinit(alloc);
+        var responses_received: u32 = 0;
+        const responses_needed: u32 = targets.count();
+
+        while (responses_received < responses_needed) {
+            // Service incoming requests TO ME from any peer.
+            for (0..self.part_count) |peer_idx| {
+                const peer: u32 = @intCast(peer_idx);
+                if (peer == self.partition_id) continue;
+                while (bus.pop(peer, self.partition_id)) |msg| {
+                    switch (msg) {
+                        .request => |req| {
+                            if (req.seq != seq) break; // wrong seq — out of order, shouldn't happen
+                            const fetched = try self.fetchForRequest(req, seq, alloc);
+                            const resp = ExchangeMsg{ .response = .{
+                                .seq = seq,
+                                .from = self.partition_id,
+                                .to = peer,
+                                .rows = fetched,
+                            } };
+                            while (!bus.push(self.partition_id, peer, resp)) std.Thread.yield() catch {};
+                        },
+                        .response => |resp| {
+                            if (resp.seq != seq) break;
+                            for (resp.rows) |fetched| {
+                                try accumulated.append(alloc, .{
+                                    .from_partition = fetched.from_partition,
+                                    .table_id = fetched.table_id,
+                                    .key = fetched.key,
+                                    .row = fetched.row,
+                                });
+                            }
+                            if (targets.contains(resp.from)) {
+                                responses_received += 1;
+                                _ = targets.remove(resp.from); // mark as received
+                            }
+                        },
+                    }
+                }
+            }
+            if (responses_received < responses_needed) std.Thread.yield() catch {};
+        }
+
+        // Phase C: execute with foreign rows populated.
+        self.sql_exec.pending_foreign_rows = accumulated.items;
+        defer self.sql_exec.pending_foreign_rows = &.{};
+        _ = try self.sql_exec.run(entry);
+    }
+
+    /// Fetch the rows requested by `req` from this executor's own storage at seq-1.
+    fn fetchForRequest(
+        self: *FoldExecutor,
+        req: exchange_bus_mod.ExchangeRequest,
+        seq: Seq,
+        alloc: std.mem.Allocator,
+    ) ![]FetchedRow {
+        const read_seq: Seq = if (seq > 0) seq - 1 else 0;
+        var fetched: std.ArrayList(FetchedRow) = .empty;
+        errdefer fetched.deinit(alloc);
+
+        for (req.reads) |fr| {
+            if (fr.key.len == 0) {
+                // Sentinel: full scan of this table from own partition.
+                var iter = self.partitioned.scan(fr.table_id, storage_mod.KeyRange.all(), read_seq, alloc) catch continue;
+                defer iter.deinit();
+                while (iter.next() catch break) |row| {
+                    const key_copy = alloc.dupe(u8, row.key) catch continue;
+                    const vals_copy = alloc.dupe(storage_mod.ColumnValue, row.values) catch {
+                        alloc.free(key_copy);
+                        continue;
+                    };
+                    try fetched.append(alloc, .{
+                        .from_partition = self.partition_id,
+                        .table_id = fr.table_id,
+                        .key = key_copy,
+                        .row = .{ .key = key_copy, .seq = row.seq, .values = vals_copy, .is_tombstone = row.is_tombstone },
+                    });
+                }
+            } else {
+                // Point lookup.
+                const row_opt = self.partitioned.get(fr.table_id, fr.key, read_seq) catch null;
+                var cloned_row: ?storage_mod.Row = null;
+                if (row_opt) |row| {
+                    var r = row;
+                    defer r.deinit(alloc);
+                    const key_copy = try alloc.dupe(u8, r.key);
+                    const vals_copy = try alloc.dupe(storage_mod.ColumnValue, r.values);
+                    cloned_row = .{ .key = key_copy, .seq = r.seq, .values = vals_copy, .is_tombstone = r.is_tombstone };
+                }
+                try fetched.append(alloc, .{
+                    .from_partition = self.partition_id,
+                    .table_id = fr.table_id,
+                    .key = fr.key,
+                    .row = cloned_row,
+                });
+            }
+        }
+        return fetched.toOwnedSlice(alloc);
     }
 
     // ---- Schema / DDL ----

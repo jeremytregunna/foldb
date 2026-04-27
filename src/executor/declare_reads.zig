@@ -13,7 +13,8 @@
 /// The sentinel key "" is recognised by the serve-and-wait loop in FoldExecutor,
 /// which responds by sending all rows it has for that (partition, table).
 const std = @import("std");
-const plan_mod = @import("sql.zig");
+const sql_root = @import("sql.zig");
+const plan_mod = sql_root.plan; // src/sql/plan.zig via sql.zig re-export
 const exchange = @import("exchange.zig");
 
 pub const PartitionId = exchange.PartitionId;
@@ -79,12 +80,6 @@ fn collectStmtTables(
         },
         .merge => |mrg| {
             try out.put(alloc, mrg.target_id, {});
-            switch (mrg.source.ref) {
-                .named => |n| {
-                    _ = n; // source table read via scan in executeMerge
-                },
-                else => {},
-            }
             try collectNodeTables(mrg.source, alloc, out);
         },
         .assert => |a| {

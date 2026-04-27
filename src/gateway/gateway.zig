@@ -279,6 +279,8 @@ pub const Gateway = struct {
                 &gw.cdc,
                 &gw.log_mux,
                 @intCast(i),
+                @intCast(pc),
+                null, // bus: null until Step 6 wires ExchangeBus
                 cpu_id,
                 alloc,
             );

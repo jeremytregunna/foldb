@@ -9,12 +9,13 @@
 /// Callers own all memory referenced by items; the queue stores copies of the
 /// struct values (which may contain pointers/slices into caller-owned buffers).
 const std = @import("std");
-const types = @import("types.zig");
 const storage_mod = @import("storage.zig");
 
-pub const PartitionId = types.PartitionId;
-pub const Seq = types.Seq;
-pub const TableId = storage_mod.TableId;
+// Defined locally to avoid importing types.zig (also in src/executor/), which would
+// place it in two module compilation units alongside executor_module.
+pub const PartitionId = u32;
+pub const Seq = u64;
+pub const TableId = u32;
 pub const Row = storage_mod.Row;
 
 /// A request for one row from a peer partition's storage at seq-1.

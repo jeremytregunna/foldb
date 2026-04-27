@@ -6,7 +6,7 @@ const assert = std.debug.assert;
 pub const handlers_max: u32 = 1024;
 const types = @import("types.zig");
 const storage_mod = @import("storage.zig");
-const exchange = @import("exchange.zig");
+const types_mod = @import("types.zig");
 
 pub const QueryHash = types.QueryHash;
 pub const ResolvedValue = types.ResolvedValue;
@@ -14,8 +14,8 @@ pub const Seq = types.Seq;
 pub const PartitionId = types.PartitionId;
 pub const Storage = storage_mod.Storage;
 pub const Mutation = storage_mod.Mutation;
-pub const ForeignRead = exchange.ForeignRead;
-pub const FetchedRow = exchange.FetchedRow;
+pub const ForeignRead = types_mod.ForeignRead;
+pub const FetchedRow = types_mod.FetchedRow;
 
 pub const QueryContext = struct {
     params: []const u8,

@@ -24,7 +24,7 @@
 pub fn verifyExecutorModule() void {
     comptime {
         const registry = @import("registry.zig");
-        const exchange = @import("exchange.zig");
+        const types_check = @import("types.zig");
 
         // QueryContext must have 'resolved' so handlers can access resolved nondeterminism
         // instead of calling system clocks or RNGs.
@@ -41,10 +41,10 @@ pub fn verifyExecutorModule() void {
         }
 
         // Exchange types must be well-formed.
-        if (!@hasField(exchange.ForeignRead, "table_id")) {
+        if (!@hasField(types_check.ForeignRead, "table_id")) {
             @compileError("ForeignRead missing table_id");
         }
-        if (!@hasField(exchange.FetchedRow, "row")) {
+        if (!@hasField(types_check.FetchedRow, "row")) {
             @compileError("FetchedRow missing row");
         }
 
