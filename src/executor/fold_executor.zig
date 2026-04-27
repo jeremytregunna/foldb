@@ -23,14 +23,12 @@ pub const FoldExecutor = struct {
     storage_schema_arena: std.heap.ArenaAllocator,
     /// Routing layer over storage partitions. Borrowed from Gateway.
     partitioned: *storage_mod.PartitionedStorage,
-    /// Partition log for this executor. Borrowed from Sequencer (stable pointer).
-    log: *log_mod.Log,
+    /// Merged log stream across all log partitions. Borrowed from Gateway.
+    log_mux: *log_mod.LogMux,
     /// Which partition this executor services.
     partition_id: u32,
     /// CPU to pin this executor's thread to.
     cpu_id: u32,
-    /// All executors (including self). Set via setSiblings after all are created.
-    all_executors: []*FoldExecutor,
     shutdown: std.atomic.Value(bool),
     thread: ?std.Thread,
     alloc: std.mem.Allocator,
@@ -38,7 +36,7 @@ pub const FoldExecutor = struct {
     pub fn init(
         partitioned: *storage_mod.PartitionedStorage,
         cdc: *cdc_mod.CdcManager,
-        log: *log_mod.Log,
+        log_mux: *log_mod.LogMux,
         partition_id: u32,
         cpu_id: u32,
         alloc: std.mem.Allocator,
@@ -48,10 +46,9 @@ pub const FoldExecutor = struct {
         fe.alloc = alloc;
         fe.storage_schema_arena = std.heap.ArenaAllocator.init(alloc);
         fe.partitioned = partitioned;
-        fe.log = log;
+        fe.log_mux = log_mux;
         fe.partition_id = partition_id;
         fe.cpu_id = cpu_id;
-        fe.all_executors = &.{};
         fe.shutdown = .init(false);
         fe.thread = null;
         fe.schema = sql_mod.SchemaRegistry.init(alloc);
@@ -60,12 +57,6 @@ pub const FoldExecutor = struct {
         fe.sql_exec.initCdc(cdc);
         fe.sql_exec.filter_partition = partition_id;
         return fe;
-    }
-
-    /// Wire all sibling executors (including self). Must be called after all FoldExecutors
-    /// are created and before start().
-    pub fn setSiblings(self: *FoldExecutor, executors: []*FoldExecutor) void {
-        self.all_executors = executors;
     }
 
     pub fn deinit(self: *FoldExecutor) void {
@@ -82,7 +73,7 @@ pub const FoldExecutor = struct {
 
     pub fn stop(self: *FoldExecutor) void {
         self.shutdown.store(true, .release);
-        self.log.notifyAppend();
+        self.log_mux.notifyAppend();
         if (self.thread) |t| {
             t.join();
             self.thread = null;
@@ -94,14 +85,14 @@ pub const FoldExecutor = struct {
         const batch = 64;
         while (!self.shutdown.load(.acquire)) {
             const from = self.sql_exec.current_seq() + 1;
-            const entries = self.log.read(from, batch, self.alloc) catch continue;
+            const entries = self.log_mux.read(from, batch, self.alloc) catch continue;
             defer {
                 for (entries) |*e| e.deinit(self.alloc);
                 self.alloc.free(entries);
             }
             if (entries.len == 0) {
                 if (self.shutdown.load(.acquire)) break;
-                self.log.waitForEntries(from);
+                self.log_mux.waitForEntries(from);
                 continue;
             }
             for (entries) |e| {
@@ -134,9 +125,7 @@ pub const FoldExecutor = struct {
                 self.sql_exec.advanceSeq(entry.header.seq);
             },
             .txn_intent => {
-                const first_seq = entry.header.seq -| self.partition_id;
-                self.waitForSiblings(first_seq);
-                _ = self.sql_exec.runWithFirstSeq(entry, first_seq) catch |err| {
+                _ = self.sql_exec.run(entry) catch |err| {
                     std.log.warn("FoldExecutor: run seq={d} err={}", .{ entry.header.seq, err });
                     self.sql_exec.advanceSeq(entry.header.seq);
                 };
@@ -147,22 +136,6 @@ pub const FoldExecutor = struct {
                 std.log.warn("FoldExecutor: run seq={d} err={}", .{ entry.header.seq, err });
                 self.sql_exec.advanceSeq(entry.header.seq);
             },
-        }
-    }
-
-    /// Block until all sibling executors have processed their entry from the previous
-    /// broadcast batch. This ensures reads at first_seq-1 see a consistent snapshot.
-    /// Formula: executor[Q] must have current_seq >= first_seq - N + Q.
-    fn waitForSiblings(self: *FoldExecutor, first_seq: Seq) void {
-        const n: u32 = @intCast(self.all_executors.len);
-        if (n <= 1 or first_seq < @as(Seq, n)) return; // first batch or single partition
-        const sleep_ns: std.os.linux.timespec = .{ .sec = 0, .nsec = 100 };
-        for (self.all_executors, 0..) |fe, q| {
-            if (@as(u32, @intCast(q)) == self.partition_id) continue;
-            const threshold = first_seq - @as(Seq, n) + @as(Seq, q);
-            while (fe.sql_exec.current_seq() < threshold) {
-                _ = std.os.linux.nanosleep(&sleep_ns, null);
-            }
         }
     }
 
@@ -429,7 +402,7 @@ pub const FoldExecutor = struct {
         // Pass 1: schema — DDL and query registration only.
         var from_seq: Seq = 1;
         while (true) {
-            const entries = try self.log.read(from_seq, batch, self.alloc);
+            const entries = try self.log_mux.read(from_seq, batch, self.alloc);
             defer {
                 for (entries) |*e| e.deinit(self.alloc);
                 self.alloc.free(entries);
@@ -451,7 +424,7 @@ pub const FoldExecutor = struct {
         // Pass 2: DML — apply txn_intent entries to rebuild storage state.
         from_seq = 1;
         while (true) {
-            const entries = try self.log.read(from_seq, batch, self.alloc);
+            const entries = try self.log_mux.read(from_seq, batch, self.alloc);
             defer {
                 for (entries) |*e| e.deinit(self.alloc);
                 self.alloc.free(entries);
@@ -459,11 +432,14 @@ pub const FoldExecutor = struct {
             if (entries.len == 0) break;
             for (entries) |e| {
                 if (e.header.kind == .txn_intent) {
-                    // Use runWithFirstSeq so partition filtering is applied correctly.
-                    // No sibling wait during replay — executors replay sequentially.
-                    const first_seq = e.header.seq -| self.partition_id;
-                    const r = try self.sql_exec.runWithFirstSeq(e, first_seq);
-                    // Free any RETURNING result set — nobody reads it during replay
+                    // Execution errors during replay (e.g. bad params from a previously
+                    // aborted txn) are non-fatal: advance seq and continue.
+                    const r = self.sql_exec.run(e) catch |err| {
+                        std.log.warn("FoldExecutor: replay seq={d} err={} (skipping)", .{ e.header.seq, err });
+                        self.sql_exec.advanceSeq(e.header.seq);
+                        from_seq = e.header.seq + 1;
+                        continue;
+                    };
                     if (r == .ok) if (r.ok.result_set) |rs| {
                         var mutable = rs;
                         mutable.deinit();

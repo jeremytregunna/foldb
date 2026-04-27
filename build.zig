@@ -160,7 +160,17 @@ pub fn build(b: *std.Build) void {
 
     const run_log_manager_tests = b.addRunArtifact(log_manager_tests);
 
-    // Log durability tests
+    // Log mux tests
+    const log_mux_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/log/mux_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    log_mux_test_module.addImport("log.zig", log_module);
+    const log_mux_tests = b.addTest(.{ .root_module = log_mux_test_module });
+    const run_log_mux_tests = b.addRunArtifact(log_mux_tests);
+
+// Log durability tests
     const log_durability_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/log/durability_test.zig"),
         .target = target,
@@ -1290,6 +1300,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_unit_tests.step);
     test_step.dependOn(&run_log_segment_tests.step);
     test_step.dependOn(&run_log_manager_tests.step);
+    test_step.dependOn(&run_log_mux_tests.step);
     test_step.dependOn(&run_log_durability_tests.step);
     test_step.dependOn(&run_raft_rpc_tests.step);
     test_step.dependOn(&run_raft_node_tests.step);

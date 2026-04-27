@@ -86,6 +86,13 @@ pub const PartitionSet = struct {
     /// Caller owns the returned slice; free with `alloc.free(results)`.
     pub fn run_entry(self: *PartitionSet, entry: LogEntry) ![]PartitionExecResult {
         assert(entry.header.seq > 0);
+        // With commitRoute, each entry appears in exactly one log partition, but all
+        // executors see every entry via LogMux. Advance committed_seq on all executors
+        // regardless of which partition the entry targeted so PartitionDriver's
+        // min_seq cursor doesn't stall on entries that bypassed a given partition.
+        defer for (self.executors) |*executor| {
+            if (executor.committed_seq < entry.header.seq) executor.committed_seq = entry.header.seq;
+        };
         if (entry.header.kind != .txn_intent) {
             // Non-txn entries advance seq on all executors with no side effects.
             for (self.executors) |*executor| executor.committed_seq = entry.header.seq;
@@ -304,8 +311,9 @@ pub const PartitionSet = struct {
 
 /// Drains committed log entries into a PartitionSet. Feeds each entry to run_entry()
 /// starting at the minimum committed_seq across all partitions.
+/// Uses LogMux to read from all log partitions in seq order (spec §7.2 / inv 28).
 pub const PartitionDriver = struct {
-    log: *executor_mod.Log,
+    log_mux: *executor_mod.LogMux,
     partition_set: *PartitionSet,
     alloc: std.mem.Allocator,
 
@@ -317,7 +325,7 @@ pub const PartitionDriver = struct {
         }
         const from_seq = min_seq + 1;
         assert(from_seq > 0);
-        const entries = try self.log.read(from_seq, 256, self.alloc);
+        const entries = try self.log_mux.read(from_seq, 256, self.alloc);
         defer {
             for (entries) |*entry| entry.deinit(self.alloc);
             self.alloc.free(entries);

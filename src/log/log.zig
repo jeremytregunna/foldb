@@ -29,6 +29,8 @@ pub const Log = manager.Log;
 pub const LogError = manager.LogError;
 pub const default_segment_max_entries = manager.default_segment_max_entries;
 
+pub const LogMux = @import("mux.zig").LogMux;
+
 pub const LogMetrics = @import("observability.zig").LogMetrics;
 pub const real_time_sec = segment.real_time_sec;
 

@@ -3,6 +3,7 @@ const std = @import("std");
 
 const sql_mod = @import("sql.zig");
 const storage_mod = @import("storage.zig");
+const log_mod = @import("log.zig");
 const executor_mod = @import("executor.zig");
 const fold_executor_mod = @import("fold_executor.zig");
 const sequencer_mod = @import("sequencer.zig");
@@ -76,6 +77,8 @@ fn onSnapshotComplete(ptr: *anyopaque, snapshot_seq: sequencer_mod.Seq) void {
 pub const Gateway = struct {
     /// One FoldExecutor per partition; each runs on its own thread pinned to a CPU.
     fold_executors: []*fold_executor_mod.FoldExecutor,
+    /// Merged log stream shared by all FoldExecutors. Owned by Gateway.
+    log_mux: log_mod.LogMux,
     /// One Storage per data partition. Heap-allocated; owned by this gateway.
     storages: []*storage_mod.Storage,
     /// Routing wrapper over storages — used by fold_executor and reconnaissance.
@@ -239,11 +242,26 @@ pub const Gateway = struct {
             .heartbeat_interval_ms = opts.heartbeat_interval_ms,
             .peers = opts.peers,
         };
-        gw.sequencer = try sequencer_mod.Sequencer.init(storage_dir, seq_cfg, alloc);
+        // Create partition logs here so Gateway controls log lifecycle independently
+        // of the Sequencer (spec §5.2, §6.6). Ownership transfers to Sequencer.initWithLogs.
+        const partition_logs = try sequencer_mod.createPartitionLogs(
+            storage_dir,
+            opts.node_id,
+            opts.partition_count,
+            alloc,
+        );
+        gw.sequencer = try sequencer_mod.Sequencer.initWithLogs(storage_dir, partition_logs, seq_cfg, alloc);
         errdefer gw.sequencer.deinit();
         if (!opts.defer_sequencer_start) try gw.sequencer.start();
 
         gw.cdc = try cdc_mod.CdcManager.init(alloc);
+        errdefer gw.cdc.deinit();
+
+        // Build a LogMux over all partition logs so every FoldExecutor reads the full stream.
+        const log_refs = try alloc.alloc(*log_mod.Log, gw.sequencer.partition_logs.len);
+        for (gw.sequencer.partition_logs, 0..) |*l, i| log_refs[i] = l;
+        gw.log_mux = log_mod.LogMux.init(log_refs, alloc);
+        errdefer gw.log_mux.deinit();
 
         // Create one FoldExecutor per partition, each pinned to a CPU (round-robin if CPUs < partitions).
         const cpu_count: u32 = @intCast(std.Thread.getCpuCount() catch 1);
@@ -259,7 +277,7 @@ pub const Gateway = struct {
             fold_executors[i] = try fold_executor_mod.FoldExecutor.init(
                 &gw.partitioned,
                 &gw.cdc,
-                &gw.sequencer.partition_logs[i],
+                &gw.log_mux,
                 @intCast(i),
                 cpu_id,
                 alloc,
@@ -267,9 +285,6 @@ pub const Gateway = struct {
             n_fe_inited += 1;
         }
         gw.fold_executors = fold_executors;
-
-        // Wire sibling references so each FoldExecutor can do the cross-partition wait.
-        for (fold_executors) |fe| fe.setSiblings(fold_executors);
 
         // Wire snapshot scheduling if an object store is available and interval is set.
         const snap_obj: ?storage_mod.ObjectStore = blk: {
@@ -355,6 +370,7 @@ pub const Gateway = struct {
         self.alloc.free(self.storages);
         for (self.fold_executors) |fe| fe.deinit();
         self.alloc.free(self.fold_executors);
+        self.log_mux.deinit();
         self.cdc.deinit();
         self.sequencer.deinit();
         if (self.s3_store) |s3| self.alloc.destroy(s3);
@@ -431,14 +447,10 @@ pub const Gateway = struct {
         };
     }
 
-    /// Wait for all FoldExecutors to process their entries from a broadcast batch.
-    /// The sequencer returns last_seq (highest seq assigned); N entries have seqs
-    /// first_seq..last_seq with sequential routing: entry i → partition i.
-    fn waitAllFoldExecutors(self: *Gateway, last_seq: Seq) !void {
-        const n: u32 = @intCast(self.fold_executors.len);
-        const first_seq = last_seq - @as(Seq, n) + 1;
-        for (self.fold_executors, 0..) |fe, p| {
-            try fe.wait_for(first_seq + @as(Seq, p), self.io);
+    /// Wait for all FoldExecutors to process the committed entry at seq.
+    fn waitAllFoldExecutors(self: *Gateway, seq: Seq) !void {
+        for (self.fold_executors) |fe| {
+            try fe.wait_for(seq, self.io);
         }
     }
 
@@ -501,18 +513,13 @@ pub const Gateway = struct {
         );
         const result = try handle.awaitCommit(self.io);
 
-        // Txn is broadcast: last_seq = result.seq, first_seq = last_seq - N + 1.
-        // Each partition P gets seq first_seq + P.
-        const n: u32 = @intCast(self.fold_executors.len);
-        const first_seq = result.seq - @as(Seq, n) + 1;
-
+        // commitRoute: one seq per txn; all executors process result.seq via LogMux.
         var total_rows: u64 = 0;
         var combined_result_set: ?ResultSet = null;
 
-        for (self.fold_executors, 0..) |fe, p| {
-            const target_seq = first_seq + @as(Seq, p);
-            try fe.wait_for(target_seq, self.io);
-            const exec_result = fe.waitFor(target_seq);
+        for (self.fold_executors) |fe| {
+            try fe.wait_for(result.seq, self.io);
+            const exec_result = fe.waitFor(result.seq);
             const exec_detail = fe.lastExecDetail();
             if (exec_detail.len > 0) self.setDetail("{s}", .{exec_detail});
 

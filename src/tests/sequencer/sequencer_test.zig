@@ -140,7 +140,7 @@ test "Sequencer: idempotent submit returns same seq" {
     try testing.expectEqual(@as(u64, 1), seq.currentSeq());
 }
 
-test "Sequencer: multi-partition broadcast creates N entries per txn" {
+test "Sequencer: multi-partition routing assigns one seq per txn round-robin" {
     const path = try makeTempDir("multipart");
     defer {
         removeDirRecursive(path);
@@ -174,17 +174,16 @@ test "Sequencer: multi-partition broadcast creates N entries per txn" {
     var p4: PendingSubmit = undefined;
     const r4 = try seq.submitBytes(&p4, payload, 1, 4, .txn_intent).awaitCommit(null);
 
-    // Each txn broadcasts N=2 entries. last_seq = first_seq + N - 1.
-    // last_entry.partition = N-1 = 1 (sequential routing).
-    // Seqs: txn1→[1,2], txn2→[3,4], txn3→[5,6], txn4→[7,8].
-    try testing.expectEqual(@as(u64, 2), r1.seq);
+    // commitRoute: one seq per txn, partition = seq % 2.
+    // seq 1 % 2 = 1, seq 2 % 2 = 0, seq 3 % 2 = 1, seq 4 % 2 = 0.
+    try testing.expectEqual(@as(u64, 1), r1.seq);
     try testing.expectEqual(@as(u32, 1), r1.partition);
-    try testing.expectEqual(@as(u64, 4), r2.seq);
-    try testing.expectEqual(@as(u32, 1), r2.partition);
-    try testing.expectEqual(@as(u64, 6), r3.seq);
+    try testing.expectEqual(@as(u64, 2), r2.seq);
+    try testing.expectEqual(@as(u32, 0), r2.partition);
+    try testing.expectEqual(@as(u64, 3), r3.seq);
     try testing.expectEqual(@as(u32, 1), r3.partition);
-    try testing.expectEqual(@as(u64, 8), r4.seq);
-    try testing.expectEqual(@as(u32, 1), r4.partition);
+    try testing.expectEqual(@as(u64, 4), r4.seq);
+    try testing.expectEqual(@as(u32, 0), r4.partition);
 }
 
 test "Sequencer: committed entry readable from partition log" {
@@ -242,6 +241,32 @@ test "Sequencer: config derives tick counts correctly" {
     try testing.expect(seq.raft.role == .leader);
 }
 
+test "Sequencer: log_partition_count is independent of partition_count" {
+    const path = try makeTempDir("logpc");
+    defer {
+        removeDirRecursive(path);
+        testing.allocator.free(path);
+    }
+    // log_partition_count = 0 defaults to partition_count
+    var s1 = try Sequencer.init(path, .{ .partition_count = 2 }, testing.allocator);
+    defer s1.deinit();
+    try testing.expectEqual(@as(u32, 2), s1.logPartitionCount());
+    try testing.expectEqual(@as(u32, 2), s1.partitionCount());
+}
+
+test "Sequencer: explicit log_partition_count is stored independently" {
+    const path = try makeTempDir("logpc2");
+    defer {
+        removeDirRecursive(path);
+        testing.allocator.free(path);
+    }
+    // log_partition_count overrides the default when non-zero
+    var s2 = try Sequencer.init(path, .{ .partition_count = 2, .log_partition_count = 4 }, testing.allocator);
+    defer s2.deinit();
+    try testing.expectEqual(@as(u32, 4), s2.logPartitionCount());
+    try testing.expectEqual(@as(u32, 2), s2.partitionCount());
+}
+
 test "Sequencer: config with peers registers peer IDs in RaftNode" {
     const path = try makeTempDir("peers");
     defer {
@@ -264,4 +289,55 @@ test "Sequencer: config with peers registers peer IDs in RaftNode" {
     try testing.expectEqual(@as(u64, 3), seq.raft.peers[1].id);
     // Multi-node: not yet leader (needs quorum to elect)
     try testing.expect(seq.raft.role != .leader);
+}
+
+test "Sequencer: commitRoute assigns monotonic seqs one per intent" {
+    const path = try makeTempDir("route_mono");
+    defer {
+        removeDirRecursive(path);
+        testing.allocator.free(path);
+    }
+
+    // partition_count must match log_partition_count until Phase 5 separates them.
+    var seq = try Sequencer.init(path, .{ .partition_count = 1, .log_partition_count = 1 }, testing.allocator);
+    defer seq.deinit();
+    try seq.start();
+
+    const payload = try minimalIntentPayload(testing.allocator);
+    defer testing.allocator.free(payload);
+
+    const r1 = try seq.commitRoute(1, 1, .{ .client_id = 1, .client_seq = 1, .intent_payload = payload, .entry_kind = .txn_intent });
+    const r2 = try seq.commitRoute(1, 2, .{ .client_id = 1, .client_seq = 2, .intent_payload = payload, .entry_kind = .txn_intent });
+    const r3 = try seq.commitRoute(1, 3, .{ .client_id = 1, .client_seq = 3, .intent_payload = payload, .entry_kind = .txn_intent });
+
+    try testing.expectEqual(@as(u64, 1), r1.seq);
+    try testing.expectEqual(@as(u64, 2), r2.seq);
+    try testing.expectEqual(@as(u64, 3), r3.seq);
+}
+
+test "Sequencer: commitRoute cycles partitions by seq mod log_partition_count" {
+    const path = try makeTempDir("route_cycle");
+    defer {
+        removeDirRecursive(path);
+        testing.allocator.free(path);
+    }
+
+    // partition_count must match log_partition_count until Phase 5 separates them.
+    var seq = try Sequencer.init(path, .{ .partition_count = 3, .log_partition_count = 3 }, testing.allocator);
+    defer seq.deinit();
+    try seq.start();
+
+    const payload = try minimalIntentPayload(testing.allocator);
+    defer testing.allocator.free(payload);
+
+    const r1 = try seq.commitRoute(1, 1, .{ .client_id = 1, .client_seq = 1, .intent_payload = payload, .entry_kind = .txn_intent });
+    const r2 = try seq.commitRoute(1, 2, .{ .client_id = 1, .client_seq = 2, .intent_payload = payload, .entry_kind = .txn_intent });
+    const r3 = try seq.commitRoute(1, 3, .{ .client_id = 1, .client_seq = 3, .intent_payload = payload, .entry_kind = .txn_intent });
+    const r4 = try seq.commitRoute(1, 4, .{ .client_id = 1, .client_seq = 4, .intent_payload = payload, .entry_kind = .txn_intent });
+
+    // seq 1 % 3 = 1, seq 2 % 3 = 2, seq 3 % 3 = 0, seq 4 % 3 = 1
+    try testing.expectEqual(@as(u32, 1), r1.partition);
+    try testing.expectEqual(@as(u32, 2), r2.partition);
+    try testing.expectEqual(@as(u32, 0), r3.partition);
+    try testing.expectEqual(@as(u32, 1), r4.partition);
 }

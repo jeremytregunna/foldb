@@ -41,8 +41,12 @@ pub const PeerAddr = struct {
 
 /// Sequencer config.
 pub const Config = struct {
-    /// Number of data partition logs.
+    /// Number of data partitions (storage sharding).
     partition_count: u32 = 1,
+    /// Number of log partitions (write throughput). 0 = same as partition_count.
+    /// Per spec §5.2: log partitions are independent Raft groups sized for throughput;
+    /// they are decoupled from the data partition count (spec §6.6).
+    log_partition_count: u32 = 0,
     /// Max intents per epoch before forcing a close.
     max_epoch_size: u32 = epoch_mod.DEFAULT_MAX_BATCH_SIZE,
     /// Node ID for the Sequencer's Raft group.
@@ -84,8 +88,12 @@ pub const Sequencer = struct {
     last_applied_path: []u8,
     batcher: EpochBatcher,
     idempotency: IdempotencyCache,
-    /// Data partition logs, one per partition.
+    /// Data partition logs, one per data partition. // data partitions
     partition_logs: []Log,
+    /// Number of log partitions for write throughput routing (spec §5.2).
+    /// Independent of partition_logs.len once Phase 6 is complete; until then
+    /// defaults to partition_logs.len so existing broadcast behaviour is preserved.
+    log_partition_count: u32,
     next_seq: Seq,
     next_epoch: EpochNum,
     alloc: std.mem.Allocator,
@@ -132,7 +140,7 @@ pub const Sequencer = struct {
         var raft_node = try initRaftNode(cfg, &raft_log, alloc);
         errdefer raft_node.deinit();
 
-        const partition_logs = try initPartitionLogs(base_path, cfg.node_id, cfg.partition_count, alloc);
+        const partition_logs = try createPartitionLogs(base_path, cfg.node_id, cfg.partition_count, alloc);
         errdefer {
             for (partition_logs) |*pl| pl.deinit();
             alloc.free(partition_logs);
@@ -150,6 +158,7 @@ pub const Sequencer = struct {
             for (cfg.peers) |p| try transport.addPeer(p.id, p.addr);
         }
 
+        const lpc: u32 = if (cfg.log_partition_count > 0) cfg.log_partition_count else cfg.partition_count;
         return Sequencer{
             .raft = raft_node,
             .raft_log = raft_log,
@@ -158,6 +167,7 @@ pub const Sequencer = struct {
             .batcher = EpochBatcher.init(alloc, cfg.max_epoch_size),
             .idempotency = IdempotencyCache.init(alloc),
             .partition_logs = partition_logs,
+            .log_partition_count = lpc,
             .next_seq = max_seq + 1,
             .next_epoch = 1,
             .alloc = alloc,
@@ -165,6 +175,72 @@ pub const Sequencer = struct {
             .tick_interval_ms = cfg.tick_interval_ms,
             .last_applied = persisted_last_applied,
             // queue is intentionally left undefined here; start() calls queue.init() before use.
+            .queue = undefined,
+        };
+    }
+
+    /// Like init but accepts pre-created partition logs (caller transfers ownership).
+    /// Use this when the calling layer (e.g. Gateway) needs to create and hold a
+    /// reference to the logs independently of Sequencer lifetime — the foundation
+    /// for separating log-partition count from data-partition count (spec §5.2, §6.6).
+    /// Sequencer takes ownership: deinit will deinit each log and free the slice.
+    pub fn initWithLogs(
+        base_path: []const u8,
+        partition_logs: []Log,
+        cfg: Config,
+        alloc: std.mem.Allocator,
+    ) !Sequencer {
+        assert(base_path.len > 0);
+        assert(partition_logs.len > 0);
+
+        const base_pathz = try std.heap.page_allocator.allocSentinel(u8, base_path.len, 0);
+        defer std.heap.page_allocator.free(base_pathz);
+        @memcpy(base_pathz[0..base_path.len], base_path);
+        _ = std.os.linux.mkdir(base_pathz.ptr, 0o755);
+
+        const raft_path = try std.fmt.allocPrint(alloc, "{s}/seq_raft", .{base_path});
+        errdefer alloc.free(raft_path);
+        const last_applied_path = try std.fmt.allocPrint(alloc, "{s}/last_applied.bin", .{base_path});
+        errdefer alloc.free(last_applied_path);
+
+        var persisted_last_applied: Seq = 0;
+        readLastApplied(last_applied_path, &persisted_last_applied);
+
+        const seq_partition_id: PartitionId = std.math.maxInt(PartitionId);
+        var raft_log = try Log.init_partitioned(raft_path, cfg.node_id, seq_partition_id, alloc);
+        errdefer raft_log.deinit();
+
+        var raft_node = try initRaftNode(cfg, &raft_log, alloc);
+        errdefer raft_node.deinit();
+
+        var max_seq: Seq = 0;
+        for (partition_logs) |pl| {
+            if (pl.current_seq > max_seq) max_seq = pl.current_seq;
+        }
+
+        var transport = raft_mod.TcpTransport.init(alloc, cfg.node_id);
+        errdefer transport.deinit();
+        if (cfg.peers.len > 0) {
+            try transport.listen(cfg.listen_port);
+            for (cfg.peers) |p| try transport.addPeer(p.id, p.addr);
+        }
+
+        const lpc: u32 = if (cfg.log_partition_count > 0) cfg.log_partition_count else @intCast(partition_logs.len);
+        return Sequencer{
+            .raft = raft_node,
+            .raft_log = raft_log,
+            .raft_path = raft_path,
+            .last_applied_path = last_applied_path,
+            .batcher = EpochBatcher.init(alloc, cfg.max_epoch_size),
+            .idempotency = IdempotencyCache.init(alloc),
+            .partition_logs = partition_logs,
+            .log_partition_count = lpc,
+            .next_seq = max_seq + 1,
+            .next_epoch = 1,
+            .alloc = alloc,
+            .transport = transport,
+            .tick_interval_ms = cfg.tick_interval_ms,
+            .last_applied = persisted_last_applied,
             .queue = undefined,
         };
     }
@@ -197,6 +273,12 @@ pub const Sequencer = struct {
 
     pub fn partitionCount(self: *const Sequencer) u32 {
         return @intCast(self.partition_logs.len);
+    }
+
+    /// Number of log partitions used for write-throughput routing (spec §5.2).
+    /// Distinct from partitionCount() once log and data partitions are fully separated.
+    pub fn logPartitionCount(self: *const Sequencer) u32 {
+        return self.log_partition_count;
     }
 
     pub fn isLeader(self: *const Sequencer) bool {
@@ -434,6 +516,55 @@ pub const Sequencer = struct {
         self.queue.push(pending);
         return .{ .pending = pending };
     }
+
+    /// Route one intent to one log partition: seq % log_partition_count.
+    /// One seq consumed per intent; replaces commitBroadcast in Phase 6.
+    pub fn commitRoute(self: *Sequencer, client_id: u64, client_seq_num: u64, submit: ValidatedSubmit) !SubmitResult {
+        const seq = self.next_seq;
+        const partition: PartitionId = @intCast(seq % @as(Seq, self.logPartitionCount()));
+        const entry = OrderingEntry{
+            .seq = seq,
+            .partition = partition,
+            .client_id = client_id,
+            .client_seq = client_seq_num,
+        };
+        const decision = types_mod.EpochDecision{
+            .epoch_num = self.next_epoch,
+            .entries = &.{entry},
+            .entry_kind = submit.entry_kind,
+            .payload = submit.intent_payload,
+        };
+        var payload_buf: std.ArrayList(u8) = .empty;
+        defer payload_buf.deinit(self.alloc);
+        try types_mod.serializeEpochDecision(decision, &payload_buf, self.alloc);
+        var outputs: std.ArrayList(raft_mod.Output) = .empty;
+        defer outputs.deinit(self.alloc);
+        const ordering_seq = try self.raft.propose(
+            &self.raft_log,
+            .epoch_decision,
+            payload_buf.items,
+            &outputs,
+        ) orelse {
+            self.metrics.not_leader_errors.inc();
+            return SequencerError.NotLeader;
+        };
+        self.next_epoch += 1;
+        self.next_seq += 1;
+        self.metrics.epochs_closed.inc();
+        self.metrics.last_epoch_size.set(1);
+        try self.flushOutputs(outputs.items, self.alloc);
+        const wait_ts: std.os.linux.timespec = .{ .sec = 0, .nsec = COMMIT_WAIT_SLEEP_NS };
+        var wait_ticks: u32 = 0;
+        while (self.raft.commit_index < ordering_seq) {
+            assert(wait_ticks < COMMIT_WAIT_MAX_TICKS);
+            wait_ticks += 1;
+            try self.tickOnce(self.alloc);
+            _ = std.os.linux.nanosleep(&wait_ts, null);
+        }
+        try self.idempotency.record(client_id, client_seq_num, seq);
+        self.metrics.current_seq.set(@intCast(seq));
+        return .{ .seq = seq, .partition = partition };
+    }
 };
 
 /// Initialize the RaftNode and perform single-node self-election if no peers.
@@ -470,8 +601,11 @@ fn initRaftNode(cfg: Config, raft_log: *Log, alloc: std.mem.Allocator) !raft_mod
     return raft_node;
 }
 
-/// Allocate and initialize all partition logs. Caller owns the returned slice.
-fn initPartitionLogs(base_path: []const u8, node_id: NodeId, count: u32, alloc: std.mem.Allocator) ![]Log {
+/// Allocate and initialize partition logs at {base_path}/log_p{0..count-1}.
+/// Caller owns the returned slice and each Log within it; call deinit on each
+/// and free the slice when done. Called by Gateway before Sequencer.initWithLogs
+/// so log lifecycle is decoupled from the ordering layer (spec §5.2, §6.6).
+pub fn createPartitionLogs(base_path: []const u8, node_id: NodeId, count: u32, alloc: std.mem.Allocator) ![]Log {
     assert(count > 0);
     const logs = try alloc.alloc(Log, count);
     errdefer alloc.free(logs);
@@ -526,7 +660,7 @@ fn writeLastApplied(path: []const u8, seq: Seq) !void {
 fn runLoop(self: *Sequencer) void {
     const tick_ns: u64 = @as(u64, self.tick_interval_ms) * 1_000_000;
     // Apply any Raft entries already committed before this run started. This brings
-    // next_seq up to the true Raft high-water mark before commitBroadcast can assign
+    // next_seq up to the true Raft high-water mark before commitRoute can assign
     // new seqs, closing the window where a post-crash restart could reuse a seq from
     // a partially-written prior epoch.
     self.applyCommitted(self.raft.commit_index, self.alloc) catch |err|
@@ -569,65 +703,9 @@ fn commitInner(self: *Sequencer, submit: ValidatedSubmit) !SubmitResult {
     // Idempotency fast path
     if (self.idempotency.lookup(client_id, client_seq_num)) |existing_seq| {
         self.metrics.dedup_hits.inc();
-        const partition: PartitionId = @intCast(existing_seq % @as(Seq, self.partition_logs.len));
+        const partition: PartitionId = @intCast(existing_seq % @as(Seq, self.logPartitionCount()));
         return .{ .seq = existing_seq, .partition = partition };
     }
 
-    // All txn_intent and schema_change entries broadcast to all partition logs using
-    // sequential routing so every FoldExecutor maintains a consistent view.
-    return commitBroadcast(self, client_id, client_seq_num, submit);
-}
-
-/// Broadcast an entry to all partition logs using sequential routing: entry i → partition i.
-/// Used for both schema_change and txn_intent so every FoldExecutor processes every txn.
-fn commitBroadcast(self: *Sequencer, client_id: u64, client_seq_num: u64, submit: ValidatedSubmit) !SubmitResult {
-    const n: u32 = @intCast(self.partition_logs.len);
-    const entries = try self.alloc.alloc(OrderingEntry, n);
-    defer self.alloc.free(entries);
-    for (0..n) |i| {
-        const seq = self.next_seq + @as(Seq, i);
-        entries[i] = .{
-            .seq = seq,
-            .partition = @intCast(i),
-            .client_id = client_id,
-            .client_seq = client_seq_num,
-        };
-    }
-    const decision = types_mod.EpochDecision{
-        .epoch_num = self.next_epoch,
-        .entries = entries,
-        .entry_kind = submit.entry_kind,
-        .payload = submit.intent_payload,
-    };
-    var payload_buf: std.ArrayList(u8) = .empty;
-    defer payload_buf.deinit(self.alloc);
-    try types_mod.serializeEpochDecision(decision, &payload_buf, self.alloc);
-    var outputs: std.ArrayList(raft_mod.Output) = .empty;
-    defer outputs.deinit(self.alloc);
-    const ordering_seq = try self.raft.propose(
-        &self.raft_log,
-        .epoch_decision,
-        payload_buf.items,
-        &outputs,
-    ) orelse {
-        self.metrics.not_leader_errors.inc();
-        return SequencerError.NotLeader;
-    };
-    self.next_epoch += 1;
-    self.next_seq += @intCast(n);
-    self.metrics.epochs_closed.inc();
-    self.metrics.last_epoch_size.set(@intCast(n));
-    try self.flushOutputs(outputs.items, self.alloc);
-    const wait_ts: std.os.linux.timespec = .{ .sec = 0, .nsec = COMMIT_WAIT_SLEEP_NS };
-    var wait_ticks: u32 = 0;
-    while (self.raft.commit_index < ordering_seq) {
-        assert(wait_ticks < COMMIT_WAIT_MAX_TICKS);
-        wait_ticks += 1;
-        try self.tickOnce(self.alloc);
-        _ = std.os.linux.nanosleep(&wait_ts, null);
-    }
-    const last_entry = entries[n - 1];
-    try self.idempotency.record(client_id, client_seq_num, last_entry.seq);
-    self.metrics.current_seq.set(@intCast(last_entry.seq));
-    return .{ .seq = last_entry.seq, .partition = last_entry.partition };
+    return self.commitRoute(client_id, client_seq_num, submit);
 }

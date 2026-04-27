@@ -82,6 +82,7 @@ pub const ExecutorMetrics = obs.ExecutorMetrics;
 // Import it via build.zig's partition_set_module, not through executor.zig.
 
 pub const Log = log_mod.Log;
+pub const LogMux = log_mod.LogMux;
 pub const CdcManager = cdc_mod.CdcManager;
 pub const CdcSubscription = cdc_mod.CdcSubscription;
 pub const CdcEvent = cdc_mod.CdcEvent;
