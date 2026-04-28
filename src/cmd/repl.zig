@@ -270,7 +270,7 @@ fn readLinePlain(alloc: std.mem.Allocator) !?[]u8 {
 
 // ---- SQL classification ----
 
-const SqlKind = enum { ddl, dml, select, unknown };
+const SqlKind = enum { ddl, dml, select, execute_stmt, unknown };
 
 fn containsWordIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     var i: usize = 0;
@@ -303,6 +303,7 @@ fn classify(sql: []const u8) SqlKind {
         std.ascii.eqlIgnoreCase(kw, "drop") or
         std.ascii.eqlIgnoreCase(kw, "alter")) return .ddl;
     if (std.ascii.eqlIgnoreCase(kw, "use")) return .ddl;
+    if (std.ascii.eqlIgnoreCase(kw, "execute")) return .execute_stmt;
     return .unknown;
 }
 
@@ -433,7 +434,40 @@ fn dispatch(
     out: *Out,
 ) !void {
     assert(sql_with_semi.len > 0);
-    const sql = std.mem.trimEnd(u8, std.mem.trimEnd(u8, sql_with_semi, " \t\r\n"), ";");
+    const sql_raw = std.mem.trimEnd(u8, std.mem.trimEnd(u8, sql_with_semi, " \t\r\n"), ";");
+    // Expand short hash in EXECUTE statements before sending to the server.
+    const sql = blk: {
+        const trimmed = std.mem.trimStart(u8, sql_raw, " \t\r\n");
+        if (std.ascii.startsWithIgnoreCase(trimmed, "execute")) {
+            const after = std.mem.trimStart(u8, trimmed[7..], " \t");
+            var tok_end: usize = 0;
+            while (tok_end < after.len and after[tok_end] != ' ' and after[tok_end] != '\t' and after[tok_end] != '(') tok_end += 1;
+            const tok = after[0..tok_end];
+            if (tok.len == 16) {
+                var full_buf: [64]u8 = undefined;
+                var match: ?[]const u8 = null;
+                var it = session_sql.keyIterator();
+                while (it.next()) |key| {
+                    if (std.mem.startsWith(u8, key.*, tok)) {
+                        if (match != null) { match = null; break; }
+                        match = key.*;
+                    }
+                }
+                if (match == null) {
+                    try out.print("error: short hash not found in this session; use \\hashes\n", .{});
+                    return;
+                }
+                @memcpy(&full_buf, match.?[0..64]);
+                break :blk try std.fmt.allocPrint(alloc, "execute {s}{s}", .{ full_buf[0..64], after[tok_end..] });
+            }
+            if (tok.len != 64) {
+                try out.print("error: EXECUTE requires a 64-character or 16-character hex hash\n", .{});
+                return;
+            }
+        }
+        break :blk try alloc.dupe(u8, sql_raw);
+    };
+    defer alloc.free(sql);
     const kind = classify(sql);
 
     const hash = c.register(sql) catch |e| {
@@ -463,7 +497,8 @@ fn dispatch(
                 if (msg.len > 0) try out.print("error: {s}\n", .{msg}) else try out.print("error: {}\n", .{e});
                 return;
             };
-            try out.print("OK\n", .{});
+            var full_buf: [64]u8 = undefined;
+            try out.print("OK  -- {s}\n", .{hashFull(hash, &full_buf)});
         },
         .dml => {
             const result = c.execute(hash, &.{}) catch |e| {
@@ -472,7 +507,8 @@ fn dispatch(
                 if (msg.len > 0) try out.print("error: {s}\n", .{msg}) else try out.print("error: {}\n", .{e});
                 return;
             };
-            try out.print("{d} row(s) affected\n", .{result.rows_affected});
+            var full_buf: [64]u8 = undefined;
+            try out.print("{d} row(s) affected  -- {s}\n", .{ result.rows_affected, hashFull(hash, &full_buf) });
         },
         .select => {
             var rs = c.query(hash, &.{}) catch |e| {
@@ -483,6 +519,23 @@ fn dispatch(
             };
             defer rs.deinit();
             printTable(&rs, alloc, out) catch |err| std.log.warn("printTable: {}", .{err});
+            var full_buf: [64]u8 = undefined;
+            try out.print("-- {s}\n", .{hashFull(hash, &full_buf)});
+        },
+        .execute_stmt => {
+            // c.query() handles both the rows path (select) and the no-rows exec_ok path (DML).
+            var rs = c.query(hash, &.{}) catch |e| {
+                if (isConnError(e)) return e;
+                const msg = c.last_error_msg();
+                if (msg.len > 0) try out.print("error: {s}\n", .{msg}) else try out.print("error: {}\n", .{e});
+                return;
+            };
+            defer rs.deinit();
+            if (rs.rows.len > 0) {
+                printTable(&rs, alloc, out) catch |err| std.log.warn("printTable: {}", .{err});
+            } else {
+                try out.print("OK\n", .{});
+            }
         },
         .unknown => {
             // Parameterized query (e.g. TRANSACTION block) — cannot auto-execute.
@@ -768,16 +821,36 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.startsWith(u8, trimmed, "\\call ")) {
             historyPush(&history, trimmed, alloc) catch |err| std.log.warn("historyPush: {}", .{err});
             const rest = std.mem.trimStart(u8, trimmed[6..], " \t");
-            // Require full 64-char hex hash.
             var hex_end: usize = 0;
             while (hex_end < rest.len and rest[hex_end] != ' ' and rest[hex_end] != '(') hex_end += 1;
             const hex_str = rest[0..hex_end];
-            if (hex_str.len != 64) {
-                try out.print("error: expected full 64-character hex hash (got {d} chars)\n", .{hex_str.len});
+            if (hex_str.len != 64 and hex_str.len != 16) {
+                try out.print("error: expected 64-character or 16-character hex hash (got {d} chars)\n", .{hex_str.len});
                 continue;
             }
+            // Expand a short (16-char) hash to a full hash via session_sql prefix lookup.
+            var full_hex_buf: [64]u8 = undefined;
+            const full_hex: []const u8 = if (hex_str.len == 64) hex_str else blk: {
+                var match: ?[]const u8 = null;
+                var sql_keys = session_sql.keyIterator();
+                while (sql_keys.next()) |key| {
+                    if (std.mem.startsWith(u8, key.*, hex_str)) {
+                        if (match != null) {
+                            try out.print("error: short hash is ambiguous; use \\hashes to see full hashes\n", .{});
+                            break :blk null;
+                        }
+                        match = key.*;
+                    }
+                }
+                const m = match orelse {
+                    try out.print("error: hash not found in this session; use \\hashes\n", .{});
+                    break :blk null;
+                };
+                @memcpy(&full_hex_buf, m[0..64]);
+                break :blk full_hex_buf[0..64];
+            } orelse continue;
             var hash: QueryHash = undefined;
-            _ = std.fmt.hexToBytes(&hash, hex_str) catch {
+            _ = std.fmt.hexToBytes(&hash, full_hex) catch {
                 try out.print("error: invalid hex hash\n", .{});
                 continue;
             };
@@ -791,17 +864,29 @@ pub fn main(init: std.process.Init) !void {
                 for (params) |p| if (p == .string) alloc.free(p.string);
                 alloc.free(params);
             }
-            // Try as DML/transaction first; if result has rows fall back to query display.
-            const result = c.execute(hash, params) catch |e| {
-                if (isConnError(e)) return e;
-                const msg = c.last_error_msg();
-                if (msg.len > 0) try out.print("error: {s}\n", .{msg}) else try out.print("error: {}\n", .{e});
-                continue;
-            };
-            if (result.rows_affected > 0) {
-                try out.print("{d} row(s) affected\n", .{result.rows_affected});
+            // Classify via session SQL if available; fall back to execute for unknown/external hashes.
+            const is_select = if (session_sql.get(full_hex)) |sql_text| classify(sql_text) == .select else false;
+            if (is_select) {
+                var rs = c.query(hash, params) catch |e| {
+                    if (isConnError(e)) return e;
+                    const msg = c.last_error_msg();
+                    if (msg.len > 0) try out.print("error: {s}\n", .{msg}) else try out.print("error: {}\n", .{e});
+                    continue;
+                };
+                defer rs.deinit();
+                printTable(&rs, alloc, &out) catch |err| std.log.warn("printTable: {}", .{err});
             } else {
-                try out.print("OK\n", .{});
+                const result = c.execute(hash, params) catch |e| {
+                    if (isConnError(e)) return e;
+                    const msg = c.last_error_msg();
+                    if (msg.len > 0) try out.print("error: {s}\n", .{msg}) else try out.print("error: {}\n", .{e});
+                    continue;
+                };
+                if (result.rows_affected > 0) {
+                    try out.print("{d} row(s) affected\n", .{result.rows_affected});
+                } else {
+                    try out.print("OK\n", .{});
+                }
             }
             continue;
         }

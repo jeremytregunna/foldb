@@ -45,6 +45,13 @@ const StreamState = struct {
     credits: u64 = 0,
 };
 
+/// A pre-bound execute call: a registered query hash with literal params baked in.
+/// Created when a client registers `EXECUTE <hex64> (literal, ...)`.
+const ExecuteBinding = struct {
+    ref_hash: [32]u8,
+    params: []TypedValue, // owned; freed on Conn deinit
+};
+
 /// State machine for a single connection.
 pub const Conn = struct {
     io: std.Io,
@@ -57,6 +64,7 @@ pub const Conn = struct {
     negotiated: bool,
     streams: std.AutoHashMap(u64, StreamState),
     ddl_hashes: std.AutoHashMap([32]u8, void),
+    execute_bindings: std.AutoHashMap([32]u8, ExecuteBinding),
     alloc: std.mem.Allocator,
     gw: *gateway_mod.Gateway,
     users: []const config_mod.UserEntry,
@@ -78,6 +86,7 @@ pub const Conn = struct {
             .negotiated = false,
             .streams = std.AutoHashMap(u64, StreamState).init(alloc),
             .ddl_hashes = std.AutoHashMap([32]u8, void).init(alloc),
+            .execute_bindings = std.AutoHashMap([32]u8, ExecuteBinding).init(alloc),
             .alloc = alloc,
             .gw = gw,
             .users = users,
@@ -95,6 +104,12 @@ pub const Conn = struct {
         }
         self.streams.deinit();
         self.ddl_hashes.deinit();
+        var eb_it = self.execute_bindings.valueIterator();
+        while (eb_it.next()) |b| {
+            for (b.params) |p| p.deinit(self.alloc);
+            self.alloc.free(b.params);
+        }
+        self.execute_bindings.deinit();
     }
 
     fn cap(self: *const Conn) u32 {
@@ -338,6 +353,10 @@ pub const Conn = struct {
             try self.handleUseDatabase(stream_id, db_name);
             return;
         }
+        if (parseExecuteHeader(rq.sql)) |hdr| {
+            try self.handleRegisterExecute(stream_id, rq.sql, hdr.ref_hash, hdr.params_text);
+            return;
+        }
         if (isDdl(rq.sql)) {
             try self.handleRegisterDdl(stream_id, rq.sql);
             return;
@@ -360,6 +379,29 @@ pub const Conn = struct {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(self.alloc);
         try msg.encodeRegistered(&out, self.alloc, .{ .query_hash = result.hash, .param_tags = &.{}, .columns = &.{} });
+        try frame.sendFrame(&self.writer.interface, stream_id, .registered, .final_only, self.tracePtr(), out.items);
+    }
+
+    fn handleRegisterExecute(self: *Conn, stream_id: u64, sql: []const u8, ref_hash: [32]u8, params_text: []const u8) !void {
+        const params = parseLiteralParams(params_text, self.alloc) catch {
+            self.sendStreamError(stream_id, .parse_error, "EXECUTE: invalid literal params");
+            return;
+        };
+        errdefer {
+            for (params) |p| p.deinit(self.alloc);
+            self.alloc.free(params);
+        }
+        var binding_hash: [32]u8 = undefined;
+        std.crypto.hash.Blake3.hash(sql, &binding_hash, .{});
+        // Overwrite any existing binding for this SQL (idempotent).
+        if (self.execute_bindings.fetchRemove(binding_hash)) |old| {
+            for (old.value.params) |p| p.deinit(self.alloc);
+            self.alloc.free(old.value.params);
+        }
+        try self.execute_bindings.put(binding_hash, .{ .ref_hash = ref_hash, .params = params });
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        defer out.deinit(self.alloc);
+        try msg.encodeRegistered(&out, self.alloc, .{ .query_hash = binding_hash, .param_tags = &.{}, .columns = &.{} });
         try frame.sendFrame(&self.writer.interface, stream_id, .registered, .final_only, self.tracePtr(), out.items);
     }
 
@@ -414,6 +456,37 @@ pub const Conn = struct {
             return;
         };
         defer msg.freeExecute(ex, self.alloc);
+        if (self.execute_bindings.get(ex.query_hash)) |binding| {
+            const params = try self.typedValuesToColumnValues(binding.params);
+            defer self.alloc.free(params);
+            if (self.gw.isSelectQuery(binding.ref_hash)) {
+                const sel_result = self.gw.querySelect(binding.ref_hash, params, &.{}) catch |e| {
+                    self.sendStreamError(stream_id, gatewayErrToCode(e), "query failed");
+                    return;
+                };
+                try self.sendResultSet(stream_id, sel_result);
+            } else {
+                const exec_result = self.gw.execute(binding.ref_hash, params, &.{}) catch |e| {
+                    var emsg_buf: [256]u8 = undefined;
+                    const detail = self.gw.lastDetail();
+                    const emsg = if (detail.len > 0)
+                        std.fmt.bufPrint(&emsg_buf, "execute failed: {s}", .{detail}) catch "execute failed"
+                    else
+                        std.fmt.bufPrint(&emsg_buf, "execute failed: {s}", .{errors.humanize(e)}) catch "execute failed";
+                    self.sendStreamError(stream_id, gatewayErrToCode(e), emsg);
+                    return;
+                };
+                if (exec_result.result_set) |rs| {
+                    try self.sendResultSet(stream_id, rs);
+                } else {
+                    var out: std.ArrayListUnmanaged(u8) = .empty;
+                    defer out.deinit(self.alloc);
+                    try msg.encodeExecOk(&out, self.alloc, .{ .rows_affected = exec_result.rows_affected, .committed_seq = self.gw.currentSeq() });
+                    try frame.sendFrame(&self.writer.interface, stream_id, .exec_ok, .final_only, self.tracePtr(), out.items);
+                }
+            }
+            return;
+        }
         if (self.ddl_hashes.contains(ex.query_hash)) {
             var out: std.ArrayListUnmanaged(u8) = .empty;
             defer out.deinit(self.alloc);
@@ -864,6 +937,93 @@ fn isDdl(sql: []const u8) bool {
     for (s[0..len], 0..) |c, i| buf[i] = if (c >= 'A' and c <= 'Z') c + 32 else c;
     const tok = buf[0..len];
     return std.mem.eql(u8, tok, "create") or std.mem.eql(u8, tok, "drop") or std.mem.eql(u8, tok, "alter");
+}
+
+const ParsedExecuteHeader = struct {
+    ref_hash: [32]u8,
+    params_text: []const u8, // slice into original sql, starting at '('
+};
+
+/// If sql is `EXECUTE <64-hex-chars> (...)`, return the referenced hash and params text.
+fn parseExecuteHeader(sql: []const u8) ?ParsedExecuteHeader {
+    var s = std.mem.trimStart(u8, sql, " \t\r\n");
+    if (s.len < 7) return null;
+    if (!std.ascii.startsWithIgnoreCase(s, "execute")) return null;
+    s = s[7..];
+    if (s.len == 0 or (s[0] != ' ' and s[0] != '\t')) return null;
+    s = std.mem.trimStart(u8, s, " \t");
+    if (s.len < 64) return null;
+    var ref_hash: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&ref_hash, s[0..64]) catch return null;
+    s = s[64..];
+    s = std.mem.trimStart(u8, s, " \t\r\n;");
+    return .{ .ref_hash = ref_hash, .params_text = s };
+}
+
+/// Parse a parenthesised literal param list `(val, ...)` into owned TypedValues.
+/// Supports: null, true, false, integers, floats, single-quoted strings.
+fn parseLiteralParams(text: []const u8, alloc: std.mem.Allocator) ![]TypedValue {
+    const s = std.mem.trim(u8, text, " \t\r\n;");
+    if (s.len < 2 or s[0] != '(') return error.MissingParens;
+    const close = std.mem.lastIndexOfScalar(u8, s, ')') orelse return error.MissingParens;
+    const inner = std.mem.trim(u8, s[1..close], " \t");
+
+    var params: std.ArrayListUnmanaged(TypedValue) = .empty;
+    errdefer {
+        for (params.items) |p| p.deinit(alloc);
+        params.deinit(alloc);
+    }
+    if (inner.len == 0) return params.toOwnedSlice(alloc);
+
+    var i: usize = 0;
+    while (i < inner.len) {
+        while (i < inner.len and (inner[i] == ' ' or inner[i] == '\t')) i += 1;
+        if (i >= inner.len) break;
+        const val_start = i;
+        if (inner[i] == '\'') {
+            i += 1;
+            while (i < inner.len) {
+                if (inner[i] == '\'') {
+                    i += 1;
+                    if (i < inner.len and inner[i] == '\'') { i += 1; continue; }
+                    break;
+                }
+                i += 1;
+            }
+        } else {
+            while (i < inner.len and inner[i] != ',') i += 1;
+        }
+        const raw = std.mem.trim(u8, inner[val_start..i], " \t");
+        try params.append(alloc, try parseLiteralValue(raw, alloc));
+        while (i < inner.len and (inner[i] == ' ' or inner[i] == '\t' or inner[i] == ',')) {
+            if (inner[i] == ',') { i += 1; break; }
+            i += 1;
+        }
+    }
+    return params.toOwnedSlice(alloc);
+}
+
+fn parseLiteralValue(raw: []const u8, alloc: std.mem.Allocator) !TypedValue {
+    if (std.ascii.eqlIgnoreCase(raw, "null")) return .null_val;
+    if (std.ascii.eqlIgnoreCase(raw, "true")) return .{ .bool_val = true };
+    if (std.ascii.eqlIgnoreCase(raw, "false")) return .{ .bool_val = false };
+    if (raw.len >= 2 and raw[0] == '\'') {
+        const inner = raw[1 .. raw.len - 1];
+        var buf = try alloc.alloc(u8, inner.len);
+        var wi: usize = 0;
+        var ri: usize = 0;
+        while (ri < inner.len) {
+            if (inner[ri] == '\'' and ri + 1 < inner.len and inner[ri + 1] == '\'') {
+                buf[wi] = '\''; wi += 1; ri += 2;
+            } else {
+                buf[wi] = inner[ri]; wi += 1; ri += 1;
+            }
+        }
+        return .{ .string = buf[0..wi] };
+    }
+    if (std.fmt.parseInt(i64, raw, 10)) |n| return .{ .int64 = n } else |_| {}
+    if (std.fmt.parseFloat(f64, raw)) |f| return .{ .float64 = f } else |_| {}
+    return error.UnrecognisedLiteral;
 }
 
 /// If sql is a USE DATABASE statement, return the database name (slice into sql). Otherwise null.

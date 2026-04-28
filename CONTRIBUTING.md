@@ -2,6 +2,10 @@
 
 FoldDB is a replicated, deterministic database. The architecture is deliberate and the design space is constrained. Contributions that fit that space are welcome. Contributions that don't will be closed.
 
+## Contributor License
+
+By submitting a contribution to this project you retain copyright in your contribution, but grant Jeremy Tregunna and the project a perpetual, worldwide, non-exclusive, royalty-free, irrevocable license to reproduce, prepare derivative works of, publicly display, publicly perform, sublicense, and distribute your contribution and any derivative works under the terms of the Apache License 2.0. This grant cannot be revoked. If you are contributing on behalf of an employer, you confirm you have the authority to grant this license.
+
 ## Governance
 
 This is a benevolent dictatorship. Final decisions rest with the maintainer. That's not arrogance — it's honesty about how good systems get built. Strong opinions are welcome; expect to defend them technically.
