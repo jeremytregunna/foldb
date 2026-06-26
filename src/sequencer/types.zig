@@ -6,8 +6,14 @@ const assert = std.debug.assert;
 
 pub const Seq = log_mod.Seq;
 pub const PartitionId = log_mod.PartitionId;
+pub const NodeId = log_mod.NodeId;
 
 pub const EpochNum = u64;
+
+pub const PeerAddr = struct {
+    id: NodeId,
+    addr: []const u8,
+};
 
 /// One entry in an epoch: a single TxnIntent assigned a global seq and routed to a partition.
 pub const OrderingEntry = struct {
@@ -55,6 +61,10 @@ pub const PendingSubmit = struct {
     done: std.atomic.Value(bool) = .init(false),
     /// Intrusive MPSC queue link. Written by the queue; callers must not touch this field.
     next: std.atomic.Value(?*PendingSubmit) = .init(null),
+
+    pub fn markDone(self: *PendingSubmit) void {
+        self.done.store(true, .release);
+    }
 };
 
 /// Maximum spins before returning CommitTimeout (spin-wait fallback path).

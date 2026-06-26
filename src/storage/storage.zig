@@ -10,10 +10,6 @@ const block_mod = @import("block.zig");
 const sstable_mod = @import("sstable.zig");
 const object_store_mod = @import("object_store.zig");
 const snapshot_mod = @import("snapshot.zig");
-const json_index_mod = @import("json_index.zig");
-const hnsw_mod = @import("hnsw.zig");
-pub const vector_codec = @import("vector_codec.zig");
-pub const json_path = @import("json_path.zig");
 const partition_util = @import("partition_util.zig");
 pub const partitionFor = partition_util.partitionFor;
 
@@ -53,11 +49,6 @@ pub const SnapshotPolicy = struct {
 // Core types
 pub const TableId = types.TableId;
 pub const Seq = types.Seq;
-pub const Decimal = types.Decimal;
-pub const ColumnType = types.ColumnType;
-pub const ColumnSchema = types.ColumnSchema;
-pub const TableSchema = types.TableSchema;
-pub const ColumnValue = types.ColumnValue;
 pub const Row = types.Row;
 pub const Mutation = types.Mutation;
 pub const MutationKind = types.MutationKind;
@@ -66,33 +57,20 @@ pub const SnapshotHandle = types.SnapshotHandle;
 pub const ReadTracker = types.ReadTracker;
 pub const ReadEntry = types.ReadEntry;
 
-// Index types
-pub const IndexId = u32;
-pub const PkList = json_index_mod.PkList;
-pub const Match = hnsw_mod.Match;
-
-/// Typed index specification — one variant per index kind, carrying only the fields that apply.
-pub const IndexSpec = union(enum) {
-    json_path: []const []const u8, // declared extraction paths
-    vector: u32, // vector dimension
-};
-
-/// Descriptor passed from gateway to storage when registering a specialty index.
-/// All fields are fully validated by the gateway before this type is constructed.
-pub const IndexDesc = struct {
-    id: IndexId,
-    table_id: TableId,
-    column_idx: u32,
-    spec: IndexSpec,
+/// One entry in a sequenced apply batch: a slice of mutations sharing a single commit seq.
+pub const ApplyBatch = struct {
+    mutations: []const Mutation,
+    seq: Seq,
 };
 
 // Codec
-pub const CodecId = codec_mod.CodecId;
-pub const chooseCodec = codec_mod.chooseCodec;
 pub const encodeCol = codec_mod.encode;
 pub const decodeCol = codec_mod.decode;
 
 // Block
+pub const MAX_ROWS_PER_BLOCK = block_mod.MAX_ROWS_PER_BLOCK;
+pub const HEADER_SIZE = block_mod.HEADER_SIZE;
+pub const FOOTER_SIZE = block_mod.FOOTER_SIZE;
 pub const BlockWriter = block_mod.BlockWriter;
 pub const BlockReader = block_mod.BlockReader;
 pub const BlockHeader = block_mod.BlockHeader;
@@ -127,7 +105,7 @@ pub const ScanIterator = struct {
     alloc: std.mem.Allocator,
 
     pub fn deinit(self: *ScanIterator) void {
-        for (self.rows) |*r| r.deinit(self.alloc);
+        for (self.rows) |r| r.deinit(self.alloc);
         self.alloc.free(self.rows);
     }
 
@@ -161,7 +139,7 @@ pub const PartitionedStorage = struct {
         if (self.partitions.len <= 1) return self.partitions[0].scan(table_id, range, at_seq, alloc);
         var merged: std.ArrayList(Row) = .empty;
         errdefer {
-            for (merged.items) |*r| r.deinit(alloc);
+            for (merged.items) |r| r.deinit(alloc);
             merged.deinit(alloc);
         }
         var found_any = false;
@@ -201,17 +179,12 @@ pub const PartitionedStorage = struct {
     }
 
     /// Register a table schema on every partition (schema is global, not per-partition).
-    pub fn registerTable(self: *PartitionedStorage, schema: TableSchema) !void {
-        for (self.partitions) |p| try p.registerTable(schema);
+    pub fn registerTable(self: *PartitionedStorage, table_id: TableId) !void {
+        for (self.partitions) |p| try p.registerTable(table_id);
     }
 
     pub fn unregisterTable(self: *PartitionedStorage, table_id: TableId) void {
         for (self.partitions) |p| p.unregisterTable(table_id);
-    }
-
-    /// Register a specialty index on every partition.
-    pub fn registerIndex(self: *PartitionedStorage, desc: IndexDesc) !void {
-        for (self.partitions) |p| try p.registerIndex(desc);
     }
 
     pub fn flushAll(self: *PartitionedStorage) !void {
@@ -226,56 +199,9 @@ pub const PartitionedStorage = struct {
         return .{ .partitions = parts, .alloc = alloc };
     }
 
-    /// ANN search across all partitions; results are merged and sorted by distance, top k returned.
-    pub fn vectorSearch(self: *PartitionedStorage, index_id: IndexId, query: []const f32, k: u32, at_seq: Seq, alloc: std.mem.Allocator) ![]Match {
-        if (self.partitions.len <= 1) return self.partitions[0].vectorSearch(index_id, query, k, at_seq, alloc);
-        var merged: std.ArrayListUnmanaged(Match) = .empty;
-        errdefer {
-            for (merged.items) |m| alloc.free(m.pk);
-            merged.deinit(alloc);
-        }
-        for (self.partitions) |p| {
-            const ms = p.vectorSearch(index_id, query, k, at_seq, alloc) catch |e| {
-                if (e == error.IndexNotFound) continue;
-                return e;
-            };
-            defer alloc.free(ms);
-            for (ms) |m| try merged.append(alloc, m);
-        }
-        std.sort.block(Match, merged.items, {}, struct {
-            fn lt(_: void, a: Match, b: Match) bool {
-                return a.distance < b.distance;
-            }
-        }.lt);
-        if (merged.items.len > k) {
-            for (merged.items[k..]) |m| alloc.free(m.pk);
-            merged.shrinkRetainingCapacity(k);
-        }
-        return merged.toOwnedSlice(alloc);
-    }
-
     /// Free the partitions slice. Does NOT deinit the Storage objects (caller owns them).
     pub fn deinit(self: *PartitionedStorage) void {
         self.alloc.free(self.partitions);
-    }
-};
-
-const IndexEntry = union(enum) {
-    json: json_index_mod.JsonPathIndex,
-    vector: hnsw_mod.HnswIndex,
-
-    fn tableId(self: *const IndexEntry) TableId {
-        return switch (self.*) {
-            .json => |*j| j.table_id,
-            .vector => |*v| v.table_id,
-        };
-    }
-
-    fn deinit(self: *IndexEntry) void {
-        switch (self.*) {
-            .json => |*j| j.deinit(),
-            .vector => |*v| v.deinit(),
-        }
     }
 };
 
@@ -285,7 +211,6 @@ pub const DiskFaultHook = lsm_mod.DiskFaultHook;
 
 pub const Storage = struct {
     tables: std.AutoHashMap(TableId, lsm_mod.LSM),
-    indexes: std.AutoHashMap(IndexId, IndexEntry),
     dir: []const u8,
     alloc: std.mem.Allocator,
     object_store: ?object_store_mod.ObjectStore = null,
@@ -301,7 +226,6 @@ pub const Storage = struct {
         mkdirAll(dir);
         return .{
             .tables = std.AutoHashMap(TableId, lsm_mod.LSM).init(alloc),
-            .indexes = std.AutoHashMap(IndexId, IndexEntry).init(alloc),
             .dir = dir,
             .alloc = alloc,
         };
@@ -311,9 +235,6 @@ pub const Storage = struct {
         var it = self.tables.valueIterator();
         while (it.next()) |lsm| lsm.deinit();
         self.tables.deinit();
-        var idx_it = self.indexes.valueIterator();
-        while (idx_it.next()) |e| e.deinit();
-        self.indexes.deinit();
         if (self.cache_dir) |cd| self.alloc.free(cd);
     }
 
@@ -327,72 +248,22 @@ pub const Storage = struct {
         self.snapshot_policy = policy;
     }
 
-    pub fn registerTable(self: *Storage, schema: TableSchema) !void {
-        if (self.tables.contains(schema.table_id)) return;
-        const table_dir = try std.fmt.allocPrint(self.alloc, "{s}/t{d}", .{ self.dir, schema.table_id });
+    pub fn registerTable(self: *Storage, table_id: TableId) !void {
+        if (self.tables.contains(table_id)) return;
+        const table_dir = try std.fmt.allocPrint(self.alloc, "{s}/t{d}", .{ self.dir, table_id });
         defer self.alloc.free(table_dir);
-        var lsm = try lsm_mod.LSM.init(schema, table_dir, self.alloc);
+        var lsm = try lsm_mod.LSM.init(table_dir, self.alloc);
         lsm.fault_hook = self.fault_hook;
         if (self.object_store) |store| {
             try lsm.withObjectStore(store, self.cache_dir orelse table_dir);
         }
-        try self.tables.put(schema.table_id, lsm);
+        try self.tables.put(table_id, lsm);
     }
 
     pub fn unregisterTable(self: *Storage, table_id: TableId) void {
         if (self.tables.fetchRemove(table_id)) |kv| {
             var lsm = kv.value;
             lsm.deinit();
-        }
-    }
-
-    /// Register a specialty index (JSON path or vector). Backfills from existing rows.
-    /// Domain boundary — desc is fully validated by the gateway; all fields are trusted here.
-    pub fn registerIndex(self: *Storage, desc: IndexDesc) !void {
-        if (self.indexes.contains(desc.id)) return;
-
-        const idx_dir = try std.fmt.allocPrint(self.alloc, "{s}/idx{d}", .{ self.dir, desc.id });
-        defer self.alloc.free(idx_dir);
-
-        const entry: IndexEntry = switch (desc.spec) {
-            .json_path => |paths| blk: {
-                const idx = try json_index_mod.JsonPathIndex.init(
-                    desc.id,
-                    desc.table_id,
-                    desc.column_idx,
-                    paths,
-                    idx_dir,
-                    self.alloc,
-                );
-                break :blk .{ .json = idx };
-            },
-            .vector => |dim| blk: {
-                const idx = hnsw_mod.HnswIndex.init(
-                    dim,
-                    desc.table_id,
-                    desc.column_idx,
-                    self.alloc,
-                );
-                break :blk .{ .vector = idx };
-            },
-        };
-        try self.indexes.put(desc.id, entry);
-
-        // Backfill: scan base table and index existing rows
-        try self.backfillIndex(desc.id, desc.table_id);
-    }
-
-    /// Backfill an index from existing base table rows (all LSM levels).
-    fn backfillIndex(self: *Storage, index_id: IndexId, table_id: TableId) !void {
-        const entry = self.indexes.getPtr(index_id) orelse return;
-        const lsm = self.tables.getPtr(table_id) orelse return;
-        const rows = try lsm.scan(KeyRange.all(), std.math.maxInt(Seq), self.alloc);
-        defer {
-            for (rows) |*r| r.deinit(self.alloc);
-            self.alloc.free(rows);
-        }
-        for (rows) |row| {
-            try maintainEntry(entry, row.key, .{ .insert = row.values }, row.seq, self.alloc);
         }
     }
 
@@ -411,17 +282,6 @@ pub const Storage = struct {
     }
 
     pub fn apply(self: *Storage, mutations: []const Mutation, at_seq: Seq) !void {
-        // Collect pre-images for UPDATE/DELETE mutations in indexed tables —
-        // must be read before base-table mutations are applied.
-        var pre_images: []?Row = &.{};
-        defer {
-            for (pre_images) |*r| if (r.*) |*row| row.deinit(self.alloc);
-            if (pre_images.len > 0) self.alloc.free(pre_images);
-        }
-        if (self.indexes.count() > 0) {
-            pre_images = try self.applyCollectPreImages(mutations, at_seq);
-        }
-
         var table_ids: std.ArrayListUnmanaged(TableId) = .empty;
         defer table_ids.deinit(self.alloc);
         for (mutations) |m| {
@@ -448,36 +308,7 @@ pub const Storage = struct {
             const l0_after = lsm.levels[0].files.items.len;
             if (l0_before > 0 and l0_after < l0_before) {
                 self.metrics.compactions.inc();
-                // Compaction fired; prune tombstoned HNSW nodes for this table.
-                var idx_it = self.indexes.iterator();
-                while (idx_it.next()) |kv| {
-                    switch (kv.value_ptr.*) {
-                        .vector => |*v| if (v.table_id == tid) try v.pruneDeleted(),
-                        .json => {},
-                    }
-                }
             }
-        }
-
-        if (self.indexes.count() > 0) {
-            self.applyIndexMaintenance(mutations, pre_images, at_seq) catch |err| {
-                // Base-table mutations are already written. Rebuild all indexes from
-                // the current base-table state to restore consistency. If rebuild also
-                // fails, the original error propagates — log replay on restart will
-                // fully restore consistency.
-                var idx_it = self.indexes.iterator();
-                while (idx_it.next()) |kv| {
-                    switch (kv.value_ptr.*) {
-                        .json => |*j| j.clear(),
-                        .vector => |*v| v.clear(),
-                    }
-                }
-                var refill_it = self.indexes.iterator();
-                while (refill_it.next()) |kv| {
-                    self.backfillIndex(kv.key_ptr.*, kv.value_ptr.tableId()) catch {};
-                }
-                return err;
-            };
         }
 
         if (self.snapshot_policy) |*policy| {
@@ -502,35 +333,72 @@ pub const Storage = struct {
         }
     }
 
-    fn applyCollectPreImages(self: *Storage, mutations: []const Mutation, at_seq: Seq) ![]?Row {
-        const pre_images = try self.alloc.alloc(?Row, mutations.len);
-        for (pre_images) |*r| r.* = null;
-        for (mutations, 0..) |m, i| {
-            if (m.kind == .insert) continue;
-            if (!self.tableHasIndexes(m.table_id)) continue;
-            pre_images[i] = try self.get(m.table_id, m.key, at_seq);
-        }
-        return pre_images;
-    }
+    /// Apply a sequence of (mutations, seq) pairs in one call.
+    /// Each pair's mutations are stamped with their own seq, preserving MVCC correctness.
+    /// Metrics and snapshot policy are updated once per batch instead of per entry.
+    pub fn apply_sequenced(self: *Storage, batch: []const ApplyBatch) !void {
+        if (batch.len == 0) return;
 
-    fn applyIndexMaintenance(self: *Storage, mutations: []const Mutation, pre_images: []const ?Row, at_seq: Seq) !void {
-        for (mutations, 0..) |m, i| {
-            var idx_it = self.indexes.iterator();
-            while (idx_it.next()) |kv| {
-                const entry = kv.value_ptr;
-                if (entry.tableId() != m.table_id) continue;
-                const old_row: ?Row = if (pre_images.len > i) pre_images[i] else null;
-                // Domain boundary — op is derived from the validated mutation kind;
-                // each variant carries exactly the values that exist for that operation.
-                const op: IndexOp = switch (m.kind) {
-                    .insert => .{ .insert = m.values.? },
-                    .delete => .{ .delete = if (old_row) |r| r.values else &.{} },
-                    .update => .{ .update = .{
-                        .old = if (old_row) |r| r.values else &.{},
-                        .new = m.values.?,
-                    } },
-                };
-                try maintainEntry(entry, m.key, op, at_seq, self.alloc);
+        var total_mutations: usize = 0;
+        var last_seq: Seq = 0;
+
+        for (batch) |b| {
+            if (b.mutations.len == 0) {
+                last_seq = b.seq;
+                continue;
+            }
+
+            var table_ids: std.ArrayListUnmanaged(TableId) = .empty;
+            defer table_ids.deinit(self.alloc);
+            for (b.mutations) |m| {
+                var found = false;
+                for (table_ids.items) |t| {
+                    if (t == m.table_id) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) try table_ids.append(self.alloc, m.table_id);
+            }
+
+            for (table_ids.items) |tid| {
+                const lsm = self.tables.getPtr(tid) orelse return error.TableNotFound;
+                const l0_before = lsm.levels[0].files.items.len;
+                try lsm.apply(b.mutations, b.seq);
+                const l0_after = lsm.levels[0].files.items.len;
+                if (l0_before > 0 and l0_after < l0_before) {
+                    self.metrics.compactions.inc();
+                }
+            }
+
+            total_mutations += b.mutations.len;
+            last_seq = b.seq;
+        }
+
+        assert(total_mutations <= std.math.maxInt(u32));
+        assert(last_seq <= std.math.maxInt(u32));
+        self.metrics.applies.inc();
+        self.metrics.mutations_applied.add(@intCast(total_mutations));
+        self.metrics.current_seq.set(@intCast(last_seq));
+
+        if (self.snapshot_policy) |*policy| {
+            policy.counter += @intCast(total_mutations);
+            if (policy.counter >= policy.interval) {
+                policy.counter = 0;
+                var it = self.tables.valueIterator();
+                while (it.next()) |lsm| {
+                    var manifest = try snapshot_mod.takeSnapshot(
+                        lsm,
+                        last_seq,
+                        policy.partition_id,
+                        policy.store,
+                        policy.log_writer,
+                        self.alloc,
+                    );
+                    manifest.deinit();
+                }
+                self.metrics.snapshots_taken.inc();
+                policy.post_snapshot.call(last_seq);
             }
         }
     }
@@ -563,142 +431,7 @@ pub const Storage = struct {
         var it = self.tables.valueIterator();
         while (it.next()) |lsm| try lsm.flushMemtable();
     }
-
-    /// Flush all specialty index LSMs to SSTables.
-    pub fn flushIndexes(self: *Storage) !void {
-        var it = self.indexes.valueIterator();
-        while (it.next()) |e| {
-            switch (e.*) {
-                .json => |*j| try j.lsm.flushMemtable(),
-                .vector => {},
-            }
-        }
-    }
-
-    /// Force pruning of tombstoned nodes from all HNSW indexes.
-    /// Called automatically after compaction; exposed for testing.
-    pub fn pruneVectorIndexes(self: *Storage) !void {
-        var it = self.indexes.valueIterator();
-        while (it.next()) |e| {
-            switch (e.*) {
-                .vector => |*v| try v.pruneDeleted(),
-                .json => {},
-            }
-        }
-    }
-
-    /// Look up primary keys where json path=value in a JSON path index.
-    pub fn indexLookup(
-        self: *Storage,
-        index_id: IndexId,
-        path: []const u8,
-        value: []const u8,
-        at_seq: Seq,
-        alloc: std.mem.Allocator,
-    ) !PkList {
-        const entry = self.indexes.getPtr(index_id) orelse return error.IndexNotFound;
-        switch (entry.*) {
-            .json => |*j| return j.lookup(path, value, at_seq, alloc),
-            else => return error.WrongIndexType,
-        }
-    }
-
-    /// ANN search against a vector index.
-    pub fn vectorSearch(
-        self: *Storage,
-        index_id: IndexId,
-        query: []const f32,
-        k: u32,
-        at_seq: Seq,
-        alloc: std.mem.Allocator,
-    ) ![]Match {
-        const entry = self.indexes.getPtr(index_id) orelse return error.IndexNotFound;
-        switch (entry.*) {
-            .vector => |*v| return v.search(query, k, 64, at_seq, alloc),
-            else => return error.WrongIndexType,
-        }
-    }
-
-    fn tableHasIndexes(self: *const Storage, table_id: TableId) bool {
-        var it = self.indexes.valueIterator();
-        while (it.next()) |e| {
-            if (e.tableId() == table_id) return true;
-        }
-        return false;
-    }
 };
-
-/// Typed index maintenance operation — each variant carries exactly the values it needs.
-const IndexOp = union(enum) {
-    insert: []const ColumnValue,
-    delete: []const ColumnValue, // pre-image values
-    update: struct { old: []const ColumnValue, new: []const ColumnValue },
-};
-
-/// Dispatch index maintenance for a single row mutation.
-/// All inputs are fully validated; no optional value chains inside this function.
-fn maintainEntry(
-    entry: *IndexEntry,
-    row_key: []const u8,
-    op: IndexOp,
-    at_seq: Seq,
-    alloc: std.mem.Allocator,
-) !void {
-    switch (entry.*) {
-        .json => |*jidx| switch (op) {
-            .insert => |new_vals| {
-                const new_json = jsonBytes(new_vals, jidx.column_idx) orelse return;
-                try jidx.maintainInsert(row_key, new_json, at_seq);
-            },
-            .delete => |old_vals| {
-                const old_json = jsonBytes(old_vals, jidx.column_idx) orelse return;
-                try jidx.maintainDelete(row_key, old_json, at_seq);
-            },
-            .update => |upd| {
-                const new_json = jsonBytes(upd.new, jidx.column_idx) orelse return;
-                const old_json = jsonBytes(upd.old, jidx.column_idx) orelse return;
-                try jidx.maintainUpdate(row_key, new_json, old_json, at_seq);
-            },
-        },
-        .vector => |*vidx| switch (op) {
-            .insert => |new_vals| {
-                if (vidx.column_idx >= new_vals.len) return;
-                const raw = switch (new_vals[vidx.column_idx]) {
-                    .bytes => |b| b,
-                    .string => |s| s,
-                    else => return,
-                };
-                const vec = try vector_codec.decode(raw, alloc);
-                defer alloc.free(vec);
-                std.debug.assert(vec.len == vidx.dim);
-                try vidx.insert(vec, row_key, at_seq);
-            },
-            .delete => _ = vidx.markDeleted(row_key, at_seq),
-            .update => |upd| {
-                _ = vidx.markDeleted(row_key, at_seq);
-                if (vidx.column_idx >= upd.new.len) return;
-                const raw = switch (upd.new[vidx.column_idx]) {
-                    .bytes => |b| b,
-                    .string => |s| s,
-                    else => return,
-                };
-                const vec = try vector_codec.decode(raw, alloc);
-                defer alloc.free(vec);
-                std.debug.assert(vec.len == vidx.dim);
-                try vidx.insert(vec, row_key, at_seq);
-            },
-        },
-    }
-}
-
-fn jsonBytes(vals: []const ColumnValue, col_idx: u32) ?[]const u8 {
-    if (col_idx >= vals.len) return null;
-    return switch (vals[col_idx]) {
-        .bytes => |b| b,
-        .string => |s| s,
-        else => null,
-    };
-}
 
 pub fn mkdirAll(path: []const u8) void {
     const null_path = std.heap.page_allocator.allocSentinel(u8, path.len, 0) catch return;

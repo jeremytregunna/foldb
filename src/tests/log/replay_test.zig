@@ -9,6 +9,7 @@ const Log = log_mod.Log;
 const LogEntry = log_mod.LogEntry;
 const Seq = log_mod.Seq;
 const TxnIntent = log_mod.TxnIntent;
+const KvOp = log_mod.KvOp;
 
 // ─── Temp dir helpers ─────────────────────────────────────────────────────────
 
@@ -61,7 +62,8 @@ fn removeDir(path: []const u8) void {
 // This is the domain boundary for tests — serializes a TxnIntent before handing
 // pre-built LogEntry bytes to the log core via appendEntryAt.
 fn appendTestIntent(log_inst: *Log, alloc: std.mem.Allocator, params: []const u8, client_id: u64) !Seq {
-    const intent = TxnIntent.init_test(params, client_id, 1);
+    var ops = [_]KvOp{.{ .set = .{ .key = "test"[0..], .value = params } }};
+    const intent = TxnIntent.init(&ops, &.{}, &.{1}, client_id, 1);
     const payload = try intent.serialize_to(alloc);
     defer alloc.free(payload);
     const seq = log_inst.current_seq + 1;

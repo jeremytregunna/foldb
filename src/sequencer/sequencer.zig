@@ -34,25 +34,20 @@ pub const LogEntry = log_mod.LogEntry;
 pub const EntryKind = log_mod.EntryKind;
 
 /// A peer node in the Raft group: its NodeId and Raft listener address.
-pub const PeerAddr = struct {
-    id: NodeId,
-    addr: []const u8, // "host:port"
-};
+pub const PeerAddr = types_mod.PeerAddr;
 
 /// Sequencer config.
 pub const Config = struct {
-    /// Number of data partitions (storage sharding).
+    /// Number of partitions (storage sharding and write throughput routing).
     partition_count: u32 = 1,
-    /// Number of log partitions (write throughput). 0 = same as partition_count.
-    /// Per spec §5.2: log partitions are independent Raft groups sized for throughput;
-    /// they are decoupled from the data partition count (spec §6.6).
-    log_partition_count: u32 = 0,
+    /// Deprecated alias retained for older tests/configs during the KV transition.
+    log_partition_count: ?u32 = null,
     /// Max intents per epoch before forcing a close.
     max_epoch_size: u32 = epoch_mod.DEFAULT_MAX_BATCH_SIZE,
     /// Node ID for the Sequencer's Raft group.
     node_id: NodeId = 1,
     /// How often the tick loop fires (milliseconds).
-    tick_interval_ms: u32 = 10,
+    tick_interval_ms: u32 = 1,
     /// Raft election timeout bounds (milliseconds).
     election_timeout_min_ms: u32 = 150,
     election_timeout_max_ms: u32 = 300,
@@ -69,13 +64,14 @@ pub const SequencerError = error{
     PartitionError,
     SerializeError,
     ConfigChangeInProgress,
+    CommitTimeout,
 };
 
-/// Sleep duration per iteration of the commit-wait loop (1 ms in nanoseconds).
-const COMMIT_WAIT_SLEEP_NS: u32 = 1_000_000;
-/// Maximum iterations of the commit-wait loop before asserting.
-/// Prevents infinite looping when quorum is lost after a proposal.
-const COMMIT_WAIT_MAX_TICKS: u32 = 10_000;
+/// Sleep duration per iteration of the commit-wait loop (100 µs in nanoseconds).
+const COMMIT_WAIT_SLEEP_NS: u32 = 100_000;
+/// Timeout for commit-wait loops (30 seconds in nanoseconds).
+/// Replaces the old tick-based assert so replication doesn't crash when quorum is lost.
+const COMMIT_WAIT_TIMEOUT_NS: u64 = 30_000_000_000;
 
 /// The Sequencer: global ordering for TxnIntents across partition logs.
 ///
@@ -88,13 +84,12 @@ pub const Sequencer = struct {
     last_applied_path: []u8,
     batcher: EpochBatcher,
     idempotency: IdempotencyCache,
-    /// Log partition logs, one per log partition. Routed to by seq % log_partition_count.
+    /// Log partition logs, one per partition. Routed to by seq % partition_count.
     partition_logs: []Log,
-    /// Number of log partitions for write throughput routing (spec §5.2).
-    /// Configurable independently of data partition count; defaults to data partition count.
+    /// Number of partitions (storage sharding and write throughput routing).
+    partition_count: u32,
+    /// Number of physical WAL partitions used by the sequencer.
     log_partition_count: u32,
-    /// Number of data partitions (storage sharding). Independent of log_partition_count.
-    data_partition_count: u32,
     /// Per-log-partition append counter for load-weighted routing (spec §8.2).
     /// Incremented each time a seq is routed to that partition; decayed periodically.
     log_append_counts: []u64,
@@ -111,19 +106,20 @@ pub const Sequencer = struct {
     queue: mpsc_mod.MpscQueue(types_mod.PendingSubmit),
     shutdown: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
-    /// Highest Raft log index whose committed output has been fully applied to
-    /// the partition logs. Lets the committed handler apply entries incrementally
-    /// on every node (leader and followers) without double-writing.
+    /// Highest Raft log index whose committed output has been fully applied.
     last_applied: Seq = 0,
+    /// Pipelined commit: batches proposed but not yet committed.
+    pending_batches: std.ArrayListUnmanaged(PendingBatch) = .empty,
 
     /// Initialize a Sequencer at the given base path.
     /// Creates:
     ///   {base_path}/seq_raft/    — sequencer's own Raft ordering log
-    ///   {base_path}/log_p{n}/    — N log partition logs (0..log_partition_count-1)
-    /// Log partition count defaults to partition_count when not explicitly set.
+    ///   {base_path}/log_p{n}/    — N partition logs (0..partition_count-1)
     pub fn init(base_path: []const u8, cfg: Config, alloc: std.mem.Allocator) !Sequencer {
         assert(base_path.len > 0);
+        const log_partition_count = cfg.log_partition_count orelse cfg.partition_count;
         assert(cfg.partition_count > 0);
+        assert(log_partition_count > 0);
 
         // Ensure base directory exists.
         const base_pathz = try std.heap.page_allocator.allocSentinel(u8, base_path.len, 0);
@@ -147,15 +143,13 @@ pub const Sequencer = struct {
         var raft_node = try initRaftNode(cfg, &raft_log, alloc);
         errdefer raft_node.deinit();
 
-        // Log partition count is independent of data partition count (spec §5.2, §6.6).
-        const lpc: u32 = if (cfg.log_partition_count > 0) cfg.log_partition_count else cfg.partition_count;
-        const partition_logs = try createPartitionLogs(base_path, cfg.node_id, lpc, alloc);
+        const partition_logs = try createPartitionLogs(base_path, cfg.node_id, log_partition_count, alloc);
         errdefer {
             for (partition_logs) |*pl| pl.deinit();
             alloc.free(partition_logs);
         }
 
-        const log_append_counts = try alloc.alloc(u64, lpc);
+        const log_append_counts = try alloc.alloc(u64, log_partition_count);
         errdefer alloc.free(log_append_counts);
         @memset(log_append_counts, 0);
 
@@ -178,8 +172,8 @@ pub const Sequencer = struct {
             .batcher = EpochBatcher.init(alloc, cfg.max_epoch_size),
             .idempotency = IdempotencyCache.init(alloc),
             .partition_logs = partition_logs,
-            .log_partition_count = lpc,
-            .data_partition_count = cfg.partition_count,
+            .partition_count = cfg.partition_count,
+            .log_partition_count = log_partition_count,
             .log_append_counts = log_append_counts,
             .next_seq = max_seq + 1,
             .next_epoch = 1,
@@ -203,6 +197,11 @@ pub const Sequencer = struct {
         self.shutdown.store(true, .release);
         self.queue.wakeConsumer();
         if (self.thread) |t| t.join();
+        // Clean up any pending batches still in-flight.
+        for (self.pending_batches.items) |pb| {
+            self.alloc.free(pb.slots);
+        }
+        self.pending_batches.deinit(self.alloc);
         self.raft.deinit();
         self.raft_log.deinit();
         self.alloc.free(self.raft_path);
@@ -220,10 +219,9 @@ pub const Sequencer = struct {
     }
 
     pub fn partitionCount(self: *const Sequencer) u32 {
-        return self.data_partition_count;
+        return self.partition_count;
     }
 
-    /// Number of log partitions used for write-throughput routing (spec §5.2).
     pub fn logPartitionCount(self: *const Sequencer) u32 {
         return self.log_partition_count;
     }
@@ -417,6 +415,7 @@ pub const Sequencer = struct {
                     if (oe.seq <= pl.current_seq) continue;
                     const le = LogEntry.create(oe.seq, 0, dec.entry_kind, dec.payload);
                     try pl.append_entry_at(le);
+                    pl.sync();
                 }
                 // Keep next_seq ahead of every seq the Raft log has assigned.
                 // Covers seqs written just now and seqs skipped above as already-present,
@@ -429,10 +428,15 @@ pub const Sequencer = struct {
                 for (dec.entries) |oe| {
                     self.partition_logs[oe.partition].notifyAppend();
                 }
+                // Persist to disk to survive crashes.
+                for (dec.entries) |oe| {
+                    self.partition_logs[oe.partition].sync();
+                }
             }
             self.last_applied = idx;
         }
         try writeLastApplied(self.last_applied_path, self.last_applied);
+        self.raft_log.sync();
     }
 
     /// Return a pointer to the log for the given partition (for reading committed entries).
@@ -471,7 +475,7 @@ pub const Sequencer = struct {
     }
 
     /// Route one intent to the least-loaded log partition (spec §8.2).
-    /// Breaks ties with seq % log_partition_count for determinism. Decays counters
+    /// Breaks ties with seq % partition_count for determinism. Decays counters
     /// every 4096 commits to prevent stale bias from past bursts.
     /// Each intent lands in exactly one log partition; LogMux merges all partitions
     /// so every FoldExecutor sees every entry regardless of which partition it landed in.
@@ -528,15 +532,33 @@ pub const Sequencer = struct {
         self.metrics.epochs_closed.inc();
         self.metrics.last_epoch_size.set(1);
         try self.flushOutputs(outputs.items, self.alloc);
-        const wait_ts: std.os.linux.timespec = .{ .sec = 0, .nsec = COMMIT_WAIT_SLEEP_NS };
-        var wait_ticks: u32 = 0;
+        // Time-based commit-wait loop: replaces tick-based assert so replication
+        // doesn't crash when quorum is lost after a proposal.
+        var ts_now: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.MONOTONIC, &ts_now);
+        const start_ns = @as(u64, @intCast(ts_now.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts_now.nsec));
+        const deadline_ns = start_ns + COMMIT_WAIT_TIMEOUT_NS;
+        var timeout_reached = false;
         while (self.raft.commit_index < ordering_seq) {
-            assert(wait_ticks < COMMIT_WAIT_MAX_TICKS);
-            wait_ticks += 1;
             try self.tickOnce(self.alloc);
-            _ = std.os.linux.nanosleep(&wait_ts, null);
+            _ = std.os.linux.nanosleep(&.{ .sec = 0, .nsec = COMMIT_WAIT_SLEEP_NS }, null);
+            _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.MONOTONIC, &ts_now);
+            const elapsed_ns = @as(u64, @intCast(ts_now.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts_now.nsec));
+            if (elapsed_ns >= deadline_ns) {
+                std.log.warn("commitRoute: commit timeout after {}ms (commit_index={}, ordering_seq={})", .{
+                    @divTrunc(elapsed_ns - start_ns, std.time.ns_per_ms),
+                    self.raft.commit_index,
+                    ordering_seq,
+                });
+                timeout_reached = true;
+                break;
+            }
         }
+        if (timeout_reached) return SequencerError.CommitTimeout;
         try self.idempotency.record(client_id, client_seq_num, seq);
+        // Ensure committed entries are written to partition logs before returning.
+        self.applyCommitted(self.raft.commit_index, self.alloc) catch |err|
+            std.log.warn("applyCommitted: {}", .{err});
         self.metrics.current_seq.set(@intCast(seq));
         return .{ .seq = seq, .partition = partition };
     }
@@ -623,8 +645,9 @@ fn writeLastApplied(path: []const u8, seq: Seq) !void {
     std.mem.writeInt(u64, &buf, seq, .little);
     const w: isize = @bitCast(std.os.linux.write(@intCast(fd), &buf, 8));
     if (w != 8) return error.WriteError;
-    const s: isize = @bitCast(std.os.linux.fsync(@intCast(fd)));
-    if (s < 0) return error.FsyncError;
+    // No fsync — this is a restart-optimisation checkpoint only. On crash the
+    // sequencer replays from the Raft log, so a stale last_applied just means
+    // replaying a few extra already-applied entries (idempotent).
 }
 
 /// Sequencer owner thread: drains the MPSC queue, drives Raft ticks, signals completions.
@@ -642,42 +665,240 @@ fn runLoop(self: *Sequencer) void {
         // waitForWork, the seq change causes waitForWork to return immediately.
         const seq = self.queue.currentSeq();
 
-        if (self.queue.pop()) |p| {
-            processCommit(self, p);
+        // Drain all available entries into a batch. Multiple concurrent clients
+        // sharing one Raft log sync is the primary throughput lever (group commit).
+        var batch: [MAX_GROUP_COMMIT_SIZE]*types_mod.PendingSubmit = undefined;
+        var n: usize = 0;
+        while (n < MAX_GROUP_COMMIT_SIZE) {
+            if (self.queue.pop()) |p| {
+                batch[n] = p;
+                n += 1;
+            } else break;
+        }
+
+        if (n > 0) {
+            commitBatch(self, batch[0..n]);
         } else {
             self.queue.waitForWork(seq, tick_ns);
         }
 
         self.tickOnce(self.alloc) catch |err| std.log.warn("tick: {}", .{err});
+
+        resolvePendingBatches(self);
     }
 }
 
-fn processCommit(self: *Sequencer, pending: *types_mod.PendingSubmit) void {
-    const result = commitInner(self, pending.submit) catch |e| {
-        pending.err = e;
-        pending.done.store(true, .release);
+/// Maximum number of pending submits to drain into one group commit.
+const MAX_GROUP_COMMIT_SIZE: u32 = 256;
+
+/// Holds per-entry results accumulated during the append phase of commitBatch.
+const BatchSlot = struct {
+    pending: *types_mod.PendingSubmit,
+    seq: Seq,
+    partition: PartitionId,
+};
+
+/// A batch of entries proposed to Raft but not yet committed.
+/// Resolved when commit_index >= max_ordering_seq.
+const PendingBatch = struct {
+    slots: []BatchSlot,
+    max_ordering_seq: Seq,
+};
+
+/// Commit a batch of pending submits with one Raft log sync.
+/// Each entry is appended to the Raft log individually (they may have different
+/// payloads), but a single fdatasync covers all of them.
+///
+/// Pipelined path: after sync + flush, the batch is enqueued into pending_batches.
+/// The runLoop resolves it once commit_index catches up, keeping the sequencer
+/// thread free to process new submits during the Raft round-trip.
+fn commitBatch(self: *Sequencer, batch: []*types_mod.PendingSubmit) void {
+    assert(batch.len > 0 and batch.len <= MAX_GROUP_COMMIT_SIZE);
+
+    var slots: [MAX_GROUP_COMMIT_SIZE]BatchSlot = undefined;
+    var n_appended: usize = 0;
+    var max_ordering_seq: Seq = 0;
+
+    var shared_outputs: std.ArrayList(raft_mod.Output) = .empty;
+    defer shared_outputs.deinit(self.alloc);
+
+    for (batch) |p| {
+        const result = appendOne(self, p.submit, &shared_outputs) catch |e| {
+            p.err = e;
+            p.markDone();
+            continue;
+        };
+        // Record idempotency at propose time (seq assigned) so duplicate
+        // submits in the same batch are deduped. This is safe because
+        // next_seq is assigned once and never reused.
+        self.idempotency.record(p.submit.client_id, p.submit.client_seq, result.seq) catch {};
+        slots[n_appended] = .{ .pending = p, .seq = result.seq, .partition = result.partition };
+        max_ordering_seq = result.ordering_seq;
+        n_appended += 1;
+    }
+
+    if (n_appended == 0) return;
+
+    // Phase 2: flush the outputs produced by Raft propose().
+    self.flushOutputs(shared_outputs.items, self.alloc) catch |err|
+        std.log.warn("flushOutputs: {}", .{err});
+
+    // Check if already committed (single-node Raft often commits instantly).
+    if (self.raft.commit_index >= max_ordering_seq) {
+        // Must apply to partition logs BEFORE marking done,
+        // so the WAL is synced before the client receives the ack.
+        self.applyCommitted(self.raft.commit_index, self.alloc) catch |err|
+            std.log.warn("applyCommitted (immediate): {}", .{err});
+        for (slots[0..n_appended]) |s| {
+            self.metrics.current_seq.set(@intCast(s.seq));
+            s.pending.result = .{ .seq = s.seq, .partition = s.partition };
+            s.pending.markDone();
+        }
+        return;
+    }
+
+    // Enqueue into pending batches for async resolution by the runLoop.
+    const heap_slots = self.alloc.alloc(BatchSlot, n_appended) catch {
+        // Allocation failure: fall back to synchronous wait.
+        syncWait(self, &slots, n_appended, max_ordering_seq);
         return;
     };
-    pending.result = result;
-    pending.done.store(true, .release);
+    @memcpy(heap_slots[0..n_appended], slots[0..n_appended]);
+
+    self.pending_batches.append(self.alloc, PendingBatch{
+        .slots = heap_slots,
+        .max_ordering_seq = max_ordering_seq,
+    }) catch {
+        syncWait(self, &slots, n_appended, max_ordering_seq);
+        return;
+    };
 }
 
-/// Core commit logic, called only from the Sequencer owner thread.
-fn commitInner(self: *Sequencer, submit: ValidatedSubmit) !SubmitResult {
-    // Return NotLeader rather than asserting: a stepdown between processCommit's
-    // caller check and here must produce a recoverable error, not a crash.
-    if (self.raft.role != .leader) return SequencerError.NotLeader;
+/// Synchronous commit-wait fallback when the pipelined path cannot enqueue.
+fn syncWait(self: *Sequencer, slots: *[MAX_GROUP_COMMIT_SIZE]BatchSlot, n_appended: usize, max_ordering_seq: Seq) void {
+    var ts_now: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.MONOTONIC, &ts_now);
+    const start_ns = @as(u64, @intCast(ts_now.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts_now.nsec));
+    const deadline_ns = start_ns + COMMIT_WAIT_TIMEOUT_NS;
+    while (self.raft.commit_index < max_ordering_seq) {
+        self.tickOnce(self.alloc) catch |err| std.log.warn("tick: {}", .{err});
+        _ = std.os.linux.nanosleep(&.{ .sec = 0, .nsec = COMMIT_WAIT_SLEEP_NS }, null);
+        _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.MONOTONIC, &ts_now);
+        const now_ns = @as(u64, @intCast(ts_now.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts_now.nsec));
+        if (now_ns >= deadline_ns) {
+            std.log.warn("syncWait: timeout after {}ms (commit_index={}, max_ordering_seq={})", .{
+                @divTrunc(now_ns - start_ns, std.time.ns_per_ms),
+                self.raft.commit_index,
+                max_ordering_seq,
+            });
+            for (slots[0..n_appended]) |s| {
+                s.pending.err = error.CommitTimeout;
+                s.pending.markDone();
+            }
+            return;
+        }
+    }
+    for (slots[0..n_appended]) |s| {
+        self.metrics.current_seq.set(@intCast(s.seq));
+        s.pending.result = .{ .seq = s.seq, .partition = s.partition };
+        s.pending.markDone();
+    }
+}
+
+/// Resolve any pending batches whose max_ordering_seq <= commit_index.
+/// Called from the runLoop after tickOnce() to avoid blocking the sequencer.
+fn resolvePendingBatches(self: *Sequencer) void {
+    var write_idx: usize = 0;
+    for (self.pending_batches.items, 0..) |pb, read_idx| {
+        if (self.raft.commit_index >= pb.max_ordering_seq) {
+            // Batch is committed — resolve all entries.
+            for (pb.slots) |s| {
+                self.metrics.current_seq.set(@intCast(s.seq));
+                s.pending.result = .{ .seq = s.seq, .partition = s.partition };
+                s.pending.markDone();
+            }
+            self.alloc.free(pb.slots);
+        } else {
+            // Not yet committed — compact to front.
+            if (write_idx != read_idx) {
+                self.pending_batches.items[write_idx] = self.pending_batches.items[read_idx];
+            }
+            write_idx += 1;
+        }
+    }
+    self.pending_batches.shrinkRetainingCapacity(write_idx);
+}
+
+/// Assign a seq, pick a partition, serialize, and append to the Raft log without syncing.
+/// Returns the ordering_seq assigned by Raft (for the commit-wait threshold).
+const AppendResult = struct { seq: Seq, partition: PartitionId, ordering_seq: Seq };
+
+fn appendOne(self: *Sequencer, submit: ValidatedSubmit, outputs: *std.ArrayList(raft_mod.Output)) !AppendResult {
+    if (self.raft.role != .leader) {
+        self.metrics.not_leader_errors.inc();
+        return SequencerError.NotLeader;
+    }
     self.metrics.intents_submitted.inc();
 
-    const client_id = submit.client_id;
-    const client_seq_num = submit.client_seq;
-
-    // Idempotency fast path
-    if (self.idempotency.lookup(client_id, client_seq_num)) |existing_seq| {
+    // Idempotency fast path — signal immediately without appending.
+    if (self.idempotency.lookup(submit.client_id, submit.client_seq)) |existing_seq| {
         self.metrics.dedup_hits.inc();
         const partition: PartitionId = @intCast(existing_seq % @as(Seq, self.logPartitionCount()));
-        return .{ .seq = existing_seq, .partition = partition };
+        // Dedup entries still need a result but don't touch the Raft log.
+        // Return a synthetic ordering_seq that is already committed.
+        return .{ .seq = existing_seq, .partition = partition, .ordering_seq = self.raft.commit_index };
     }
 
-    return self.commitRoute(client_id, client_seq_num, submit);
+    const seq = self.next_seq;
+    const lpc = self.logPartitionCount();
+
+    if (seq -% self.log_load_decay_seq >= 4096) {
+        for (self.log_append_counts) |*c| c.* >>= 1;
+        self.log_load_decay_seq = seq;
+    }
+
+    const tiebreak: PartitionId = @intCast(seq % @as(Seq, lpc));
+    var best: PartitionId = tiebreak;
+    var best_count: u64 = self.log_append_counts[tiebreak];
+    for (self.log_append_counts, 0..) |count, i| {
+        if (count < best_count) {
+            best = @intCast(i);
+            best_count = count;
+        }
+    }
+    const partition: PartitionId = best;
+    self.log_append_counts[partition] += 1;
+
+    const entry = OrderingEntry{
+        .seq = seq,
+        .partition = partition,
+        .client_id = submit.client_id,
+        .client_seq = submit.client_seq,
+    };
+    const decision = types_mod.EpochDecision{
+        .epoch_num = self.next_epoch,
+        .entries = &.{entry},
+        .entry_kind = submit.entry_kind,
+        .payload = submit.intent_payload,
+    };
+    var payload_buf: std.ArrayList(u8) = .empty;
+    defer payload_buf.deinit(self.alloc);
+    try types_mod.serializeEpochDecision(decision, &payload_buf, self.alloc);
+
+    const ordering_seq = try self.raft.propose(
+        &self.raft_log,
+        .epoch_decision,
+        payload_buf.items,
+        outputs,
+    ) orelse {
+        self.metrics.not_leader_errors.inc();
+        return SequencerError.NotLeader;
+    };
+
+    self.next_epoch += 1;
+    self.next_seq += 1;
+    self.metrics.epochs_closed.inc();
+    self.metrics.last_epoch_size.set(1);
+
+    return .{ .seq = seq, .partition = partition, .ordering_seq = ordering_seq };
 }

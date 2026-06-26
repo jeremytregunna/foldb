@@ -1,844 +1,483 @@
-/// Foldb Gateway: client-facing entry point for query registration, execution, and CDC.
+/// Foldb Gateway — KV RPC handler.
+/// Routes decoded wire protocol messages → sequencer → executor → storage → response.
 const std = @import("std");
-
-const sql_mod = @import("sql.zig");
+const executor_mod = @import("executor.zig");
 const storage_mod = @import("storage.zig");
 const log_mod = @import("log.zig");
-const executor_mod = @import("executor.zig");
-const fold_executor_mod = @import("fold_executor.zig");
-const exchange_bus_mod = @import("exchange_bus.zig");
 const sequencer_mod = @import("sequencer.zig");
-const observability_mod = @import("observability.zig");
-const cdc_mod = @import("cdc.zig");
-const nondet_mod = @import("nondet.zig");
-const recon_mod = @import("recon.zig");
-const snapshot_hooks_mod = @import("snapshot_hooks.zig");
+const codec = @import("codec.zig");
+const frame = @import("frame.zig");
+const messages = @import("messages.zig");
+const entry_mod = log_mod.entry;
 
-pub const QueryHash = sql_mod.QueryHash;
-pub const Seq = @import("types.zig").Seq;
-pub const ResolvedValue = fold_executor_mod.ResolvedValue;
-pub const DatabaseId = executor_mod.DatabaseId;
-pub const default_database_id = executor_mod.default_database_id;
+const Executor = executor_mod.Executor;
+const Storage = storage_mod.Storage;
+const LogEntry = log_mod.LogEntry;
+const KvOp = entry_mod.KvOp;
+const TxnIntent = entry_mod.TxnIntent;
+const Sequencer = sequencer_mod.Sequencer;
+const PendingSubmit = sequencer_mod.PendingSubmit;
+const Mutation = storage_mod.Mutation;
+const Row = storage_mod.Row;
+const KeyRange = storage_mod.KeyRange;
+const LogMux = log_mod.LogMux;
 
-// Re-export CDC types for use by the net layer
-pub const CdcSubscription = cdc_mod.CdcSubscription;
-pub const CdcEvent = cdc_mod.CdcEvent;
-pub const ResolvedKind = @import("types.zig").ResolvedKind;
-pub const ColumnValue = storage_mod.ColumnValue;
-pub const ResultSet = sql_mod.ResultSet;
+const assert = std.debug.assert;
 
-/// Result from query registration.
-pub const RegisterResult = struct {
-    hash: QueryHash,
-    schema_version: u64,
-};
+pub const default_table_id: storage_mod.TableId = 1;
 
-/// Result from query execution.
-pub const ExecResult = struct {
-    rows_affected: u64,
-    result_set: ?ResultSet,
-};
-
-/// Gateway error types.
-pub const GatewayError = error{
-    QueryNotFound,
-    ParamDecodeError,
-    SchemaBreakingChange,
-    ExecutionError,
-    TableNotFound,
-    ConstraintViolation,
-};
-
-pub const ReconStrategy = recon_mod.ReconStrategy;
-pub const ClockSource = nondet_mod.ClockSource;
-pub const RandSource = nondet_mod.RandSource;
-pub const NondetResolver = nondet_mod.NondetResolver;
-
-/// Context for the post-snapshot truncation hook. One per storage partition.
-const TruncateCtx = struct { gateway: *Gateway, partition_id: u32 };
-
-fn onSnapshotComplete(ptr: *anyopaque, snapshot_seq: sequencer_mod.Seq) void {
-    const ctx: *TruncateCtx = @ptrCast(@alignCast(ptr));
-    const gw = ctx.gateway;
-    gw.partition_snapshot_seqs[ctx.partition_id] = snapshot_seq;
-    // Only advance the truncation watermark once every partition has snapshotted.
-    // Use the minimum seq across all partitions so no partition's unreplayed log
-    // entries are removed before its storage state is captured in a snapshot.
-    var min_seq: sequencer_mod.Seq = std.math.maxInt(sequencer_mod.Seq);
-    for (gw.partition_snapshot_seqs) |s| {
-        if (s == 0) return;
-        if (s < min_seq) min_seq = s;
-    }
-    if (min_seq > gw.durable_snapshot_seq) {
-        gw.durable_snapshot_seq = min_seq;
-        gw.truncateLog() catch |err| std.log.warn("truncateLog failed after snapshot: {}", .{err});
-    }
-}
-
-/// The main Gateway struct.
-/// Always heap-allocated via `init`; internal pointers remain stable.
-pub const Gateway = struct {
-    /// One FoldExecutor per partition; each runs on its own thread pinned to a CPU.
-    fold_executors: []*fold_executor_mod.FoldExecutor,
-    /// Merged log stream shared by all FoldExecutors. Owned by Gateway.
-    log_mux: log_mod.LogMux,
-    /// One Storage per data partition. Heap-allocated; owned by this gateway.
-    storages: []*storage_mod.Storage,
-    /// Routing wrapper over storages — used for reconnaissance only (not by FoldExecutors).
-    partitioned: storage_mod.PartitionedStorage,
-    /// Peer-to-peer SPSC exchange bus between partition executors.
-    exchange_bus: exchange_bus_mod.ExchangeBus,
-    nondet_resolver: nondet_mod.NondetResolver,
-    sequencer: sequencer_mod.Sequencer,
-    /// CDC event fan-out for wire-protocol subscriptions.
-    cdc: cdc_mod.CdcManager,
-    /// Per-gateway client identity for idempotency tracking.
-    client_id: u64,
-    client_seq: u64,
-    /// Number of data partitions — used to hash PK keys to partition IDs during reconnaissance.
-    partition_count: u32,
-    recon_strategy: ReconStrategy,
-    alloc: std.mem.Allocator,
-    metrics: observability_mod.GatewayMetrics = .{},
-    /// I/O context for async awaitCommit on the fiber scheduler. Null in tests.
+pub const Options = struct {
     io: ?std.Io = null,
-    /// Heap-allocated S3 store; non-null when S3 is configured. Freed in deinit.
-    s3_store: ?*storage_mod.S3ObjectStore = null,
-    /// Per-partition context structs for snapshot log writers. Freed in deinit.
-    snapshot_writer_ctxs: []snapshot_hooks_mod.SnapshotWriterCtx = &.{},
-    /// Per-partition context structs for the post-snapshot truncation hook. Freed in deinit.
-    truncate_ctxs: []TruncateCtx = &.{},
-    /// Per-partition last-snapshot seq. Truncation watermark is min across all partitions.
-    partition_snapshot_seqs: []sequencer_mod.Seq = &.{},
-    /// Minimum seq across all partition_snapshot_seqs; 0 until every partition has snapshotted.
-    durable_snapshot_seq: sequencer_mod.Seq = 0,
-    /// Last error detail set by gateway operations (table/column context).
-    /// Reset at the start of each operation that may set it.
-    error_detail: [256]u8,
-    error_detail_len: usize = 0,
+    partition_count: u32 = 1,
+    node_id: u64 = 1,
+    tick_interval_ms: u32 = 10,
+    election_timeout_min_ms: u32 = 150,
+    election_timeout_max_ms: u32 = 300,
+    heartbeat_interval_ms: u32 = 50,
+    peers: []const sequencer_mod.PeerAddr = &.{},
+    s3_io: ?std.Io = null,
+    s3_endpoint_host: []const u8 = "",
+    s3_endpoint_port: u16 = 0,
+    s3_access_key: []const u8 = "",
+    s3_secret_key: []const u8 = "",
+    s3_region: []const u8 = "",
+    s3_bucket: []const u8 = "",
+};
 
-    pub const Options = struct {
-        clock: ClockSource = .{},
-        rand: RandSource = .{},
-        disk_fault: ?storage_mod.DiskFaultHook = null,
-        partition_count: u32 = 1,
-        /// Number of log partitions for write throughput (spec §5.2). 0 = same as partition_count.
-        log_partition_count: u32 = 0,
-        recon_strategy: ReconStrategy = .early_exit,
-        node_id: u64 = 1,
-        tick_interval_ms: u32 = 10,
-        election_timeout_min_ms: u32 = 150,
-        election_timeout_max_ms: u32 = 300,
-        heartbeat_interval_ms: u32 = 50,
-        peers: []const sequencer_mod.PeerAddr = &.{},
-        /// I/O context for the fiber scheduler. When set, awaitCommit suspends
-        /// the fiber during Raft round-trips instead of busy-spinning.
-        io: ?std.Io = null,
-        // S3 / object storage (all optional — zero values disable tiering).
-        /// Required when S3 credentials are provided; used for hostname resolution and connection.
-        s3_io: ?std.Io = null,
-        s3_endpoint_host: []const u8 = "",
-        s3_endpoint_port: u16 = 0,
-        s3_access_key: []const u8 = "",
-        s3_secret_key: []const u8 = "",
-        s3_region: []const u8 = "us-east-1",
-        s3_bucket: []const u8 = "",
-        s3_bucket_style: storage_mod.BucketStyle = .path,
-        /// Local directory for caching downloaded L3 SSTables. Defaults to storage_dir.
-        s3_cache_dir: []const u8 = "",
-        /// How many applied mutations between automatic snapshots. 0 disables scheduling.
-        snapshot_interval_entries: u64 = 10_000_000,
-        /// Optional object store for snapshot uploads (bypasses S3; useful in tests).
-        snapshot_store: ?storage_mod.ObjectStore = null,
-        /// When true, the caller is responsible for calling gw.sequencer.start()
-        /// after configuring peer addresses. Used in multinode test setup.
-        defer_sequencer_start: bool = false,
-    };
+pub const Gateway = struct {
+    storage: Storage,
+    sequencer: Sequencer,
+    executor: Executor,
+    alloc: std.mem.Allocator,
 
-    /// Initialize and heap-allocate a Gateway. Caller owns the pointer; call `deinit` to free.
-    pub fn init(
-        storage_dir: []const u8,
-        alloc: std.mem.Allocator,
-        opts: Options,
-    ) !*Gateway {
+    pub fn init(storage_dir: []const u8, alloc: std.mem.Allocator, opts: Options) !*Gateway {
+        assert(storage_dir.len > 0);
         const gw = try alloc.create(Gateway);
         errdefer alloc.destroy(gw);
 
-        gw.alloc = alloc;
+        var storage = try Storage.init(storage_dir, alloc);
+        errdefer storage.deinit();
+        try storage.registerTable(default_table_id);
 
-        // Ensure the top-level storage directory exists before creating partition subdirs.
-        storage_mod.mkdirAll(storage_dir);
-
-        // Allocate one Storage per partition. Each lives at {storage_dir}/p{i}.
-        // Storage does not own its dir string; each dir is freed in deinit via s.dir.
-        const pc = opts.partition_count;
-        std.debug.assert(pc >= 1);
-        const storages = try alloc.alloc(*storage_mod.Storage, pc);
-        errdefer alloc.free(storages);
-        var n_inited: usize = 0;
-        errdefer for (storages[0..n_inited]) |s| {
-            const dir = s.dir;
-            s.flushAll() catch |err| std.log.warn("flushAll failed during init cleanup: {}", .{err});
-            s.deinit();
-            alloc.destroy(s);
-            alloc.free(dir);
-        };
-        for (0..pc) |i| {
-            const dir = try std.fmt.allocPrint(alloc, "{s}/p{d}", .{ storage_dir, i });
-            // dir is NOT freed here — Storage holds a reference; freed in deinit via s.dir.
-            const s = alloc.create(storage_mod.Storage) catch |e| {
-                alloc.free(dir);
-                return e;
-            };
-            s.* = storage_mod.Storage.init(dir, alloc) catch |e| {
-                alloc.destroy(s);
-                alloc.free(dir);
-                return e;
-            };
-            if (opts.disk_fault) |hook| s.fault_hook = hook;
-            storages[i] = s;
-            n_inited += 1;
-        }
-        gw.storages = storages;
-        gw.partitioned = .{ .partitions = storages, .alloc = alloc };
-        gw.exchange_bus = try exchange_bus_mod.ExchangeBus.init(pc, alloc);
-        errdefer gw.exchange_bus.deinit();
-        gw.s3_store = null;
-        gw.snapshot_writer_ctxs = &.{};
-        gw.truncate_ctxs = &.{};
-        gw.partition_snapshot_seqs = &.{};
-        gw.durable_snapshot_seq = 0;
-        gw.error_detail = undefined;
-        gw.error_detail_len = 0;
-
-        // Wire S3 tiered storage when credentials are provided.
-        if (opts.s3_access_key.len > 0) {
-            if (opts.s3_bucket.len > 0) {
-                if (opts.s3_io) |s3_io| {
-                    const s3 = try alloc.create(storage_mod.S3ObjectStore);
-                    errdefer alloc.destroy(s3);
-                    s3.* = storage_mod.S3ObjectStore.init(.{
-                        .access_key = opts.s3_access_key,
-                        .secret_key = opts.s3_secret_key,
-                        .region = opts.s3_region,
-                        .endpoint_host = opts.s3_endpoint_host,
-                        .endpoint_port = opts.s3_endpoint_port,
-                        .io = s3_io,
-                        .bucket = opts.s3_bucket,
-                        .bucket_style = opts.s3_bucket_style,
-                        .alloc = alloc,
-                    });
-                    gw.s3_store = s3;
-                    const cache_dir = if (opts.s3_cache_dir.len > 0) opts.s3_cache_dir else storage_dir;
-                    const obj = s3.objectStore();
-                    for (storages) |stor| try stor.setObjectStore(obj, cache_dir);
-                } else {
-                    return error.IoRequiredForS3;
-                }
-            }
-        }
-
-        gw.io = opts.io;
-        gw.nondet_resolver = nondet_mod.NondetResolver.init(opts.clock, opts.rand);
-
-        const seq_cfg = sequencer_mod.Config{
+        var sequencer = try Sequencer.init(storage_dir, .{
             .partition_count = opts.partition_count,
-            .log_partition_count = opts.log_partition_count,
             .node_id = opts.node_id,
             .tick_interval_ms = opts.tick_interval_ms,
             .election_timeout_min_ms = opts.election_timeout_min_ms,
             .election_timeout_max_ms = opts.election_timeout_max_ms,
             .heartbeat_interval_ms = opts.heartbeat_interval_ms,
             .peers = opts.peers,
+        }, alloc);
+        errdefer sequencer.deinit();
+
+        gw.* = .{
+            .storage = storage,
+            .sequencer = sequencer,
+            .executor = Executor.init(&gw.storage, alloc),
+            .alloc = alloc,
         };
-        // Sequencer owns and creates its log partition logs (spec §5.2, §6.6).
-        // N log partitions are independent of M data partition storages.
-        gw.sequencer = try sequencer_mod.Sequencer.init(storage_dir, seq_cfg, alloc);
-        errdefer gw.sequencer.deinit();
-        if (!opts.defer_sequencer_start) try gw.sequencer.start();
 
-        gw.cdc = try cdc_mod.CdcManager.init(alloc);
-        errdefer gw.cdc.deinit();
-
-        // Build a LogMux over all log partition logs so every FoldExecutor reads the full stream.
-        const log_partition_logs = gw.sequencer.logPartitionLogs();
-        const log_refs = try alloc.alloc(*log_mod.Log, log_partition_logs.len);
-        for (log_partition_logs, 0..) |*l, i| log_refs[i] = l;
-        gw.log_mux = log_mod.LogMux.init(log_refs, alloc);
-        errdefer gw.log_mux.deinit();
-
-        // Create one FoldExecutor per partition, each pinned to a CPU (round-robin if CPUs < partitions).
-        const cpu_count: u32 = @intCast(std.Thread.getCpuCount() catch 1);
-        const fold_executors = try alloc.alloc(*fold_executor_mod.FoldExecutor, pc);
-        errdefer alloc.free(fold_executors);
-        var n_fe_inited: usize = 0;
-        errdefer for (fold_executors[0..n_fe_inited]) |fe| {
-            fe.stop();
-            fe.deinit();
-        };
-        for (0..pc) |i| {
-            const cpu_id: u32 = @intCast(i % cpu_count);
-            fold_executors[i] = try fold_executor_mod.FoldExecutor.init(
-                storages[i],
-                &gw.partitioned,
-                &gw.cdc,
-                &gw.log_mux,
-                @intCast(i),
-                @intCast(pc),
-                if (pc > 1) &gw.exchange_bus else null,
-                cpu_id,
-                alloc,
-            );
-            n_fe_inited += 1;
-        }
-        gw.fold_executors = fold_executors;
-
-        // Wire snapshot scheduling if an object store is available and interval is set.
-        const snap_obj: ?storage_mod.ObjectStore = blk: {
-            if (opts.snapshot_store) |s| break :blk s;
-            if (gw.s3_store) |s3| break :blk s3.objectStore();
-            break :blk null;
-        };
-        if (snap_obj) |obj| {
-            if (opts.snapshot_interval_entries > 0) {
-                const ctxs = try alloc.alloc(snapshot_hooks_mod.SnapshotWriterCtx, pc);
-                for (ctxs, 0..) |*ctx, i| {
-                    ctx.* = .{
-                        .sequencer = &gw.sequencer,
-                        .partition_id = @intCast(i),
-                        // XOR with a per-partition salt so snapshot client_ids don't
-                        // collide with each other or with gateway.client_id.
-                        .client_id = gw.client_id ^ (@as(u64, @intCast(i)) +% 0x9e3779b97f4a7c15), // Fibonacci hashing salt
-                        .client_seq = 0,
-                    };
-                }
-                gw.snapshot_writer_ctxs = ctxs;
-
-                const truncate_ctxs = try alloc.alloc(TruncateCtx, pc);
-                for (truncate_ctxs, 0..) |*ctx, i| ctx.* = .{ .gateway = gw, .partition_id = @intCast(i) };
-                gw.truncate_ctxs = truncate_ctxs;
-
-                const snap_seqs = try alloc.alloc(sequencer_mod.Seq, pc);
-                for (snap_seqs) |*s| s.* = 0;
-                gw.partition_snapshot_seqs = snap_seqs;
-
-                for (gw.storages, 0..) |stor, i| {
-                    stor.setSnapshotPolicy(.{
-                        .interval = opts.snapshot_interval_entries,
-                        .store = obj,
-                        .log_writer = .{
-                            .ptr = &ctxs[i],
-                            .writeFn = &snapshot_hooks_mod.writeSnapshotToLog,
-                        },
-                        .partition_id = @intCast(i),
-                        .post_snapshot = .{
-                            .ptr = &truncate_ctxs[i],
-                            .hookFn = &onSnapshotComplete,
-                        },
-                    });
-                }
-            }
-        }
-
-        // Replay log to rebuild schema and storage state after restart.
-        // Pass 1 reconstructs DDL/query registry; pass 2 replays DML into storage,
-        // recovering rows that were in the memtable and not flushed before a crash.
-        for (gw.fold_executors) |fe| try fe.replayFromLog();
-
-        // Start FoldExecutor OS threads — each continuously applies committed entries for its partition.
-        for (gw.fold_executors) |fe| try fe.start();
-
-        // Derive a stable client_id from the storage path hash
-        gw.client_id = blk: {
-            var h: u64 = 0xcbf29ce484222325; // FNV-1a 64-bit offset basis
-            for (storage_dir) |b| {
-                h ^= b;
-                h *%= 0x100000001b3; // FNV-1a 64-bit prime
-            }
-            break :blk h;
-        };
-        gw.client_seq = 0;
-        gw.partition_count = opts.partition_count;
-        gw.recon_strategy = opts.recon_strategy;
+        try gw.replayLogs();
+        try gw.sequencer.start();
         return gw;
     }
 
     pub fn deinit(self: *Gateway) void {
-        for (self.fold_executors) |fe| fe.stop();
-        // Flush memtables BEFORE freeing fold_executor storage_schema_arenas.
-        // Block.append() dereferences schema.columns; freeing the arena first causes a segfault.
-        for (self.storages) |s| {
-            const dir = s.dir;
-            s.flushAll() catch |err| std.log.warn("flushAll failed during deinit: {}", .{err});
-            s.deinit();
-            self.alloc.destroy(s);
-            self.alloc.free(dir);
-        }
-        self.alloc.free(self.storages);
-        for (self.fold_executors) |fe| fe.deinit();
-        self.alloc.free(self.fold_executors);
-        self.exchange_bus.deinit();
-        self.log_mux.deinit();
-        self.cdc.deinit();
+        self.replayLogs() catch |err| std.log.warn("gateway replay during shutdown: {}", .{err});
+        self.storage.flushAll() catch |err| std.log.warn("gateway flush during shutdown: {}", .{err});
+        self.executor.deinit();
         self.sequencer.deinit();
-        if (self.s3_store) |s3| self.alloc.destroy(s3);
-        if (self.snapshot_writer_ctxs.len > 0) self.alloc.free(self.snapshot_writer_ctxs);
-        if (self.truncate_ctxs.len > 0) self.alloc.free(self.truncate_ctxs);
-        if (self.partition_snapshot_seqs.len > 0) self.alloc.free(self.partition_snapshot_seqs);
+        self.storage.deinit();
         self.alloc.destroy(self);
     }
 
-    /// Truncate sealed log segments that predate the durable snapshot.
-    /// Safe point is min(durable_snapshot_seq, min CDC cursor across all subscribers).
-    /// Errors are swallowed — truncation is best-effort and does not affect correctness.
-    pub fn truncateLog(self: *Gateway) !void {
-        var safe_seq = self.durable_snapshot_seq;
-        if (safe_seq == 0) return;
-        const min_cdc = self.cdc.min_cursor();
-        if (min_cdc > 0 and min_cdc < safe_seq) safe_seq = min_cdc;
-        for (self.sequencer.partition_logs) |*log| {
-            log.notify_snapshot(safe_seq);
-            try log.truncate_prefix(safe_seq);
-        }
-    }
+    fn replayLogs(self: *Gateway) !void {
+        const logs = self.sequencer.logPartitionLogs();
+        const ptrs = try self.alloc.alloc(*log_mod.Log, logs.len);
+        defer self.alloc.free(ptrs);
+        for (logs, 0..) |*log, i| ptrs[i] = log;
 
-    /// Returns true if the registered query is a pure SELECT (no mutations).
-    pub fn isSelectQuery(self: *Gateway, hash: QueryHash) bool {
-        return self.fold_executors[0].isSelectQuery(hash);
-    }
+        var mux = LogMux.init(try self.alloc.dupe(*log_mod.Log, ptrs), self.alloc);
+        defer mux.deinit();
 
-    /// Look up a database by name. Returns null if the database doesn't exist.
-    pub fn getDatabaseId(self: *Gateway, name: []const u8) ?DatabaseId {
-        return self.fold_executors[0].cluster.getDbByName(name);
-    }
-
-    /// Register a SQL query scoped to a specific database.
-    pub fn registerForDb(self: *Gateway, sql: []const u8, db_id: DatabaseId) !RegisterResult {
-        self.error_detail_len = 0;
-        const hash = self.fold_executors[0].validateQueryForDb(sql, db_id) catch |e| {
-            if (e == error.UnexpectedToken or e == error.UnsupportedSyntax) {
-                var arena = std.heap.ArenaAllocator.init(self.alloc);
-                defer arena.deinit();
-                var p = sql_mod.parser.Parser.init(sql, arena.allocator());
-                _ = p.parseQuery() catch |err| std.log.debug("parse probe: {}", .{err});
-                if (p.err_msg) |msg| {
-                    const pos = p.err_pos;
-                    if (pos < sql.len) {
-                        var end = pos;
-                        while (end < sql.len and end - pos < 24) : (end += 1) {
-                            const c = sql[end];
-                            if (c == ' ' or c == '\t' or c == '\n' or c == ';') break;
-                        }
-                        self.setDetail("{s} '{s}'", .{ msg, sql[pos..end] });
-                    } else {
-                        self.setDetail("{s}", .{msg});
-                    }
-                }
+        var from_seq: u64 = 1;
+        while (true) {
+            const entries = try mux.read(from_seq, 256, self.alloc);
+            defer {
+                for (entries) |*entry| entry.deinit(self.alloc);
+                self.alloc.free(entries);
             }
-            return e;
-        };
-        self.metrics.queries_registered.inc();
-        self.client_seq += 1;
-        var payload_buf: std.ArrayList(u8) = .empty;
-        defer payload_buf.deinit(self.alloc);
-        try executor_mod.encodeSchemaPayload(.query, db_id, sql, self.alloc, &payload_buf);
-        var pending: sequencer_mod.PendingSubmit = undefined;
-        const result = try self.sequencer.submitBytes(
-            &pending,
-            payload_buf.items,
-            self.client_id,
-            self.client_seq,
-            .schema_change,
-        ).awaitCommit(self.io);
-        try self.waitAllFoldExecutors(result.seq);
-        return .{
-            .hash = hash,
-            .schema_version = self.fold_executors[0].schemaVersion(),
-        };
-    }
-
-    /// Apply a DDL statement scoped to a specific database.
-    pub fn applyDdlForDb(self: *Gateway, sql: []const u8, db_id: DatabaseId) !void {
-        self.error_detail_len = 0;
-        try self.fold_executors[0].validateDdlForDb(sql, db_id);
-        self.client_seq += 1;
-        const kind: executor_mod.SchemaPayloadKind = if (isClusterDdl(sql)) .cluster else .ddl;
-        const effective_db_id: DatabaseId = if (kind == .cluster) executor_mod.default_database_id else db_id;
-        var payload_buf: std.ArrayList(u8) = .empty;
-        defer payload_buf.deinit(self.alloc);
-        try executor_mod.encodeSchemaPayload(kind, effective_db_id, sql, self.alloc, &payload_buf);
-        var pending: sequencer_mod.PendingSubmit = undefined;
-        const result = try self.sequencer.submitBytes(
-            &pending,
-            payload_buf.items,
-            self.client_id,
-            self.client_seq,
-            .schema_change,
-        ).awaitCommit(self.io);
-        try self.waitAllFoldExecutors(result.seq);
-    }
-
-    /// Register a SQL query and return its hash with schema version.
-    /// Idempotent: registering the same SQL twice returns the same hash.
-    /// Routes through Raft so all nodes replicate the schema change.
-    pub fn register(self: *Gateway, sql: []const u8) !RegisterResult {
-        self.error_detail_len = 0;
-        // Validate SQL against the current schema before committing to Raft.
-        // validateQuery does full parse+typecheck+plan without mutating state —
-        // returns ColumnNotFound etc. if the query references unknown columns/tables.
-        const hash = self.fold_executors[0].validateQuery(sql) catch |e| {
-            if (e == error.UnexpectedToken or e == error.UnsupportedSyntax) {
-                var arena = std.heap.ArenaAllocator.init(self.alloc);
-                defer arena.deinit();
-                var p = sql_mod.parser.Parser.init(sql, arena.allocator());
-                _ = p.parseQuery() catch |err| std.log.debug("parse probe: {}", .{err});
-                if (p.err_msg) |msg| {
-                    const pos = p.err_pos;
-                    if (pos < sql.len) {
-                        var end = pos;
-                        while (end < sql.len and end - pos < 24) : (end += 1) {
-                            const c = sql[end];
-                            if (c == ' ' or c == '\t' or c == '\n' or c == ';') break;
-                        }
-                        self.setDetail("{s} '{s}'", .{ msg, sql[pos..end] });
-                    } else {
-                        self.setDetail("{s}", .{msg});
-                    }
-                }
+            if (entries.len == 0) break;
+            for (entries) |entry| {
+                _ = try self.executor.run(entry);
             }
-            return e;
-        };
-        self.metrics.queries_registered.inc();
-        self.client_seq += 1;
-        // Encode the db-scoped query envelope before submitting to the log.
-        var payload_buf: std.ArrayList(u8) = .empty;
-        defer payload_buf.deinit(self.alloc);
-        try executor_mod.encodeSchemaPayload(.query, executor_mod.default_database_id, sql, self.alloc, &payload_buf);
-        // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
-        var pending: sequencer_mod.PendingSubmit = undefined;
-        const result = try self.sequencer.submitBytes(
-            &pending,
-            payload_buf.items,
-            self.client_id,
-            self.client_seq,
-            .schema_change,
-        ).awaitCommit(self.io);
-        try self.waitAllFoldExecutors(result.seq);
-        return .{
-            .hash = hash,
-            .schema_version = self.fold_executors[0].schemaVersion(),
-        };
-    }
-
-    /// Wait for all FoldExecutors to process the committed entry at seq.
-    fn waitAllFoldExecutors(self: *Gateway, seq: Seq) !void {
-        for (self.fold_executors) |fe| {
-            try fe.wait_for(seq, self.io);
+            from_seq = entries[entries.len - 1].header.seq + 1;
+            if (entries.len < 256) break;
         }
-    }
-
-    /// Outcome of a single submit-and-drain attempt.
-    const SubmitOutcome = union(enum) {
-        done: ExecResult,
-        /// Executor detected a read-set conflict; value is the seq to retry recon at.
-        retry: Seq,
-    };
-
-    /// Run reconnaissance and serialize the TxnIntent bytes into buf.
-    /// Hints are allocated and freed within this call.
-    fn buildTxnIntent(
-        self: *Gateway,
-        hash: *const QueryHash,
-        plan: sql_mod.plan.ExecutionPlan,
-        op_seq: u64,
-        recon_seq: Seq,
-        params: []const ColumnValue,
-        params_bytes: []const u8,
-        all_nondet: []const ResolvedValue,
-        buf: *std.ArrayList(u8),
-    ) !void {
-        var hints = try recon_mod.reconnaissanceScan(
-            plan,
-            &self.partitioned,
-            params,
-            self.fold_executors[0].cluster.getDb(sql_mod.default_database_id).?,
-            recon_seq,
-            self.partition_count,
-            self.recon_strategy,
-            self.alloc,
-        );
-        defer hints.deinit();
-        try executor_mod.serialize_txn_intent(
-            hash,
-            self.client_id,
-            op_seq,
-            recon_seq,
-            hints.read,
-            hints.write,
-            params_bytes,
-            all_nondet,
-            buf,
-            self.alloc,
-        );
-    }
-
-    /// Submit serialized intent bytes to the sequencer, wait for all FoldExecutors to apply,
-    /// and aggregate results. Returns .done on success or .retry with conflict seq.
-    fn submitAndDrain(self: *Gateway, intent_bytes: []const u8, op_seq: u64) !SubmitOutcome {
-        // SAFETY: submitBytes writes to pending synchronously before the handle is used.
-        var pending: sequencer_mod.PendingSubmit = undefined;
-        const handle = self.sequencer.submitBytes(
-            &pending,
-            intent_bytes,
-            self.client_id,
-            op_seq,
-            .txn_intent,
-        );
-        const result = try handle.awaitCommit(self.io);
-
-        // commitRoute: one seq per txn; all executors process result.seq via LogMux.
-        var total_rows: u64 = 0;
-        var combined_result_set: ?ResultSet = null;
-
-        for (self.fold_executors) |fe| {
-            try fe.wait_for(result.seq, self.io);
-            const exec_result = fe.waitFor(result.seq);
-            const exec_detail = fe.lastExecDetail();
-            if (exec_detail.len > 0) self.setDetail("{s}", .{exec_detail});
-
-            switch (exec_result) {
-                .ok => |ok| {
-                    total_rows += ok.rows_affected;
-                    if (ok.result_set) |rs| {
-                        if (combined_result_set == null) {
-                            combined_result_set = rs;
-                        } else {
-                            var mutable = rs;
-                            mutable.deinit();
-                        }
-                    }
-                },
-                .abort => |ab| {
-                    if (combined_result_set) |*rs| rs.deinit();
-                    switch (ab.code) {
-                        .constraint_violation => {
-                            self.metrics.queries_aborted.inc();
-                            return error.ConstraintViolation;
-                        },
-                        .missing_query => {
-                            self.metrics.queries_aborted.inc();
-                            return error.QueryNotFound;
-                        },
-                        .retry => return .{ .retry = result.seq },
-                        else => {
-                            self.metrics.queries_aborted.inc();
-                            return error.ExecutionError;
-                        },
-                    }
-                },
-            }
-        }
-
-        return .{ .done = .{
-            .rows_affected = total_rows,
-            .result_set = combined_result_set,
-        } };
-    }
-
-    /// Execute a registered DML query (INSERT/UPDATE/DELETE) with the given parameters.
-    /// Routes through the Sequencer → partition log → SqlExecutor.run().
-    // This is the domain boundary — all data past this point is validated.
-    pub fn execute(
-        self: *Gateway,
-        hash: QueryHash,
-        params: []const ColumnValue,
-        nondet: []const ResolvedValue,
-    ) !ExecResult {
-        const rq = self.fold_executors[0].lookupQuery(hash) orelse return error.QueryNotFound;
-        self.metrics.queries_executed.inc();
-
-        // Assign a stable client_seq for this logical operation ONCE, before any retry.
-        self.client_seq += 1;
-        const op_seq = self.client_seq;
-
-        // Encode params to canonical bytes.
-        const params_bytes = try sql_mod.executor_bridge.encodeParams(params, self.alloc);
-        defer self.alloc.free(params_bytes);
-
-        // Resolve nondeterministic functions in the SQL text (NOW(), RANDOM(), UUID()).
-        const resolved = try nondet_mod.resolveNondet(rq.sql_text, &self.nondet_resolver, self.alloc);
-        defer self.alloc.free(resolved);
-        if (resolved.len > 0) self.metrics.nondet_resolved.add(@intCast(resolved.len));
-
-        // Merge caller-supplied nondet with gateway-resolved values.
-        const all_nondet = if (nondet.len > 0) nondet else resolved;
-
-        // On retry, re-run reconnaissance at the seq the executor assigned to the
-        // conflicting entry so hints reflect state as of that point.
-        var hint_seq: Seq = blk: {
-            var max: Seq = 0;
-            for (self.fold_executors) |fe| {
-                const cs = fe.current_seq();
-                if (cs > max) max = cs;
-            }
-            break :blk max;
-        };
-
-        const max_retries: usize = 3;
-        std.debug.assert(max_retries > 0);
-        var intent_buf: std.ArrayList(u8) = .empty;
-        defer intent_buf.deinit(self.alloc);
-        var attempt: usize = 0;
-        while (attempt < max_retries) : (attempt += 1) {
-            if (attempt > 0) self.metrics.recon_retries.inc();
-
-            intent_buf.clearRetainingCapacity();
-            try self.buildTxnIntent(
-                &hash,
-                rq.plan,
-                op_seq,
-                hint_seq,
-                params,
-                params_bytes,
-                all_nondet,
-                &intent_buf,
-            );
-            switch (try self.submitAndDrain(intent_buf.items, op_seq)) {
-                .done => |r| return r,
-                .retry => |conflict_seq| hint_seq = conflict_seq,
-            }
-        }
-        std.debug.assert(attempt == max_retries);
-        return error.ExecutionError;
-    }
-
-    /// Execute a SELECT query and return the result set.
-    /// Reads go directly to storage (no log routing needed for reads).
-    // This is the domain boundary — all data past this point is validated.
-    pub fn querySelect(
-        self: *Gateway,
-        hash: QueryHash,
-        params: []const ColumnValue,
-        nondet: []const ResolvedValue,
-    ) !ResultSet {
-        return self.fold_executors[0].querySelect(hash, params, nondet, self.alloc);
-    }
-
-    /// Read data at a specific sequence number (historical read).
-    // This is the domain boundary — all data past this point is validated.
-    pub fn readAt(
-        self: *Gateway,
-        hash: QueryHash,
-        params: []const ColumnValue,
-        seq: Seq,
-    ) !ResultSet {
-        return self.fold_executors[0].readAt(hash, params, seq, self.alloc);
-    }
-
-    /// Set a human-readable detail string for the last error (table/column context).
-    fn setDetail(self: *Gateway, comptime fmt: []const u8, args: anytype) void {
-        const s = std.fmt.bufPrint(&self.error_detail, fmt, args) catch &self.error_detail;
-        self.error_detail_len = s.len;
-    }
-
-    /// Return the detail string set by the last failing operation, or "" if none.
-    pub fn lastDetail(self: *const Gateway) []const u8 {
-        return self.error_detail[0..self.error_detail_len];
-    }
-
-    /// Apply a DDL statement to the schema and replicate it via Raft.
-    /// Validates and applies locally first so the connection sees errors before committing.
-    pub fn applyDdl(self: *Gateway, sql: []const u8) !void {
-        self.error_detail_len = 0;
-        try self.fold_executors[0].validateDdl(sql);
-        self.client_seq += 1;
-        // Choose payload kind: cluster-level DDL (CREATE/DROP DATABASE) vs db-scoped DDL.
-        const kind: executor_mod.SchemaPayloadKind = if (isClusterDdl(sql)) .cluster else .ddl;
-        var payload_buf: std.ArrayList(u8) = .empty;
-        defer payload_buf.deinit(self.alloc);
-        try executor_mod.encodeSchemaPayload(kind, executor_mod.default_database_id, sql, self.alloc, &payload_buf);
-        // SAFETY: submitBytes writes to pending before awaitCommit is called on the returned handle.
-        var pending: sequencer_mod.PendingSubmit = undefined;
-        const result = try self.sequencer.submitBytes(
-            &pending,
-            payload_buf.items,
-            self.client_id,
-            self.client_seq,
-            .schema_change,
-        ).awaitCommit(self.io);
-        try self.waitAllFoldExecutors(result.seq);
-    }
-
-    /// Returns true for CREATE/DROP DATABASE which are cluster-level operations.
-    fn isClusterDdl(sql: []const u8) bool {
-        const s = std.mem.trimStart(u8, sql, " \t\r\n");
-        if (s.len < 7) return false;
-        // Match "create database" or "drop database" (case-insensitive).
-        if (std.ascii.startsWithIgnoreCase(s, "create")) {
-            const rest = std.mem.trimStart(u8, s[6..], " \t");
-            return std.ascii.startsWithIgnoreCase(rest, "database");
-        }
-        if (std.ascii.startsWithIgnoreCase(s, "drop")) {
-            const rest = std.mem.trimStart(u8, s[4..], " \t");
-            return std.ascii.startsWithIgnoreCase(rest, "database");
-        }
-        return false;
-    }
-
-    /// Get the current committed sequence number.
-    pub fn currentSeq(self: *const Gateway) Seq {
-        return self.sequencer.currentSeq();
-    }
-
-    /// Add a new sequencer node to the Raft group. Only valid on the current leader.
-    /// Note: only the ordering layer is affected — the new node does not automatically
-    /// receive data partition log entries or storage state.
-    pub fn addSequencerNode(self: *Gateway, node_id: sequencer_mod.NodeId, addr: []const u8) !void {
-        std.debug.assert(node_id != 0);
-        std.debug.assert(addr.len > 0);
-        try self.sequencer.addNode(node_id, addr, self.alloc);
-    }
-
-    /// Remove a sequencer node from the Raft group. Only valid on the current leader.
-    pub fn removeSequencerNode(self: *Gateway, node_id: sequencer_mod.NodeId) !void {
-        std.debug.assert(node_id != 0);
-        try self.sequencer.removeNode(node_id, self.alloc);
-    }
-
-    /// Flush all storage to disk.
-    pub fn flushAll(self: *Gateway) !void {
-        try self.partitioned.flushAll();
-    }
-
-    // ---- CDC subscription API (used by the net layer) ----
-
-    /// Create a CDC subscription. Pass null table_filter to receive all tables.
-    pub fn subscribeCdc(
-        self: *Gateway,
-        table_filter: ?u32,
-        from_seq: Seq,
-    ) !*cdc_mod.CdcSubscription {
-        return self.cdc.subscribe(table_filter, from_seq);
-    }
-
-    /// Remove a CDC subscription by its ID.
-    pub fn unsubscribeCdc(self: *Gateway, id: u64) void {
-        self.cdc.unsubscribe(id);
-    }
-
-    /// Look up an active CDC subscription by ID (returns null if not found).
-    pub fn getCdcSub(self: *Gateway, id: u64) ?*cdc_mod.CdcSubscription {
-        return self.cdc.find_by_id(id);
-    }
-
-    /// Resolve a table name to its numeric ID via the schema registry.
-    /// Returns null if the table is not found.
-    pub fn resolveTableName(self: *Gateway, name: []const u8) ?u32 {
-        return self.fold_executors[0].resolveTableName(name);
-    }
-
-    /// Returns true if a table with this numeric ID exists in the schema.
-    pub fn tableIdExists(self: *Gateway, id: u32) bool {
-        return self.fold_executors[0].tableIdExists(id);
     }
 };
+
+/// A single KV operation request, with metadata for encoding the response.
+pub const Request = struct {
+    kind: frame.Kind,
+    stream_id: u64,
+    get_req: ?messages.GetRequest = null,
+    set_req: ?messages.SetRequest = null,
+    delete_req: ?messages.DeleteRequest = null,
+    range_req: ?messages.RangeRequest = null,
+    batch_ops: ?[]messages.BatchOp = null,
+    /// Payload memory to free after processing.
+    payload_buf: ?[]u8 = null,
+    /// Trace extension bytes (present when frame flags.trace = true).
+    trace_id: ?[frame.TRACE_EXT_SIZE]u8 = null,
+
+    pub fn deinit(self: Request, alloc: std.mem.Allocator) void {
+        if (self.get_req) |*r| messages.freeGetRequest(r.*, alloc);
+        if (self.set_req) |*r| messages.freeSetRequest(r.*, alloc);
+        if (self.delete_req) |*r| messages.freeDeleteRequest(r.*, alloc);
+        if (self.range_req) |*r| messages.freeRangeRequest(r.*, alloc);
+        if (self.batch_ops) |ops| messages.freeBatch(ops, alloc);
+        if (self.payload_buf) |buf| alloc.free(buf);
+    }
+};
+
+/// Decode a frame payload into a Request. Caller must call deinit().
+pub fn decodeRequest(kind: frame.Kind, stream_id: u64, payload: []const u8, alloc: std.mem.Allocator) !Request {
+    var cur = codec.Cursor{ .data = payload };
+    return switch (kind) {
+        .get => .{
+            .kind = kind,
+            .stream_id = stream_id,
+            .get_req = try messages.decodeGetRequest(&cur, alloc),
+        },
+        .set => .{
+            .kind = kind,
+            .stream_id = stream_id,
+            .set_req = try messages.decodeSetRequest(&cur, alloc),
+        },
+        .delete => .{
+            .kind = kind,
+            .stream_id = stream_id,
+            .delete_req = try messages.decodeDeleteRequest(&cur, alloc),
+        },
+        .range => .{
+            .kind = kind,
+            .stream_id = stream_id,
+            .range_req = try messages.decodeRangeRequest(&cur, alloc),
+        },
+        .batch => .{
+            .kind = kind,
+            .stream_id = stream_id,
+            .batch_ops = try messages.decodeBatch(&cur, alloc),
+        },
+        else => return error.ProtocolError,
+    };
+}
+
+/// Encode an error frame payload and send it back to the client.
+pub fn sendError(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
+    code: messages.ErrorCode,
+    severity: messages.Severity,
+    message: []const u8,
+    detail: []const u8,
+) !void {
+    var payload: std.ArrayListUnmanaged(u8) = .empty;
+    defer payload.deinit(alloc);
+    try messages.encodeError(&payload, alloc, code, severity, message, detail);
+    try frame.sendFrameList(writer, stream_id, .err, frame.Flags.final_only, null, payload);
+}
+
+/// Encode a response frame payload and send it back.
+fn sendResponse(writer: anytype, stream_id: u64, kind: frame.Kind, payload: []const u8) !void {
+    try frame.sendFrame(writer, stream_id, kind, frame.Flags.final_only, null, payload);
+}
+
+// ─── KV operation handlers ───
+
+/// Handle GET request.
+pub fn handleGet(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
+    req: messages.GetRequest,
+    storage: *Storage,
+) !void {
+    errdefer sendError(writer, alloc, stream_id, .server_error, .@"error", "get failed", "") catch {};
+    const result = try storage.get(default_table_id, req.key, req.at_seq);
+    defer if (result) |row| row.deinit(alloc);
+    const row_value: ?[]const u8 = if (result) |row| blk: {
+        if (row.is_tombstone) break :blk null;
+        if (row.value.len == 0) break :blk null;
+        break :blk row.value;
+    } else null;
+    const row_seq: u64 = if (result) |row| row.seq else 0;
+    const res = messages.GetResponse{ .value = row_value, .committed_seq = row_seq };
+
+    var payload: std.ArrayListUnmanaged(u8) = .empty;
+    defer payload.deinit(alloc);
+    try messages.encodeGetResponse(&payload, alloc, res);
+    try sendResponse(writer, stream_id, .response, payload.items);
+}
+
+/// Handle SET request — submits through Sequencer for global ordering.
+pub fn handleSet(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
+    req: messages.SetRequest,
+    storage: *Storage,
+    sequencer: *Sequencer,
+) !void {
+    errdefer sendError(writer, alloc, stream_id, .server_error, .@"error", "set failed", "") catch {};
+
+    // CAS check
+    if (req.expected_seq > 0) {
+        const current = try storage.get(default_table_id, req.key, std.math.maxInt(u64));
+        defer if (current) |row| row.deinit(alloc);
+        if (current) |row| {
+            if (row.seq != req.expected_seq) {
+                const res = messages.MutateResponse{ .committed_seq = row.seq, .cas_failed = row.seq };
+                var payload: std.ArrayListUnmanaged(u8) = .empty;
+                defer payload.deinit(alloc);
+                try messages.encodeMutateResponse(&payload, alloc, res);
+                try sendResponse(writer, stream_id, .response, payload.items);
+                return;
+            }
+        } else {
+            // Key not found but expected_seq > 0 → CAS fail
+            const res = messages.MutateResponse{ .committed_seq = 0, .cas_failed = null };
+            var payload: std.ArrayListUnmanaged(u8) = .empty;
+            defer payload.deinit(alloc);
+            try messages.encodeMutateResponse(&payload, alloc, res);
+            try sendResponse(writer, stream_id, .response, payload.items);
+            return;
+        }
+    }
+
+    // Build intent and submit through sequencer
+    const ops = [_]KvOp{ .{ .set = .{ .key = req.key, .value = req.value } } };
+    const seq = sequencer.currentSeq() + 1;
+    const payload_bytes = try TxnIntent.init(&ops, &.{}, &.{1}, 1, seq).serialize_to(alloc);
+    defer alloc.free(payload_bytes);
+
+    var pending: PendingSubmit = undefined;
+    const handle = sequencer.submitBytes(&pending, payload_bytes, 0, seq, .txn_intent);
+    const result = try handle.awaitCommit(null);
+
+    // Apply directly to storage for immediate read-after-write consistency.
+    const mutations = [_]Mutation{
+        .{ .kind = .update, .table_id = default_table_id, .key = req.key, .value = req.value },
+    };
+    try storage.apply(&mutations, result.seq);
+
+    // Send response
+    const res = messages.MutateResponse{ .committed_seq = result.seq, .cas_failed = null };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(alloc);
+    try messages.encodeMutateResponse(&out, alloc, res);
+    try sendResponse(writer, stream_id, .response, out.items);
+}
+
+/// Handle DELETE request — submits through Sequencer for global ordering.
+pub fn handleDelete(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
+    req: messages.DeleteRequest,
+    storage: *Storage,
+    sequencer: *Sequencer,
+) !void {
+    errdefer sendError(writer, alloc, stream_id, .server_error, .@"error", "delete failed", "") catch {};
+
+    const ops = [_]KvOp{ .{ .delete = .{ .key = req.key } } };
+    const seq = sequencer.currentSeq() + 1;
+    const payload_bytes = try TxnIntent.init(&ops, &.{}, &.{1}, 1, seq).serialize_to(alloc);
+    defer alloc.free(payload_bytes);
+
+    var pending: PendingSubmit = undefined;
+    const handle = sequencer.submitBytes(&pending, payload_bytes, 0, seq, .txn_intent);
+    const result = try handle.awaitCommit(null);
+
+    // Apply directly to storage for immediate read-after-write consistency.
+    const mutations = [_]Mutation{
+        .{ .kind = .delete, .table_id = default_table_id, .key = req.key, .value = null },
+    };
+    try storage.apply(&mutations, result.seq);
+
+    const res = messages.MutateResponse{ .committed_seq = result.seq, .cas_failed = null };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(alloc);
+    try messages.encodeMutateResponse(&out, alloc, res);
+    try sendResponse(writer, stream_id, .response, out.items);
+}
+
+/// Handle RANGE request.
+pub fn handleRange(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
+    req: messages.RangeRequest,
+    storage: *Storage,
+    sequencer: *Sequencer,
+) !void {
+    errdefer sendError(writer, alloc, stream_id, .server_error, .@"error", "range failed", "") catch {};
+
+    const range = KeyRange{ .start = req.start, .end = req.end, .start_inclusive = true };
+    var iter = try storage.scan(default_table_id, range, std.math.maxInt(u64), alloc);
+    defer iter.deinit();
+
+    var entries: std.ArrayList(messages.RangeEntry) = .empty;
+    defer {
+        for (entries.items) |e| {
+            alloc.free(e.key);
+            alloc.free(e.value);
+        }
+        if (entries.capacity > 0) entries.deinit(alloc);
+    }
+
+    const limit: usize = if (req.limit > 0) @intCast(req.limit) else std.math.maxInt(usize);
+    while (entries.items.len < limit) {
+        const row = try iter.next() orelse break;
+        var entry: messages.RangeEntry = undefined;
+        entry.key = try alloc.dupe(u8, row.key);
+        if (row.is_tombstone) {
+            entry.value = try alloc.dupe(u8, &.{});
+        } else {
+            entry.value = try alloc.dupe(u8, row.value);
+        }
+        try entries.append(alloc, entry);
+    }
+
+    const res = messages.RangeResponse{ .entries = entries.items, .committed_seq = sequencer.currentSeq() };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(alloc);
+    try messages.encodeRangeResponse(&out, alloc, res);
+    try sendResponse(writer, stream_id, .response, out.items);
+}
+
+/// Handle BATCH request — mutations go through Sequencer.
+pub fn handleBatch(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
+    ops: []messages.BatchOp,
+    storage: *Storage,
+    sequencer: *Sequencer,
+) !void {
+    errdefer sendError(writer, alloc, stream_id, .server_error, .@"error", "batch failed", "") catch {};
+
+    var results: std.ArrayList(messages.BatchResult) = .empty;
+    defer {
+        for (results.items) |r| r.deinit(alloc);
+        if (results.capacity > 0) results.deinit(alloc);
+    }
+
+    for (ops) |op| {
+        switch (op) {
+            .get => |req| {
+                const result = try storage.get(default_table_id, req.key, req.at_seq);
+                defer if (result) |row| row.deinit(alloc);
+                const value: ?[]const u8 = if (result) |row| blk: {
+                    if (row.is_tombstone) break :blk null;
+                    break :blk row.value;
+                } else null;
+                const row_seq: u64 = if (result) |row| row.seq else 0;
+                const res = messages.GetResponse{ .value = value, .committed_seq = row_seq };
+                try results.append(alloc, .{ .get = res });
+            },
+            .set => |req| {
+                const ops2 = [_]KvOp{ .{ .set = .{ .key = req.key, .value = req.value } } };
+                const seq = sequencer.currentSeq() + 1;
+                const payload_bytes = try TxnIntent.init(&ops2, &.{}, &.{1}, 1, seq).serialize_to(alloc);
+                defer alloc.free(payload_bytes);
+                var pending: PendingSubmit = undefined;
+                const handle = sequencer.submitBytes(&pending, payload_bytes, 0, seq, .txn_intent);
+                const result = try handle.awaitCommit(null);
+                const mutations = [_]Mutation{
+                    .{ .kind = .update, .table_id = default_table_id, .key = req.key, .value = req.value },
+                };
+                try storage.apply(&mutations, result.seq);
+                try results.append(alloc, .{ .mutate = .{ .committed_seq = result.seq, .cas_failed = null } });
+            },
+            .delete => |req| {
+                const ops2 = [_]KvOp{ .{ .delete = .{ .key = req.key } } };
+                const seq = sequencer.currentSeq() + 1;
+                const payload_bytes = try TxnIntent.init(&ops2, &.{}, &.{1}, 1, seq).serialize_to(alloc);
+                defer alloc.free(payload_bytes);
+                var pending: PendingSubmit = undefined;
+                const handle = sequencer.submitBytes(&pending, payload_bytes, 0, seq, .txn_intent);
+                const result = try handle.awaitCommit(null);
+                const mutations = [_]Mutation{
+                    .{ .kind = .delete, .table_id = default_table_id, .key = req.key, .value = null },
+                };
+                try storage.apply(&mutations, result.seq);
+                try results.append(alloc, .{ .mutate = .{ .committed_seq = result.seq, .cas_failed = null } });
+            },
+            .range => |req| {
+                const range = KeyRange{ .start = req.start, .end = req.end, .start_inclusive = true };
+                var iter = try storage.scan(default_table_id, range, std.math.maxInt(u64), alloc);
+                defer iter.deinit();
+                var entries: std.ArrayList(messages.RangeEntry) = .empty;
+                defer {
+                    for (entries.items) |e| {
+                        alloc.free(e.key);
+                        alloc.free(e.value);
+                    }
+                    if (entries.capacity > 0) entries.deinit(alloc);
+                }
+                const limit: usize = if (req.limit > 0) @intCast(req.limit) else std.math.maxInt(usize);
+                while (entries.items.len < limit) {
+                    const row = try iter.next() orelse break;
+                    var entry: messages.RangeEntry = undefined;
+                    entry.key = try alloc.dupe(u8, row.key);
+                    if (row.is_tombstone) {
+                        entry.value = try alloc.dupe(u8, &.{});
+                    } else {
+                        entry.value = try alloc.dupe(u8, row.value);
+                    }
+                    try entries.append(alloc, entry);
+                }
+                try results.append(alloc, .{ .range = .{ .entries = entries.items, .committed_seq = sequencer.currentSeq() } });
+            },
+        }
+    }
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(alloc);
+    try messages.encodeBatchResponse(&out, alloc, results.items);
+    try sendResponse(writer, stream_id, .response, out.items);
+}
+
+// ─── Connection handler ───
+
+/// Handle the Hello/Auth handshake on stream 0.
+/// Send Hello frame to client on connection.
+pub fn handleHello(writer: anytype, alloc: std.mem.Allocator) !void {
+    var hello: std.ArrayListUnmanaged(u8) = .empty;
+    defer hello.deinit(alloc);
+    try messages.encodeHello(&hello, alloc, .{
+        .server_version = "0.1.0",
+        .auth_methods = "none",
+        .max_frame_payload_size = frame.DEFAULT_MAX_PAYLOAD,
+    });
+    try frame.sendFrame(writer, 0, .hello, frame.Flags.final_only, null, hello.items);
+}
+
+/// Accept client .auth → send .auth_ok.
+pub fn handleAuthResponse(writer: anytype, alloc: std.mem.Allocator,
+    payload: []const u8,
+) !void {
+    var cur = codec.Cursor{ .data = payload };
+    const auth = try messages.decodeAuth(&cur, alloc);
+    defer messages.freeAuth(auth, alloc);
+
+    // Accept no-auth connections
+    var ok: std.ArrayListUnmanaged(u8) = .empty;
+    defer ok.deinit(alloc);
+    try frame.sendFrame(writer, 0, .auth_ok, frame.Flags.final_only, null, ok.items);
+}
+
+/// Handle Ping → Pong.
+pub fn handlePing(writer: anytype, alloc: std.mem.Allocator, payload: []const u8) !void {
+    var cur = codec.Cursor{ .data = payload };
+    const ping = try messages.decodePing(&cur);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(alloc);
+    try messages.encodePong(&out, alloc, .{
+        .client_wall_micros = ping.client_wall_micros,
+        .server_wall_micros = getMicroTimestamp(),
+    });
+    try frame.sendFrame(writer, 0, .pong, frame.Flags.final_only, null, out.items);
+}
+
+/// Portable microsecond timestamp (Zig 0.16 has no std.time.microTimestamp).
+fn getMicroTimestamp() u64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1_000_000 + @as(u64, @intCast(@as(i32, @intCast(ts.nsec)))) / 1_000;
+}

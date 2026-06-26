@@ -2,191 +2,208 @@ const std = @import("std");
 const testing = std.testing;
 const storage = @import("storage.zig");
 
-const TableSchema = storage.TableSchema;
-const ColumnValue = storage.ColumnValue;
-const BlockWriter = storage.BlockWriter;
-const BlockReader = storage.BlockReader;
+const Seq = storage.Seq;
+const HEADER_SIZE = storage.HEADER_SIZE;
+const FOOTER_SIZE = storage.FOOTER_SIZE;
+const MAX_ROWS_PER_BLOCK = storage.MAX_ROWS_PER_BLOCK;
 
-fn makeSchema() TableSchema {
-    return .{
-        .table_id = 1,
-        .columns = &.{
-            .{ .col_type = .string, .nullable = false },
-            .{ .col_type = .int64, .nullable = false },
-        },
+pub const Row = struct { key: []const u8, seq: Seq, value: ?[]const u8 };
+
+fn writeBlock(alloc: std.mem.Allocator, rows: []const Row) ![]u8 {
+    var writer = storage.BlockWriter.init(alloc);
+    errdefer writer.deinit(alloc);
+    for (rows) |r| {
+        try writer.append(alloc, r.key, r.seq, r.value);
+    }
+    const result = try writer.flush(alloc);
+    writer.deinit(alloc);
+    return result;
+}
+
+test "block: single row round-trip" {
+    const alloc = testing.allocator;
+    const data = try writeBlock(alloc, &.{ .{ .key = "hello", .seq = 42, .value = "world" } });
+    defer alloc.free(data);
+    const reader = try storage.BlockReader.init(data);
+    try testing.expectEqual(@as(u32, 1), reader.row_count);
+
+    const kv = try reader.readKey(0);
+    try testing.expectEqualSlices(u8, "hello", kv.key);
+    try testing.expectEqual(@as(u64, 42), kv.seq);
+    try testing.expect(!kv.is_tombstone);
+
+    const val = try reader.readValue(0, alloc);
+    defer alloc.free(val);
+    try testing.expectEqualSlices(u8, "world", val);
+}
+
+test "block: multiple rows round-trip" {
+    const alloc = testing.allocator;
+    const rows = [_]Row {
+        .{ .key = "a", .seq = 1, .value = "1" },
+        .{ .key = "b", .seq = 2, .value = "2" },
+        .{ .key = "c", .seq = 3, .value = "3" },
+        .{ .key = "d", .seq = 4, .value = "4" },
     };
-}
-
-test "Block: write and read back rows" {
-    const alloc = testing.allocator;
-    const schema = makeSchema();
-
-    var writer = try BlockWriter.init(schema);
-    defer writer.deinit(alloc);
-
-    const vals0 = [_]ColumnValue{ .{ .string = "alice" }, .{ .int64 = 100 } };
-    const vals1 = [_]ColumnValue{ .{ .string = "bob" }, .{ .int64 = 200 } };
-    const vals2 = [_]ColumnValue{ .{ .string = "carol" }, .{ .int64 = 300 } };
-
-    try writer.append(alloc, "key0", 1, &vals0);
-    try writer.append(alloc, "key1", 2, &vals1);
-    try writer.append(alloc, "key2", 3, &vals2);
-
-    const data = try writer.flush(alloc);
+    const data = try writeBlock(alloc, &rows);
     defer alloc.free(data);
-
-    const reader = try BlockReader.init(data, schema);
-    try testing.expectEqual(@as(u32, 3), reader.row_count);
-
-    // Read row 0
-    {
-        const kv = try reader.readKey(0);
-        try testing.expectEqualSlices(u8, "key0", kv.key);
-        try testing.expectEqual(@as(u64, 1), kv.seq);
-        try testing.expect(!kv.is_tombstone);
-        const row = try reader.readRow(0, alloc);
-        defer {
-            var r = row;
-            r.deinit(alloc);
-        }
-        try testing.expectEqualSlices(u8, "key0", row.key);
-        try testing.expectEqual(@as(i64, 100), row.values[1].int64);
-    }
-
-    // Read row 2
-    {
-        const row = try reader.readRow(2, alloc);
-        defer {
-            var r = row;
-            r.deinit(alloc);
-        }
-        try testing.expectEqualSlices(u8, "key2", row.key);
-        try testing.expectEqual(@as(i64, 300), row.values[1].int64);
-    }
-}
-
-test "Block: binary search finds key" {
-    const alloc = testing.allocator;
-    const schema = makeSchema();
-
-    var writer = try BlockWriter.init(schema);
-    defer writer.deinit(alloc);
-
-    const v = [_]ColumnValue{ .{ .string = "x" }, .{ .int64 = 0 } };
-    try writer.append(alloc, "aaa", 1, &v);
-    try writer.append(alloc, "bbb", 1, &v);
-    try writer.append(alloc, "ccc", 1, &v);
-    try writer.append(alloc, "ddd", 1, &v);
-
-    const data = try writer.flush(alloc);
-    defer alloc.free(data);
-    const reader = try BlockReader.init(data, schema);
-
-    try testing.expectEqual(@as(?u32, 0), try reader.findKey("aaa"));
-    try testing.expectEqual(@as(?u32, 2), try reader.findKey("ccc"));
-    try testing.expectEqual(@as(?u32, null), try reader.findKey("zzz"));
-}
-
-test "Block: mixed column types (string + bool)" {
-    const alloc = testing.allocator;
-    const schema: storage.TableSchema = .{
-        .table_id = 1,
-        .columns = &.{
-            .{ .col_type = .string, .nullable = false },
-            .{ .col_type = .bool_t, .nullable = false },
-        },
-    };
-
-    var writer = try BlockWriter.init(schema);
-    defer writer.deinit(alloc);
-
-    const v0 = [_]ColumnValue{ .{ .string = "hello" }, .{ .bool_t = true } };
-    const v1 = [_]ColumnValue{ .{ .string = "world" }, .{ .bool_t = false } };
-    const v2 = [_]ColumnValue{ .{ .string = "zig" }, .{ .bool_t = true } };
-    try writer.append(alloc, "k0", 1, &v0);
-    try writer.append(alloc, "k1", 2, &v1);
-    try writer.append(alloc, "k2", 3, &v2);
-
-    const data = try writer.flush(alloc);
-    defer alloc.free(data);
-    const reader = try BlockReader.init(data, schema);
-    try testing.expectEqual(@as(u32, 3), reader.row_count);
-
-    const row1 = try reader.readRow(1, alloc);
-    defer {
-        var r = row1;
-        r.deinit(alloc);
-    }
-    try testing.expectEqualSlices(u8, "k1", row1.key);
-    try testing.expectEqualSlices(u8, "world", row1.values[0].string);
-    try testing.expectEqual(false, row1.values[1].bool_t);
-}
-
-test "Block: 100 rows round-trip" {
-    const alloc = testing.allocator;
-    const schema = makeSchema();
-
-    var writer = try BlockWriter.init(schema);
-    defer writer.deinit(alloc);
-
-    const base_val = [_]ColumnValue{ .{ .string = "x" }, .{ .int64 = 0 } };
+    const reader = try storage.BlockReader.init(data);
+    try testing.expectEqual(@as(u32, 4), reader.row_count);
     var i: u32 = 0;
-    while (i < 100) : (i += 1) {
-        var key_buf: [8]u8 = undefined;
-        const key = try std.fmt.bufPrint(&key_buf, "k{d:04}", .{i});
-        var vals = base_val;
-        vals[1] = .{ .int64 = @intCast(i) };
-        try writer.append(alloc, key, i + 1, &vals);
+    while (i < reader.row_count) : (i += 1) {
+        const kv = try reader.readKey(i);
+        try testing.expectEqualSlices(u8, rows[i].key, kv.key);
+        try testing.expectEqual(rows[i].seq, kv.seq);
+        try testing.expect(!kv.is_tombstone);
     }
-
-    const data = try writer.flush(alloc);
-    defer alloc.free(data);
-    const reader = try BlockReader.init(data, schema);
-    try testing.expectEqual(@as(u32, 100), reader.row_count);
-
-    // Spot-check first, middle, last
-    const r0 = try reader.readRow(0, alloc);
-    defer {
-        var r = r0;
-        r.deinit(alloc);
-    }
-    try testing.expectEqual(@as(i64, 0), r0.values[1].int64);
-
-    const r50 = try reader.readRow(50, alloc);
-    defer {
-        var r = r50;
-        r.deinit(alloc);
-    }
-    try testing.expectEqual(@as(i64, 50), r50.values[1].int64);
-
-    const r99 = try reader.readRow(99, alloc);
-    defer {
-        var r = r99;
-        r.deinit(alloc);
-    }
-    try testing.expectEqual(@as(i64, 99), r99.values[1].int64);
 }
 
-test "Block: tombstone row" {
+test "block: tombstone row" {
     const alloc = testing.allocator;
-    const schema = makeSchema();
-
-    var writer = try BlockWriter.init(schema);
-    defer writer.deinit(alloc);
-
-    const v = [_]ColumnValue{ .{ .string = "x" }, .{ .int64 = 1 } };
-    try writer.append(alloc, "key0", 10, &v);
-    try writer.append(alloc, "key1", 11, null); // tombstone
-    try writer.append(alloc, "key2", 12, &v);
-
-    const data = try writer.flush(alloc);
+    const data = try writeBlock(alloc, &.{
+        .{ .key = "alive", .seq = 1, .value = "data" },
+        .{ .key = "dead", .seq = 2, .value = null },
+        .{ .key = "also_alive", .seq = 3, .value = "more" },
+    });
     defer alloc.free(data);
-    const reader = try BlockReader.init(data, schema);
-
+    const reader = try storage.BlockReader.init(data);
     const kv0 = try reader.readKey(0);
     try testing.expect(!kv0.is_tombstone);
     const kv1 = try reader.readKey(1);
     try testing.expect(kv1.is_tombstone);
     const kv2 = try reader.readKey(2);
     try testing.expect(!kv2.is_tombstone);
+}
+
+test "block: all tombstones" {
+    const alloc = testing.allocator;
+    const data = try writeBlock(alloc, &.{
+        .{ .key = "a", .seq = 1, .value = null },
+        .{ .key = "b", .seq = 2, .value = null },
+    });
+    defer alloc.free(data);
+    const reader = try storage.BlockReader.init(data);
+    try testing.expectEqual(@as(u32, 2), reader.row_count);
+    var i: u32 = 0;
+    while (i < reader.row_count) : (i += 1) {
+        const kv = try reader.readKey(i);
+        try testing.expect(kv.is_tombstone);
+    }
+}
+
+test "block: findKey exact match" {
+    const alloc = testing.allocator;
+    const data = try writeBlock(alloc, &.{
+        .{ .key = "apple", .seq = 1, .value = "1" },
+        .{ .key = "banana", .seq = 2, .value = "2" },
+        .{ .key = "cherry", .seq = 3, .value = "3" },
+    });
+    defer alloc.free(data);
+    const reader = try storage.BlockReader.init(data);
+    try testing.expectEqual(@as(?u32, 0), try reader.findKey("apple"));
+    try testing.expectEqual(@as(?u32, 1), try reader.findKey("banana"));
+    try testing.expectEqual(@as(?u32, 2), try reader.findKey("cherry"));
+}
+
+test "block: findKey not found" {
+    const alloc = testing.allocator;
+    const data = try writeBlock(alloc, &.{
+        .{ .key = "apple", .seq = 1, .value = "1" },
+        .{ .key = "cherry", .seq = 3, .value = "3" },
+    });
+    defer alloc.free(data);
+    const reader = try storage.BlockReader.init(data);
+    try testing.expectEqual(@as(?u32, null), try reader.findKey("banana"));
+    try testing.expectEqual(@as(?u32, null), try reader.findKey("zebra"));
+}
+
+test "block: lowerBound exact" {
+    const alloc = testing.allocator;
+    const data = try writeBlock(alloc, &.{
+        .{ .key = "a", .seq = 1, .value = "1" },
+        .{ .key = "c", .seq = 2, .value = "2" },
+        .{ .key = "e", .seq = 3, .value = "3" },
+    });
+    defer alloc.free(data);
+    const reader = try storage.BlockReader.init(data);
+    try testing.expectEqual(@as(u32, 0), try reader.lowerBound("a"));
+    try testing.expectEqual(@as(u32, 1), try reader.lowerBound("c"));
+    try testing.expectEqual(@as(u32, 2), try reader.lowerBound("e"));
+}
+
+test "block: lowerBound between keys" {
+    const alloc = testing.allocator;
+    const data = try writeBlock(alloc, &.{
+        .{ .key = "a", .seq = 1, .value = "1" },
+        .{ .key = "c", .seq = 2, .value = "2" },
+        .{ .key = "e", .seq = 3, .value = "3" },
+    });
+    defer alloc.free(data);
+    const reader = try storage.BlockReader.init(data);
+    try testing.expectEqual(@as(u32, 1), try reader.lowerBound("b"));
+    try testing.expectEqual(@as(u32, 2), try reader.lowerBound("d"));
+}
+
+test "block: lowerBound before/after" {
+    const alloc = testing.allocator;
+    const data = try writeBlock(alloc, &.{
+        .{ .key = "c", .seq = 1, .value = "1" },
+        .{ .key = "e", .seq = 2, .value = "2" },
+    });
+    defer alloc.free(data);
+    const reader = try storage.BlockReader.init(data);
+    try testing.expectEqual(@as(u32, 0), try reader.lowerBound("a"));
+    try testing.expectEqual(@as(u32, 2), try reader.lowerBound("z"));
+}
+
+test "block: isEmpty initially" {
+    const alloc = testing.allocator;
+    var writer = storage.BlockWriter.init(alloc);
+    defer writer.deinit(alloc);
+    try testing.expect(writer.isEmpty());
+    try testing.expect(!writer.isFull());
+}
+
+test "block: isFull after many rows" {
+    const alloc = testing.allocator;
+    var writer = storage.BlockWriter.init(alloc);
+    defer writer.deinit(alloc);
+    var i: usize = 0;
+    while (i < MAX_ROWS_PER_BLOCK) : (i += 1) {
+        try writer.append(alloc, "k", @as(Seq, @intCast(i)), "v");
+    }
+    try testing.expect(writer.isFull());
+}
+
+test "block: CRC mismatch" {
+    const alloc = testing.allocator;
+    const data = try writeBlock(alloc, &.{ .{ .key = "key", .seq = 1, .value = "value" } });
+    defer alloc.free(data);
+    var corrupted = try alloc.dupe(u8, data);
+    defer alloc.free(corrupted);
+    corrupted[10] ^= 0xFF;
+    const err = storage.BlockReader.init(corrupted);
+    try testing.expectError(error.CrcMismatch, err);
+}
+
+test "block: invalid magic" {
+    var buf: [HEADER_SIZE + FOOTER_SIZE]u8 = undefined;
+    @memcpy(buf[0..4], &[_]u8{ 'B', 'A', 'D', '!' });
+    const err = storage.BlockReader.init(&buf);
+    try testing.expectError(error.InvalidMagic, err);
+}
+
+test "block: block too small" {
+    var buf: [20]u8 = undefined;
+    const err = storage.BlockReader.init(&buf);
+    try testing.expectError(error.BlockTooSmall, err);
+}
+
+test "block: out-of-bounds" {
+    const alloc = testing.allocator;
+    const data = try writeBlock(alloc, &.{ .{ .key = "only", .seq = 1, .value = "row" } });
+    defer alloc.free(data);
+    const reader = try storage.BlockReader.init(data);
+    try testing.expectError(error.OutOfBounds, reader.readKey(1));
+    try testing.expectError(error.OutOfBounds, reader.readRow(1, alloc));
 }

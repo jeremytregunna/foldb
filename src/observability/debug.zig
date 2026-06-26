@@ -46,13 +46,11 @@ pub const EntryKindTag = enum(u8) {
 };
 
 pub const TxnSummary = struct {
-    query_hash: [32]u8,
     client_id: u64,
     client_seq: u64,
-    params_len: u32,
     read_partition_count: u32,
     write_partition_count: u32,
-    nondet_count: u32,
+    op_count: u32,
 
     pub fn deinit(self: *TxnSummary) void {
         _ = self;
@@ -67,15 +65,12 @@ pub const TxnSummary = struct {
         _ = fmt;
         _ = options;
         try writer.print(
-            "TxnSummary{{ client={d} seq={d} params_len={d} r_parts={d} w_parts={d} nondet={d} hash={} }}",
+            "TxnSummary{{ client={d} seq={d} ops={d} r_parts={d} w_parts={d} }}",
             .{
                 self.client_id,
                 self.client_seq,
-                self.params_len,
                 self.read_partition_count,
                 self.write_partition_count,
-                self.nondet_count,
-                std.fmt.fmtSliceHexLower(&self.query_hash),
             },
         );
     }
@@ -146,33 +141,27 @@ pub fn describeSeq(
 /// Decode just the header fields of a TxnIntent payload without full deserialization.
 fn decodeTxnSummary(payload: []const u8) ?TxnSummary {
     // TxnIntent header layout (little-endian):
-    //   query_hash(32) + client_id(8) + client_seq(8) +
-    //   read_count(4) + write_count(4) + params_len(4) + nondet_count(4) = 64 bytes.
-    const HEADER: u32 = 64;
+    //   client_id(8) + client_seq(8) + recon_seq(8) +
+    //   read_count(4) + write_count(4) + op_count(4) = 36 bytes.
+    const HEADER: u32 = 36;
     comptime {
-        assert(HEADER == 32 + 8 + 8 + 4 + 4 + 4 + 4);
+        assert(HEADER == 8 + 8 + 8 + 4 + 4 + 4);
     }
 
     if (payload.len < HEADER) return null;
     assert(payload.len >= HEADER); // paired: guaranteed by the early return above
 
-    var query_hash: [32]u8 = undefined;
-    @memcpy(&query_hash, payload[0..32]);
-    const client_id = std.mem.readInt(u64, payload[32..40], .little);
-    const client_seq = std.mem.readInt(u64, payload[40..48], .little);
-    const read_count = std.mem.readInt(u32, payload[48..52], .little);
-    const write_count = std.mem.readInt(u32, payload[52..56], .little);
-    const params_len = std.mem.readInt(u32, payload[56..60], .little);
-    const nondet_count = std.mem.readInt(u32, payload[60..64], .little);
+    const client_id = std.mem.readInt(u64, payload[0..8], .little);
+    const client_seq = std.mem.readInt(u64, payload[8..16], .little);
+    const read_count = std.mem.readInt(u32, payload[24..28], .little);
+    const write_count = std.mem.readInt(u32, payload[28..32], .little);
+    _ = std.mem.readInt(u32, payload[16..24], .little); // recon_seq
 
     return TxnSummary{
-        .query_hash = query_hash,
         .client_id = client_id,
         .client_seq = client_seq,
-        .params_len = params_len,
         .read_partition_count = read_count,
         .write_partition_count = write_count,
-        .nondet_count = nondet_count,
     };
 }
 
@@ -181,18 +170,18 @@ fn decodeTxnSummary(payload: []const u8) ?TxnSummary {
 // ---------------------------------------------------------------------------
 
 test "decodeTxnSummary: valid header" {
-    var payload = [_]u8{0} ** 64;
+    var payload = [_]u8{0} ** 36;
     // client_id = 7
-    std.mem.writeInt(u64, payload[32..40], 7, .little);
+    std.mem.writeInt(u64, payload[0..8], 7, .little);
     // client_seq = 42
-    std.mem.writeInt(u64, payload[40..48], 42, .little);
+    std.mem.writeInt(u64, payload[8..16], 42, .little);
     // params_len = 100
-    std.mem.writeInt(u32, payload[56..60], 100, .little);
+    std.mem.writeInt(u32, payload[32..36], 100, .little);
 
     const summary = decodeTxnSummary(&payload) orelse return error.NullSummary;
     try std.testing.expectEqual(@as(u64, 7), summary.client_id);
     try std.testing.expectEqual(@as(u64, 42), summary.client_seq);
-    try std.testing.expectEqual(@as(u32, 100), summary.params_len);
+    try std.testing.expectEqual(@as(u32, 100), summary.op_count);
 }
 
 test "decodeTxnSummary: too short returns null" {

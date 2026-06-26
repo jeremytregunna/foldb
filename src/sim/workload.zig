@@ -1,26 +1,19 @@
-/// Seeded SQL workload generator for deterministic simulation tests.
+/// Seeded KV workload generator for deterministic simulation tests.
 ///
-/// Produces a reproducible sequence of typed operations against a single table.
-/// The caller registers SQL templates once and drives ops through the gateway.
+/// Produces a reproducible sequence of typed KV operations.
+/// The caller registers KV ops.
 /// Same seed → same op sequence → same final state.
 const std = @import("std");
 const SimScheduler = @import("scheduler.zig").SimScheduler;
 
-pub const TABLE_DDL =
-    "CREATE TABLE sim_kv (id INT64 NOT NULL, value INT64 NOT NULL, PRIMARY KEY (id))";
 
-pub const INSERT_SQL = "INSERT INTO sim_kv (id, value) VALUES ($1, $2)";
-pub const UPDATE_SQL = "UPDATE sim_kv SET value = $2 WHERE id = $1";
-pub const DELETE_SQL = "DELETE FROM sim_kv WHERE id = $1";
-pub const SELECT_SQL = "SELECT id, value FROM sim_kv WHERE id = $1";
-pub const SCAN_SQL = "SELECT id, value FROM sim_kv";
 
-pub const OpKind = enum { insert, update, delete, select };
+pub const OpKind = enum { insert, update, delete, get };
 
 pub const Op = struct {
     kind: OpKind,
     id: i64,
-    value: i64, // used by insert and update; ignored for delete/select
+    value: i64, // used by insert and update; ignored for delete/get
 };
 
 pub const Workload = struct {
@@ -58,7 +51,7 @@ pub fn generate(sched: *SimScheduler, n_ops: usize, alloc: std.mem.Allocator) !W
         else if (roll < 75)
             .delete
         else
-            .select;
+            .get;
 
         switch (kind) {
             .insert => {
@@ -87,9 +80,9 @@ pub fn generate(sched: *SimScheduler, n_ops: usize, alloc: std.mem.Allocator) !W
                 op.* = .{ .kind = .delete, .id = id, .value = 0 };
                 _ = live.remove(id);
             },
-            .select => {
+            .get => {
                 const id = sched.random().intRangeLessThan(i64, 1, id_range + 1);
-                op.* = .{ .kind = .select, .id = id, .value = 0 };
+                op.* = .{ .kind = .get, .id = id, .value = 0 };
             },
         }
     }

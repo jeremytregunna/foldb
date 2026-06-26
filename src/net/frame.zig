@@ -12,9 +12,6 @@ pub const HARD_CAP_PAYLOAD: u32 = 64 * 1024 * 1024;
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const DEFAULT_PORT: u16 = 7432;
 
-/// No-commit sentinel for ExecOk.committed_seq (ReadAt + Unsubscribe confirmation).
-pub const NO_COMMIT_SEQ: u64 = 0xFFFF_FFFF_FFFF_FFFF;
-
 /// 16-byte frame header. extern struct: no padding, ABI-stable, safe for @ptrCast.
 pub const FrameHeader = extern struct {
     stream_id: u64,
@@ -47,7 +44,6 @@ pub const Flags = packed struct(u8) {
 };
 
 /// Message kind byte. Non-exhaustive: use in switch with `else => return error.ProtocolError`.
-/// 0x04 reserved (formerly AuthError; candidate for AuthChallenge).
 pub const Kind = enum(u8) {
     hello = 0x01,
     auth = 0x02,
@@ -55,19 +51,28 @@ pub const Kind = enum(u8) {
     goodbye = 0x05,
     ping = 0x10,
     pong = 0x11,
-    register = 0x20,
-    registered = 0x21,
-    execute = 0x30,
-    read_at = 0x31,
-    rows_begin = 0x32,
-    rows_batch = 0x33,
-    exec_ok = 0x34,
+
+    // KV operations (C→S)
+    get = 0x20,
+    set = 0x21,
+    delete = 0x22,
+    range = 0x23,
+    batch = 0x24,
+
+    // KV responses (S→C)
+    response = 0x30,
+    range_rows = 0x31, // streamed row batches for range scans
+
+    // CDC
     subscribe = 0x40,
     cdc_event = 0x41,
     ack_cdc = 0x42,
     unsubscribe = 0x43,
-    subscribe_ack = 0x44,
+
+    // Control
     cancel = 0x50,
+
+    // Error
     err = 0xFF,
     _, // non-exhaustive: unknown values handled at call sites
 };
@@ -76,7 +81,6 @@ pub const Kind = enum(u8) {
 
 /// Read and return the 16-byte base header. Does NOT read trace extension or payload.
 pub fn readHeader(r: *Reader) !FrameHeader {
-    // SAFETY: readSliceAll fills all bytes of hdr before it is returned.
     var hdr: FrameHeader = undefined;
     try r.readSliceAll(std.mem.asBytes(&hdr));
     return hdr;
@@ -99,7 +103,6 @@ pub fn readPayload(r: *Reader, len: u32, alloc: std.mem.Allocator) ![]u8 {
 }
 
 /// Build and send a complete frame: header + optional trace ext + payload.
-/// Flushes the writer so the frame is atomic on the wire.
 pub fn sendFrame(
     w: *Writer,
     stream_id: u64,
@@ -143,7 +146,6 @@ comptime {
     std.debug.assert(DEFAULT_MAX_PAYLOAD <= HARD_CAP_PAYLOAD);
     std.debug.assert(FRAME_HEADER_SIZE == @sizeOf(FrameHeader));
     std.debug.assert(TRACE_EXT_SIZE == 16);
-    std.debug.assert(NO_COMMIT_SEQ == std.math.maxInt(u64));
 }
 
 const assert = std.debug.assert;

@@ -1,6 +1,6 @@
 /// Foldb Write-Ahead Log module.
 const crc_mod = @import("crc.zig");
-const entry = @import("entry.zig");
+pub const entry = @import("entry.zig");
 const segment = @import("segment.zig");
 const manager = @import("manager.zig");
 
@@ -12,6 +12,7 @@ pub const Epoch = entry.Epoch;
 pub const NodeId = entry.NodeId;
 pub const PartitionId = entry.PartitionId;
 pub const EntryKind = entry.EntryKind;
+pub const KvOp = entry.KvOp;
 pub const TxnIntent = entry.TxnIntent;
 pub const LogEntryHeader = entry.LogEntryHeader;
 pub const LogEntry = entry.LogEntry;

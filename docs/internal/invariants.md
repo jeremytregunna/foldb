@@ -73,7 +73,10 @@ targets for TLA+ verification, particularly the multi-partition execution cluste
 
 25. The determinism whitelist is transitive — any module reachable from query execution code must be on the whitelist, not just direct imports. Violation is a compile error.
 26. `run(entry)` advances `current_seq` even on abort — `current_seq` is never blocked.
-27. In a multi-partition deployment every executor receives each `schema_change` entry (broadcast) and updates its own per-executor `SchemaRegistry` and `SqlRegistry`. Only the executor with `partition_id == 0` applies the storage DDL (`registerTable` / `unregisterTable` / `registerIndex`) to the shared `PartitionedStorage`. All other executors skip the storage step. Rationale: `PartitionedStorage` is shared across all executors (reads must cross partition boundaries), so concurrent DDL from N threads on the same `HashMap` is a data race; designating one executor avoids this without a lock.
+27. In a multi-partition deployment every executor observes the same ordered KV
+    intent stream and applies only mutations owned by its partition. Shared
+    storage metadata is initialized before serving traffic and is not mutated by
+    concurrent executor threads.
 
 ---
 

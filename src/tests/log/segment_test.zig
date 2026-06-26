@@ -110,7 +110,7 @@ test "Segment: TxnIntent" {
     const payload = "transaction payload";
     const intent = TxnIntent.init_test(payload, 1, 1);
 
-    try testing.expectEqualSlices(u8, payload, intent.params);
+    try testing.expectEqualSlices(u8, payload, intent.ops[0].set.value);
 }
 
 test "Segment: IndexEntry size" {

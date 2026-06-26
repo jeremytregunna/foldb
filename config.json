@@ -1,0 +1,12 @@
+{
+  "node_id": 1,
+  "storage_dir": "foo/foldb",
+  "partition_count": 8,
+  "listen_addr": "0.0.0.0",
+  "listen_port": 7432,
+  "peers": [],
+  "max_epoch_size": 10000,
+  "election_timeout_min_ms": 150,
+  "election_timeout_max_ms": 300,
+  "heartbeat_interval_ms": 50
+}

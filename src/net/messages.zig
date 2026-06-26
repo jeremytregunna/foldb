@@ -1,14 +1,13 @@
 /// Per-kind message payload encode/decode for the FoldDB wire protocol.
+/// KV protocol: GET, SET, DELETE, RANGE, BATCH.
 const std = @import("std");
 const codec = @import("codec.zig");
 
 const assert = std.debug.assert;
 
 pub const TypedValue = codec.TypedValue;
-pub const ColumnDesc = codec.ColumnDesc;
-pub const Cursor = codec.Cursor;
 
-// Encode helpers shared with codec (made pub there to avoid duplication).
+// Encode helpers shared with codec.
 const appendU8 = codec.appendU8;
 const appendU16Le = codec.appendU16Le;
 const appendU32Le = codec.appendU32Le;
@@ -26,7 +25,7 @@ pub const AuthMethod = enum(u8) {
 
 pub const Hello = struct {
     server_version: []const u8,
-    auth_methods: []const u8, // raw bytes: each byte is an AuthMethod value
+    auth_methods: []const u8,
     max_frame_payload_size: u32,
 };
 
@@ -40,7 +39,7 @@ pub fn encodeHello(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, h
     try appendU32Le(out, alloc, h.max_frame_payload_size);
 }
 
-pub fn decodeHello(cur: *Cursor, alloc: std.mem.Allocator) !Hello {
+pub fn decodeHello(cur: *codec.Cursor, alloc: std.mem.Allocator) !Hello {
     const ver = try cur.readU8LenPrefixedAlloc(alloc);
     errdefer alloc.free(ver);
     const method_count = try cur.readU8();
@@ -71,7 +70,6 @@ pub const Auth = struct {
     method: AuthMethod,
     client_max_frame_size: u32,
     payload: AuthPayload,
-    /// Database to connect to. Empty string means "default".
     database_name: []const u8 = "",
 };
 
@@ -91,7 +89,7 @@ pub fn encodeAuth(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, a:
     try out.appendSlice(alloc, a.database_name);
 }
 
-pub fn decodeAuth(cur: *Cursor, alloc: std.mem.Allocator) !Auth {
+pub fn decodeAuth(cur: *codec.Cursor, alloc: std.mem.Allocator) !Auth {
     const method_byte = try cur.readU8();
     const method_raw: AuthMethod = @enumFromInt(method_byte);
     const method = switch (method_raw) {
@@ -109,7 +107,6 @@ pub fn decodeAuth(cur: *Cursor, alloc: std.mem.Allocator) !Auth {
         },
         _ => unreachable,
     };
-    // database_name: u8-length-prefixed, present when bytes remain.
     const database_name: []const u8 = if (cur.remaining() > 0) blk: {
         const name_len = try cur.readU8();
         const name_raw = try cur.readSlice(name_len);
@@ -126,7 +123,7 @@ pub fn freeAuth(a: Auth, alloc: std.mem.Allocator) void {
     if (a.database_name.len > 0) alloc.free(a.database_name);
 }
 
-// ---- Ping (C→S / S→C, stream 0) ----
+// ---- Ping / Pong ----
 
 pub const Ping = struct { client_wall_micros: u64 };
 
@@ -134,11 +131,9 @@ pub fn encodePing(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, p:
     try appendU64Le(out, alloc, p.client_wall_micros);
 }
 
-pub fn decodePing(cur: *Cursor) !Ping {
+pub fn decodePing(cur: *codec.Cursor) !Ping {
     return .{ .client_wall_micros = try cur.readU64Le() };
 }
-
-// ---- Pong (S→C, stream 0) ----
 
 pub const Pong = struct {
     client_wall_micros: u64,
@@ -150,302 +145,391 @@ pub fn encodePong(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, p:
     try appendU64Le(out, alloc, p.server_wall_micros);
 }
 
-pub fn decodePong(cur: *Cursor) !Pong {
+pub fn decodePong(cur: *codec.Cursor) !Pong {
     return .{
         .client_wall_micros = try cur.readU64Le(),
         .server_wall_micros = try cur.readU64Le(),
     };
 }
 
-// ---- RegisterQuery (C→S) ----
+// ──────────────────────────────────────────────────────────────
+// KV Operations
+// ──────────────────────────────────────────────────────────────
 
-pub const RegisterQuery = struct { sql: []const u8 };
+// ---- Get (C→S) ----
 
-pub fn encodeRegisterQuery(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, r: RegisterQuery) !void {
-    assert(r.sql.len <= std.math.maxInt(u32));
-    try appendU32Le(out, alloc, @intCast(r.sql.len));
-    try out.appendSlice(alloc, r.sql);
-}
-
-pub fn decodeRegisterQuery(cur: *Cursor, alloc: std.mem.Allocator) !RegisterQuery {
-    return .{ .sql = try cur.readLenPrefixedAlloc(alloc) };
-}
-
-// ---- Registered (S→C, FINAL) ----
-
-pub const Registered = struct {
-    query_hash: [32]u8,
-    param_tags: []const u8, // each byte is a TypeTag value
-    columns: []const ColumnDesc,
+pub const GetRequest = struct {
+    key: []const u8,
+    /// If non-zero, read at this committed sequence number (historical read).
+    at_seq: u64 = 0,
 };
 
-pub fn encodeRegistered(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, r: Registered) !void {
-    assert(r.param_tags.len <= 255);
-    assert(r.columns.len <= std.math.maxInt(u16));
-    try out.appendSlice(alloc, &r.query_hash);
-    try appendU8(out, alloc, @intCast(r.param_tags.len));
-    try out.appendSlice(alloc, r.param_tags);
-    try appendU16Le(out, alloc, @intCast(r.columns.len));
-    for (r.columns) |cd| try codec.encodeColumnDesc(out, alloc, cd);
-}
-
-pub fn decodeRegistered(cur: *Cursor, alloc: std.mem.Allocator) !Registered {
-    var hash: [32]u8 = undefined;
-    const raw = try cur.readSlice(32);
-    @memcpy(&hash, raw);
-    const param_count = try cur.readU8();
-    const param_raw = try cur.readSlice(param_count);
-    const param_tags = try alloc.dupe(u8, param_raw);
-    errdefer alloc.free(param_tags);
-    const col_count = try cur.readU16Le();
-    const columns = try alloc.alloc(ColumnDesc, col_count);
-    var decoded: u16 = 0;
-    errdefer {
-        for (columns[0..decoded]) |cd| codec.freeColumnDesc(cd, alloc);
-        alloc.free(columns);
-    }
-    while (decoded < col_count) : (decoded += 1) {
-        columns[decoded] = try codec.decodeColumnDesc(cur, alloc);
-    }
-    return .{ .query_hash = hash, .param_tags = param_tags, .columns = columns };
-}
-
-pub fn freeRegistered(r: Registered, alloc: std.mem.Allocator) void {
-    alloc.free(r.param_tags);
-    for (r.columns) |cd| codec.freeColumnDesc(cd, alloc);
-    alloc.free(r.columns);
-}
-
-// ---- Execute (C→S) ----
-
-pub const Execute = struct {
-    query_hash: [32]u8,
-    params: []const TypedValue,
-};
-
-pub fn encodeExecute(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, e: Execute) !void {
-    assert(e.params.len <= std.math.maxInt(u16));
-    try out.appendSlice(alloc, &e.query_hash);
-    try appendU16Le(out, alloc, @intCast(e.params.len));
-    for (e.params) |p| try codec.encode(out, alloc, p);
-}
-
-pub fn decodeExecute(cur: *Cursor, alloc: std.mem.Allocator) !Execute {
-    var hash: [32]u8 = undefined;
-    @memcpy(&hash, try cur.readSlice(32));
-    const param_count = try cur.readU16Le();
-    const params = try alloc.alloc(TypedValue, param_count);
-    var decoded: u16 = 0;
-    errdefer {
-        for (params[0..decoded]) |p| p.deinit(alloc);
-        alloc.free(params);
-    }
-    while (decoded < param_count) : (decoded += 1) {
-        params[decoded] = try codec.decode(cur, alloc);
-    }
-    return .{ .query_hash = hash, .params = params };
-}
-
-pub fn freeExecute(e: Execute, alloc: std.mem.Allocator) void {
-    for (e.params) |p| p.deinit(alloc);
-    alloc.free(e.params);
-}
-
-// ---- ReadAt (C→S) ----
-
-pub const ReadAt = struct {
-    query_hash: [32]u8,
-    at_seq: u64,
-    params: []const TypedValue,
-};
-
-pub fn encodeReadAt(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, r: ReadAt) !void {
-    assert(r.params.len <= std.math.maxInt(u16));
-    try out.appendSlice(alloc, &r.query_hash);
+pub fn encodeGetRequest(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, r: GetRequest) !void {
+    assert(r.key.len <= std.math.maxInt(u32));
+    try appendU32Le(out, alloc, @intCast(r.key.len));
+    try out.appendSlice(alloc, r.key);
     try appendU64Le(out, alloc, r.at_seq);
-    try appendU16Le(out, alloc, @intCast(r.params.len));
-    for (r.params) |p| try codec.encode(out, alloc, p);
 }
 
-pub fn decodeReadAt(cur: *Cursor, alloc: std.mem.Allocator) !ReadAt {
-    var hash: [32]u8 = undefined;
-    @memcpy(&hash, try cur.readSlice(32));
+pub fn decodeGetRequest(cur: *codec.Cursor, alloc: std.mem.Allocator) !GetRequest {
+    const key = try cur.readLenPrefixedAlloc(alloc);
+    errdefer alloc.free(key);
     const at_seq = try cur.readU64Le();
-    const param_count = try cur.readU16Le();
-    const params = try alloc.alloc(TypedValue, param_count);
-    var decoded: u16 = 0;
-    errdefer {
-        for (params[0..decoded]) |p| p.deinit(alloc);
-        alloc.free(params);
-    }
-    while (decoded < param_count) : (decoded += 1) {
-        params[decoded] = try codec.decode(cur, alloc);
-    }
-    return .{ .query_hash = hash, .at_seq = at_seq, .params = params };
+    return .{ .key = key, .at_seq = at_seq };
 }
 
-pub fn freeReadAt(r: ReadAt, alloc: std.mem.Allocator) void {
-    for (r.params) |p| p.deinit(alloc);
-    alloc.free(r.params);
+pub fn freeGetRequest(r: GetRequest, alloc: std.mem.Allocator) void {
+    alloc.free(r.key);
 }
 
-// ---- RowsBegin (S→C, MORE) ----
+// ---- GetResponse (S→C) ----
 
-pub const RowsBegin = struct { columns: []const ColumnDesc };
-
-pub fn encodeRowsBegin(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, r: RowsBegin) !void {
-    assert(r.columns.len <= std.math.maxInt(u16));
-    try appendU16Le(out, alloc, @intCast(r.columns.len));
-    for (r.columns) |cd| try codec.encodeColumnDesc(out, alloc, cd);
-}
-
-// ---- RowsBatch (S→C, MORE) ----
-// row_count + row_count × (col_count × TypedValue)
-// col_count is from the preceding RowsBegin, not carried in the frame.
-
-pub fn encodeRowsBatch(
-    out: *std.ArrayListUnmanaged(u8),
-    alloc: std.mem.Allocator,
-    rows: []const []const TypedValue,
-) !void {
-    assert(rows.len <= std.math.maxInt(u32));
-    try appendU32Le(out, alloc, @intCast(rows.len));
-    for (rows) |row| {
-        for (row) |v| try codec.encode(out, alloc, v);
-    }
-}
-
-// ---- ExecOk (S→C, FINAL) ----
-
-pub const ExecOk = struct {
-    rows_affected: u64,
+pub const GetResponse = struct {
+    /// null if key not found.
+    value: ?[]const u8,
     committed_seq: u64,
 };
 
-pub fn encodeExecOk(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, e: ExecOk) !void {
-    try appendU64Le(out, alloc, e.rows_affected);
-    try appendU64Le(out, alloc, e.committed_seq);
+pub fn encodeGetResponse(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, r: GetResponse) !void {
+    try appendU64Le(out, alloc, r.committed_seq);
+    if (r.value) |v| {
+        assert(v.len <= std.math.maxInt(u32));
+        try appendU8(out, alloc, 1);
+        try appendU32Le(out, alloc, @intCast(v.len));
+        try out.appendSlice(alloc, v);
+    } else {
+        try appendU8(out, alloc, 0);
+    }
 }
 
-pub fn decodeExecOk(cur: *Cursor) !ExecOk {
-    return .{
-        .rows_affected = try cur.readU64Le(),
-        .committed_seq = try cur.readU64Le(),
+pub fn decodeGetResponse(cur: *codec.Cursor, alloc: std.mem.Allocator) !GetResponse {
+    const committed_seq = try cur.readU64Le();
+    const present = try cur.readU8();
+    const value: ?[]const u8 = if (present != 0) try cur.readLenPrefixedAlloc(alloc) else null;
+    return .{ .value = value, .committed_seq = committed_seq };
+}
+
+pub fn freeGetResponse(r: GetResponse, alloc: std.mem.Allocator) void {
+    if (r.value) |v| alloc.free(v);
+}
+
+// ---- Set (C→S) ----
+
+pub const SetRequest = struct {
+    key: []const u8,
+    value: []const u8,
+    /// If non-zero, only set if current seq == expected_seq (compare-and-swap).
+    expected_seq: u64 = 0,
+};
+
+pub fn encodeSetRequest(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, r: SetRequest) !void {
+    assert(r.key.len <= std.math.maxInt(u32));
+    assert(r.value.len <= std.math.maxInt(u32));
+    try appendU32Le(out, alloc, @intCast(r.key.len));
+    try out.appendSlice(alloc, r.key);
+    try appendU32Le(out, alloc, @intCast(r.value.len));
+    try out.appendSlice(alloc, r.value);
+    try appendU64Le(out, alloc, r.expected_seq);
+}
+
+pub fn decodeSetRequest(cur: *codec.Cursor, alloc: std.mem.Allocator) !SetRequest {
+    const key = try cur.readLenPrefixedAlloc(alloc);
+    errdefer alloc.free(key);
+    const value = try cur.readLenPrefixedAlloc(alloc);
+    errdefer alloc.free(value);
+    const expected_seq = try cur.readU64Le();
+    return .{ .key = key, .value = value, .expected_seq = expected_seq };
+}
+
+pub fn freeSetRequest(r: SetRequest, alloc: std.mem.Allocator) void {
+    alloc.free(r.key);
+    alloc.free(r.value);
+}
+
+// ---- Delete (C→S) ----
+
+pub const DeleteRequest = struct {
+    key: []const u8,
+};
+
+pub fn encodeDeleteRequest(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, r: DeleteRequest) !void {
+    assert(r.key.len <= std.math.maxInt(u32));
+    try appendU32Le(out, alloc, @intCast(r.key.len));
+    try out.appendSlice(alloc, r.key);
+}
+
+pub fn decodeDeleteRequest(cur: *codec.Cursor, alloc: std.mem.Allocator) !DeleteRequest {
+    return .{ .key = try cur.readLenPrefixedAlloc(alloc) };
+}
+
+pub fn freeDeleteRequest(r: DeleteRequest, alloc: std.mem.Allocator) void {
+    alloc.free(r.key);
+}
+
+// ---- MutateResponse (S→C, for Set/Delete) ----
+
+pub const MutateResponse = struct {
+    committed_seq: u64,
+    /// If expected_seq was set and CAS failed, this is the current seq.
+    cas_failed: ?u64 = null,
+};
+
+pub fn encodeMutateResponse(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, r: MutateResponse) !void {
+    try appendU64Le(out, alloc, r.committed_seq);
+    if (r.cas_failed) |current| {
+        try appendU8(out, alloc, 1);
+        try appendU64Le(out, alloc, current);
+    } else {
+        try appendU8(out, alloc, 0);
+    }
+}
+
+pub fn decodeMutateResponse(cur: *codec.Cursor) !MutateResponse {
+    const committed_seq = try cur.readU64Le();
+    const cas = try cur.readU8();
+    const cas_failed: ?u64 = if (cas != 0) try cur.readU64Le() else null;
+    return .{ .committed_seq = committed_seq, .cas_failed = cas_failed };
+}
+
+// ---- Range (C→S) ----
+
+pub const RangeRequest = struct {
+    start: []const u8,
+    end: []const u8,
+    /// Maximum number of keys to return. 0 = unlimited (server default).
+    limit: u32 = 0,
+};
+
+pub fn encodeRangeRequest(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, r: RangeRequest) !void {
+    assert(r.start.len <= std.math.maxInt(u32));
+    assert(r.end.len <= std.math.maxInt(u32));
+    try appendU32Le(out, alloc, @intCast(r.start.len));
+    try out.appendSlice(alloc, r.start);
+    try appendU32Le(out, alloc, @intCast(r.end.len));
+    try out.appendSlice(alloc, r.end);
+    try appendU32Le(out, alloc, r.limit);
+}
+
+pub fn decodeRangeRequest(cur: *codec.Cursor, alloc: std.mem.Allocator) !RangeRequest {
+    const start = try cur.readLenPrefixedAlloc(alloc);
+    errdefer alloc.free(start);
+    const end = try cur.readLenPrefixedAlloc(alloc);
+    errdefer alloc.free(end);
+    const limit = try cur.readU32Le();
+    return .{ .start = start, .end = end, .limit = limit };
+}
+
+pub fn freeRangeRequest(r: RangeRequest, alloc: std.mem.Allocator) void {
+    alloc.free(r.start);
+    alloc.free(r.end);
+}
+
+// ---- RangeEntry / RangeResponse (S→C) ----
+
+pub const RangeEntry = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+pub const RangeResponse = struct {
+    entries: []const RangeEntry,
+    committed_seq: u64,
+};
+
+pub fn encodeRangeResponse(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, r: RangeResponse) !void {
+    try appendU64Le(out, alloc, r.committed_seq);
+    assert(r.entries.len <= std.math.maxInt(u32));
+    try appendU32Le(out, alloc, @intCast(r.entries.len));
+    for (r.entries) |e| {
+        assert(e.key.len <= std.math.maxInt(u32));
+        assert(e.value.len <= std.math.maxInt(u32));
+        try appendU32Le(out, alloc, @intCast(e.key.len));
+        try out.appendSlice(alloc, e.key);
+        try appendU32Le(out, alloc, @intCast(e.value.len));
+        try out.appendSlice(alloc, e.value);
+    }
+}
+
+pub fn decodeRangeResponse(cur: *codec.Cursor, alloc: std.mem.Allocator) !RangeResponse {
+    const committed_seq = try cur.readU64Le();
+    const entry_count = try cur.readU32Le();
+    const entries = try alloc.alloc(RangeEntry, entry_count);
+    var decoded: u32 = 0;
+    errdefer {
+        for (entries[0..decoded]) |e| {
+            alloc.free(e.key);
+            alloc.free(e.value);
+        }
+        alloc.free(entries);
+    }
+    while (decoded < entry_count) : (decoded += 1) {
+        const key = try cur.readLenPrefixedAlloc(alloc);
+        const value = try cur.readLenPrefixedAlloc(alloc);
+        entries[decoded] = .{ .key = key, .value = value };
+    }
+    return .{ .entries = entries, .committed_seq = committed_seq };
+}
+
+pub fn freeRangeResponse(r: RangeResponse, alloc: std.mem.Allocator) void {
+    for (r.entries) |e| {
+        alloc.free(e.key);
+        alloc.free(e.value);
+    }
+    alloc.free(r.entries);
+}
+
+// ──────────────────────────────────────────────────────────────
+// Batch
+// ──────────────────────────────────────────────────────────────
+
+/// A single operation within a batch.
+pub const BatchOp = union(enum) {
+    get: GetRequest,
+    set: SetRequest,
+    delete: DeleteRequest,
+    range: RangeRequest,
+
+    pub fn deinit(self: BatchOp, alloc: std.mem.Allocator) void {
+        switch (self) {
+            .get => |r| freeGetRequest(r, alloc),
+            .set => |r| freeSetRequest(r, alloc),
+            .delete => |r| freeDeleteRequest(r, alloc),
+            .range => |r| freeRangeRequest(r, alloc),
+        }
+    }
+};
+
+pub fn encodeBatchOp(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, op: BatchOp) !void {
+    switch (op) {
+        .get => |r| {
+            try appendU8(out, alloc, 0);
+            try encodeGetRequest(out, alloc, r);
+        },
+        .set => |r| {
+            try appendU8(out, alloc, 1);
+            try encodeSetRequest(out, alloc, r);
+        },
+        .delete => |r| {
+            try appendU8(out, alloc, 2);
+            try encodeDeleteRequest(out, alloc, r);
+        },
+        .range => |r| {
+            try appendU8(out, alloc, 3);
+            try encodeRangeRequest(out, alloc, r);
+        },
+    }
+}
+
+pub fn decodeBatchOp(cur: *codec.Cursor, alloc: std.mem.Allocator) !BatchOp {
+    const tag = try cur.readU8();
+    return switch (tag) {
+        0 => .{ .get = try decodeGetRequest(cur, alloc) },
+        1 => .{ .set = try decodeSetRequest(cur, alloc) },
+        2 => .{ .delete = try decodeDeleteRequest(cur, alloc) },
+        3 => .{ .range = try decodeRangeRequest(cur, alloc) },
+        else => return error.ProtocolError,
     };
 }
 
-// ---- Subscribe (C→S) ----
+/// A single result within a batch response.
+pub const BatchResult = union(enum) {
+    get: GetResponse,
+    mutate: MutateResponse,
+    range: RangeResponse,
 
-pub const SubscribeScope = enum(u8) {
-    all_tables = 0x00,
-    filtered = 0x01,
-    _,
-};
-
-pub const TableFilterKind = enum(u8) {
-    by_id = 0x00,
-    by_name = 0x01,
-};
-
-pub const TableFilter = union(TableFilterKind) {
-    by_id: u32,
-    by_name: []const u8,
-};
-
-pub const Subscribe = struct {
-    from_seq: u64,
-    initial_credits: u32,
-    scope: SubscribeScope,
-    filters: []const TableFilter, // len=0 when scope=all_tables
-};
-
-pub fn encodeSubscribe(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, s: Subscribe) !void {
-    assert(s.filters.len <= std.math.maxInt(u16));
-    try appendU64Le(out, alloc, s.from_seq);
-    try appendU32Le(out, alloc, s.initial_credits);
-    try appendU8(out, alloc, @intFromEnum(s.scope));
-    if (s.scope == .filtered) {
-        try appendU16Le(out, alloc, @intCast(s.filters.len));
-        for (s.filters) |f| {
-            switch (f) {
-                .by_id => |id| {
-                    try appendU8(out, alloc, 0x00);
-                    try appendU32Le(out, alloc, id);
-                },
-                .by_name => |name| {
-                    assert(name.len <= 255);
-                    try appendU8(out, alloc, 0x01);
-                    try appendU8(out, alloc, @intCast(name.len));
-                    try out.appendSlice(alloc, name);
-                },
-            }
+    pub fn deinit(self: BatchResult, alloc: std.mem.Allocator) void {
+        switch (self) {
+            .get => |r| freeGetResponse(r, alloc),
+            .mutate => {},
+            .range => |r| freeRangeResponse(r, alloc),
         }
+    }
+};
+
+pub fn encodeBatchResult(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, res: BatchResult) !void {
+    switch (res) {
+        .get => |r| {
+            try appendU8(out, alloc, 0);
+            try encodeGetResponse(out, alloc, r);
+        },
+        .mutate => |r| {
+            try appendU8(out, alloc, 1);
+            try encodeMutateResponse(out, alloc, r);
+        },
+        .range => |r| {
+            try appendU8(out, alloc, 2);
+            try encodeRangeResponse(out, alloc, r);
+        },
     }
 }
 
-pub fn decodeSubscribe(cur: *Cursor, alloc: std.mem.Allocator) !Subscribe {
-    const from_seq = try cur.readU64Le();
-    const credits = try cur.readU32Le();
-    const scope_byte = try cur.readU8();
-    const scope_raw: SubscribeScope = @enumFromInt(scope_byte);
-    const scope = switch (scope_raw) {
-        .all_tables, .filtered => scope_raw,
-        _ => return error.ProtocolError,
+pub fn decodeBatchResult(cur: *codec.Cursor, alloc: std.mem.Allocator) !BatchResult {
+    const tag = try cur.readU8();
+    return switch (tag) {
+        0 => .{ .get = try decodeGetResponse(cur, alloc) },
+        1 => .{ .mutate = try decodeMutateResponse(cur) },
+        2 => .{ .range = try decodeRangeResponse(cur, alloc) },
+        else => return error.ProtocolError,
     };
-    var filters: []TableFilter = &.{};
-    if (scope == .filtered) {
-        const count = try cur.readU16Le();
-        if (count == 0) return error.ProtocolError;
-        filters = try alloc.alloc(TableFilter, count);
-        var decoded: u16 = 0;
-        errdefer {
-            for (filters[0..decoded]) |f| {
-                if (f == .by_name) alloc.free(f.by_name);
-            }
-            alloc.free(filters);
-        }
-        while (decoded < count) : (decoded += 1) {
-            const kind_byte = try cur.readU8();
-            filters[decoded] = switch (kind_byte) {
-                0x00 => .{ .by_id = try cur.readU32Le() },
-                0x01 => .{ .by_name = try cur.readU8LenPrefixedAlloc(alloc) },
-                else => return error.ProtocolError,
-            };
-        }
-    }
-    return .{ .from_seq = from_seq, .initial_credits = credits, .scope = scope, .filters = filters };
 }
 
-pub fn freeSubscribe(s: Subscribe, alloc: std.mem.Allocator) void {
-    for (s.filters) |f| {
-        if (f == .by_name) alloc.free(f.by_name);
-    }
-    if (s.filters.len > 0) alloc.free(s.filters);
+// ---- Batch (C→S) ----
+
+pub fn encodeBatch(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, ops: []const BatchOp) !void {
+    assert(ops.len <= std.math.maxInt(u32));
+    try appendU32Le(out, alloc, @intCast(ops.len));
+    for (ops) |op| try encodeBatchOp(out, alloc, op);
 }
 
-// ---- SubscribeAck (S→C, MORE) ----
-
-pub const ResolvedName = struct {
-    name: []const u8,
-    table_id: u32,
-};
-
-pub fn encodeSubscribeAck(
-    out: *std.ArrayListUnmanaged(u8),
-    alloc: std.mem.Allocator,
-    resolved: []const ResolvedName,
-) !void {
-    assert(resolved.len <= std.math.maxInt(u16));
-    try appendU16Le(out, alloc, @intCast(resolved.len));
-    for (resolved) |r| {
-        assert(r.name.len <= 255);
-        try appendU8(out, alloc, @intCast(r.name.len));
-        try out.appendSlice(alloc, r.name);
-        try appendU32Le(out, alloc, r.table_id);
+pub fn decodeBatch(cur: *codec.Cursor, alloc: std.mem.Allocator) ![]BatchOp {
+    const count = try cur.readU32Le();
+    const ops = try alloc.alloc(BatchOp, count);
+    var decoded: u32 = 0;
+    errdefer {
+        for (ops[0..decoded]) |op| op.deinit(alloc);
+        alloc.free(ops);
     }
+    while (decoded < count) : (decoded += 1) {
+        ops[decoded] = try decodeBatchOp(cur, alloc);
+    }
+    return ops;
 }
 
-// ---- CdcEvent (S→C, neither) ----
+pub fn freeBatch(ops: []BatchOp, alloc: std.mem.Allocator) void {
+    for (ops) |op| op.deinit(alloc);
+    alloc.free(ops);
+}
+
+// ---- BatchResponse (S→C) ----
+
+pub fn encodeBatchResponse(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, results: []const BatchResult) !void {
+    assert(results.len <= std.math.maxInt(u32));
+    try appendU32Le(out, alloc, @intCast(results.len));
+    for (results) |res| try encodeBatchResult(out, alloc, res);
+}
+
+pub fn decodeBatchResponse(cur: *codec.Cursor, alloc: std.mem.Allocator) ![]BatchResult {
+    const count = try cur.readU32Le();
+    const results = try alloc.alloc(BatchResult, count);
+    var decoded: u32 = 0;
+    errdefer {
+        for (results[0..decoded]) |res| res.deinit(alloc);
+        alloc.free(results);
+    }
+    while (decoded < count) : (decoded += 1) {
+        results[decoded] = try decodeBatchResult(cur, alloc);
+    }
+    return results;
+}
+
+pub fn freeBatchResponse(results: []BatchResult, alloc: std.mem.Allocator) void {
+    for (results) |res| res.deinit(alloc);
+    alloc.free(results);
+}
+
+// ──────────────────────────────────────────────────────────────
+// CDC / Subscribe
+// ──────────────────────────────────────────────────────────────
 
 pub const CdcOp = enum(u8) {
     insert = 0x00,
@@ -454,25 +538,51 @@ pub const CdcOp = enum(u8) {
 };
 
 pub const WireCdcEffect = struct {
-    table_id: u32,
     key: []const u8,
     op: CdcOp,
-    before: []const TypedValue, // len=0 if absent
-    after: []const TypedValue, // len=0 if absent
+    before: ?[]const u8,
+    after: ?[]const u8,
 };
 
 pub fn encodeCdcEffect(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, e: WireCdcEffect) !void {
     assert(e.key.len <= std.math.maxInt(u32));
-    assert(e.before.len <= std.math.maxInt(u16));
-    assert(e.after.len <= std.math.maxInt(u16));
-    try appendU32Le(out, alloc, e.table_id);
     try appendU32Le(out, alloc, @intCast(e.key.len));
     try out.appendSlice(alloc, e.key);
     try appendU8(out, alloc, @intFromEnum(e.op));
-    try appendU16Le(out, alloc, @intCast(e.before.len));
-    for (e.before) |v| try codec.encode(out, alloc, v);
-    try appendU16Le(out, alloc, @intCast(e.after.len));
-    for (e.after) |v| try codec.encode(out, alloc, v);
+    if (e.before) |v| {
+        assert(v.len <= std.math.maxInt(u32));
+        try appendU8(out, alloc, 1);
+        try appendU32Le(out, alloc, @intCast(v.len));
+        try out.appendSlice(alloc, v);
+    } else {
+        try appendU8(out, alloc, 0);
+    }
+    if (e.after) |v| {
+        assert(v.len <= std.math.maxInt(u32));
+        try appendU8(out, alloc, 1);
+        try appendU32Le(out, alloc, @intCast(v.len));
+        try out.appendSlice(alloc, v);
+    } else {
+        try appendU8(out, alloc, 0);
+    }
+}
+
+pub fn decodeCdcEffect(cur: *codec.Cursor, alloc: std.mem.Allocator) !WireCdcEffect {
+    const key = try cur.readLenPrefixedAlloc(alloc);
+    errdefer alloc.free(key);
+    const op: CdcOp = @enumFromInt(try cur.readU8());
+    const has_before = try cur.readU8();
+    const before: ?[]const u8 = if (has_before != 0) try cur.readLenPrefixedAlloc(alloc) else null;
+    errdefer if (before) |v| alloc.free(v);
+    const has_after = try cur.readU8();
+    const after: ?[]const u8 = if (has_after != 0) try cur.readLenPrefixedAlloc(alloc) else null;
+    return .{ .key = key, .op = op, .before = before, .after = after };
+}
+
+pub fn freeCdcEffect(e: WireCdcEffect, alloc: std.mem.Allocator) void {
+    alloc.free(e.key);
+    if (e.before) |v| alloc.free(v);
+    if (e.after) |v| alloc.free(v);
 }
 
 pub fn encodeCdcEvent(
@@ -489,14 +599,30 @@ pub fn encodeCdcEvent(
     for (effects) |e| try encodeCdcEffect(out, alloc, e);
 }
 
-// ---- AckCdc (C→S) ----
+// Subscribe / AckCdc (simplified — no table filters)
+pub const Subscribe = struct {
+    from_seq: u64,
+    initial_credits: u32,
+};
+
+pub fn encodeSubscribe(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, s: Subscribe) !void {
+    try appendU64Le(out, alloc, s.from_seq);
+    try appendU32Le(out, alloc, s.initial_credits);
+}
+
+pub fn decodeSubscribe(cur: *codec.Cursor) !Subscribe {
+    return .{
+        .from_seq = try cur.readU64Le(),
+        .initial_credits = try cur.readU32Le(),
+    };
+}
 
 pub const AckCdc = struct {
     acked_seq: u64,
     add_credits: u32,
 };
 
-pub fn decodeAckCdc(cur: *Cursor) !AckCdc {
+pub fn decodeAckCdc(cur: *codec.Cursor) !AckCdc {
     return .{
         .acked_seq = try cur.readU64Le(),
         .add_credits = try cur.readU32Le(),
@@ -508,9 +634,8 @@ pub fn encodeAckCdc(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, 
     try appendU32Le(out, alloc, a.add_credits);
 }
 
-// ---- Cancel (C→S, stream_id=0) ----
-
-pub fn decodeCancel(cur: *Cursor) !u64 {
+// Cancel
+pub fn decodeCancel(cur: *codec.Cursor) !u64 {
     return cur.readU64Le();
 }
 
@@ -518,7 +643,9 @@ pub fn encodeCancel(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, 
     try appendU64Le(out, alloc, target);
 }
 
-// ---- Error (S→C) ----
+// ──────────────────────────────────────────────────────────────
+// Error
+// ──────────────────────────────────────────────────────────────
 
 pub const Severity = enum(u8) {
     @"error" = 0x00,
@@ -526,15 +653,12 @@ pub const Severity = enum(u8) {
 };
 
 pub const ErrorCode = enum(u16) {
-    constraint_violation = 0x0001,
+    key_not_found = 0x0001,
     type_mismatch = 0x0002,
-    query_not_found = 0x0003,
-    parse_error = 0x0004,
-    type_error = 0x0005,
+    cas_failed = 0x0003,
     transaction_aborted = 0x0006,
     retry_required = 0x0007,
     seq_not_available = 0x0008,
-    schema_conflict = 0x0009,
     auth_failed = 0x000A,
     permission_denied = 0x000B,
     server_error = 0x000C,
@@ -543,6 +667,9 @@ pub const ErrorCode = enum(u16) {
     tls_required = 0x000F,
     rate_limited = 0x0010,
     frame_too_large = 0x0011,
+    key_too_large = 0x0012,
+    value_too_large = 0x0013,
+    batch_too_large = 0x0014,
 };
 
 pub fn encodeError(

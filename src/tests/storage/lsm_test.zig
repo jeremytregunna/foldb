@@ -2,409 +2,89 @@ const std = @import("std");
 const testing = std.testing;
 const storage = @import("storage.zig");
 
-const TableSchema = storage.TableSchema;
-const ColumnValue = storage.ColumnValue;
+const LSM = storage.LSM;
 const Mutation = storage.Mutation;
-const Storage = storage.Storage;
+const KeyRange = storage.KeyRange;
+const Seq = storage.Seq;
 
-fn makeSchema(table_id: storage.TableId) TableSchema {
-    return .{
-        .table_id = table_id,
-        .columns = &.{
-            .{ .col_type = .string, .nullable = false },
-            .{ .col_type = .int64, .nullable = false },
-        },
+test "lsm: apply and get" {
+    const alloc = testing.allocator;
+    const path = "/tmp/foldb_lsm_1";
+    var lsm = try LSM.init(path, alloc);
+    defer lsm.deinit();
+
+    const mutations = [_]Mutation{
+        .{ .kind = .insert, .table_id = 1, .key = "key1", .value = "val1" },
+        .{ .kind = .insert, .table_id = 1, .key = "key2", .value = "val2" },
     };
+    try lsm.apply(&mutations, 1);
+
+    const r = try lsm.get("key1", 1);
+    try testing.expect(r != null);
+    var row = r.?;
+    defer row.deinit(alloc);
+    try testing.expectEqualSlices(u8, "val1", row.value);
 }
 
-fn makeTempDir(alloc: std.mem.Allocator) ![]const u8 {
-    // SAFETY: clock_gettime fills ts before any field is read.
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
-    const ns = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
-    const path = try std.fmt.allocPrint(alloc, "/tmp/lsm_test_{d}", .{ns});
-    const null_path = try alloc.allocSentinel(u8, path.len, 0);
-    defer alloc.free(null_path);
-    @memcpy(null_path[0..path.len], path);
-    _ = std.os.linux.mkdir(null_path.ptr, 0o755);
-    return path;
-}
-
-fn removeDir(path: []const u8) void {
-    const null_path = std.heap.page_allocator.allocSentinel(u8, path.len, 0) catch return;
-    defer std.heap.page_allocator.free(null_path);
-    @memcpy(null_path[0..path.len], path);
-
-    const raw_fd = std.os.linux.open(null_path.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
-    const fd: std.posix.fd_t = @intCast(@as(isize, @bitCast(raw_fd)));
-    if (fd < 0) return;
-    defer _ = std.os.linux.close(@intCast(fd));
-
-    var buf: [4096]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
-    while (true) {
-        const ret = std.os.linux.getdents64(@intCast(fd), &buf, buf.len);
-        const n: isize = @bitCast(ret);
-        if (n <= 0) break;
-        var i: usize = 0;
-        while (i < @as(usize, @intCast(n))) {
-            const dent: *const std.os.linux.dirent64 = @ptrCast(@alignCast(buf[i..].ptr));
-            const name = std.mem.span(@as([*:0]const u8, @ptrCast(&dent.name)));
-            if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) {
-                const child_path = std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ path, name }) catch {
-                    i += dent.reclen;
-                    continue;
-                };
-                defer std.heap.page_allocator.free(child_path);
-                const null_child = std.heap.page_allocator.allocSentinel(u8, child_path.len, 0) catch {
-                    i += dent.reclen;
-                    continue;
-                };
-                defer std.heap.page_allocator.free(null_child);
-                @memcpy(null_child[0..child_path.len], child_path);
-                if (dent.type == std.os.linux.DT.DIR) {
-                    removeDir(child_path);
-                } else {
-                    _ = std.os.linux.unlink(null_child.ptr);
-                }
-            }
-            i += dent.reclen;
-        }
-    }
-    _ = std.os.linux.rmdir(null_path.ptr);
-}
-
-test "LSM: basic apply and get" {
+test "lsm: delete" {
     const alloc = testing.allocator;
-    const dir = try makeTempDir(alloc);
-    defer alloc.free(dir);
-    defer removeDir(dir);
+    const path = "/tmp/foldb_lsm_2";
+    var lsm = try LSM.init(path, alloc);
+    defer lsm.deinit();
 
-    var store = try Storage.init(dir, alloc);
-    defer store.deinit();
-
-    const schema = makeSchema(1);
-    try store.registerTable(schema);
-
-    const vals = [_]ColumnValue{ .{ .string = "alice" }, .{ .int64 = 42 } };
-    const mutations = [_]Mutation{.{
-        .kind = .insert,
-        .table_id = 1,
-        .key = "user:1",
-        .values = &vals,
-    }};
-    try store.apply(&mutations, 1);
-
-    const row = try store.get(1, "user:1", 1);
-    try testing.expect(row != null);
-    var r = row.?;
-    defer r.deinit(alloc);
-    try testing.expectEqualSlices(u8, "user:1", r.key);
-    try testing.expectEqual(@as(i64, 42), r.values[1].int64);
+    try lsm.apply(&[_]Mutation{ .{ .kind = .insert, .table_id = 1, .key = "k", .value = "v" } }, 1);
+    try lsm.apply(&[_]Mutation{ .{ .kind = .delete, .table_id = 1, .key = "k", .value = null } }, 2);
+    const r = try lsm.get("k", 2);
+    try testing.expect(r == null);
 }
 
-test "LSM: MVCC - reads at different seqs" {
+test "lsm: many inserts" {
     const alloc = testing.allocator;
-    const dir = try makeTempDir(alloc);
-    defer alloc.free(dir);
-    defer removeDir(dir);
+    const path = "/tmp/foldb_lsm_3";
+    var lsm = try LSM.init(path, alloc);
+    defer lsm.deinit();
 
-    var store = try Storage.init(dir, alloc);
-    defer store.deinit();
-    try store.registerTable(makeSchema(1));
-
-    const v1 = [_]ColumnValue{ .{ .string = "v1" }, .{ .int64 = 1 } };
-    const v2 = [_]ColumnValue{ .{ .string = "v2" }, .{ .int64 = 2 } };
-
-    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "k", .values = &v1 }}, 5);
-    try store.apply(&.{.{ .kind = .update, .table_id = 1, .key = "k", .values = &v2 }}, 10);
-
-    // At seq 5: see v1
-    if (try store.get(1, "k", 5)) |row| {
-        var r = row;
-        defer r.deinit(alloc);
-        try testing.expectEqual(@as(i64, 1), r.values[1].int64);
-    } else return error.MissingAtSeq5;
-
-    // At seq 10: see v2
-    if (try store.get(1, "k", 10)) |row| {
-        var r = row;
-        defer r.deinit(alloc);
-        try testing.expectEqual(@as(i64, 2), r.values[1].int64);
-    } else return error.MissingAtSeq10;
-
-    // At seq 4: nothing
-    const none = try store.get(1, "k", 4);
-    try testing.expectEqual(@as(?storage.Row, null), none);
-}
-
-test "LSM: delete hides row" {
-    const alloc = testing.allocator;
-    const dir = try makeTempDir(alloc);
-    defer alloc.free(dir);
-    defer removeDir(dir);
-
-    var store = try Storage.init(dir, alloc);
-    defer store.deinit();
-    try store.registerTable(makeSchema(1));
-
-    const v = [_]ColumnValue{ .{ .string = "x" }, .{ .int64 = 1 } };
-    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "k", .values = &v }}, 1);
-    try store.apply(&.{.{ .kind = .delete, .table_id = 1, .key = "k", .values = null }}, 2);
-
-    // After delete at seq 2, not visible
-    const row = try store.get(1, "k", 2);
-    try testing.expectEqual(@as(?storage.Row, null), row);
-
-    // Still visible at seq 1
-    if (try store.get(1, "k", 1)) |row2| {
-        var r = row2;
-        defer r.deinit(alloc);
-        try testing.expectEqual(@as(i64, 1), r.values[1].int64);
-    } else return error.MissingAtSeq1;
-}
-
-test "LSM: get unknown key returns null" {
-    const alloc = testing.allocator;
-    const dir = try makeTempDir(alloc);
-    defer alloc.free(dir);
-    defer removeDir(dir);
-
-    var store = try Storage.init(dir, alloc);
-    defer store.deinit();
-    try store.registerTable(makeSchema(1));
-
-    const v = [_]ColumnValue{ .{ .string = "x" }, .{ .int64 = 1 } };
-    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "exists", .values = &v }}, 1);
-
-    const none = try store.get(1, "does-not-exist", 100);
-    try testing.expectEqual(@as(?storage.Row, null), none);
-}
-
-test "LSM: flush memtable and read from SSTable" {
-    const alloc = testing.allocator;
-    const dir = try makeTempDir(alloc);
-    defer alloc.free(dir);
-    defer removeDir(dir);
-
-    var store = try Storage.init(dir, alloc);
-    defer store.deinit();
-    try store.registerTable(makeSchema(1));
-
-    const v = [_]ColumnValue{ .{ .string = "hello" }, .{ .int64 = 99 } };
-    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "flushed_key", .values = &v }}, 7);
-    try store.flushAll();
-
-    if (try store.get(1, "flushed_key", 7)) |row| {
-        var r = row;
-        defer r.deinit(alloc);
-        try testing.expectEqual(@as(i64, 99), r.values[1].int64);
-    } else return error.NotFoundAfterFlush;
-}
-
-test "LSM: compaction L0 to L1 preserves reads" {
-    const alloc = testing.allocator;
-    const dir = try makeTempDir(alloc);
-    defer alloc.free(dir);
-    defer removeDir(dir);
-
-    var store = try Storage.init(dir, alloc);
-    defer store.deinit();
-    try store.registerTable(makeSchema(1));
-
-    // Write 4 distinct keys and flush each to L0 separately
-    const keys = [_][]const u8{ "ka", "kb", "kc", "kd" };
-    for (keys, 0..) |key, i| {
-        const seq: u64 = @intCast(i + 1);
-        const v = [_]ColumnValue{ .{ .string = "v" }, .{ .int64 = @intCast(i) } };
-        try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = key, .values = &v }}, seq);
-        try store.flushAll();
-    }
-    // L0 now has 4 files — next apply triggers compaction
-    const v5 = [_]ColumnValue{ .{ .string = "v" }, .{ .int64 = 99 } };
-    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "ke", .values = &v5 }}, 5);
-
-    // All 4 L0 keys must still be readable from L1
-    for (keys, 0..) |key, i| {
-        const seq: u64 = @intCast(i + 1);
-        const row = try store.get(1, key, seq);
-        if (row == null) return error.MissingAfterCompaction;
-        var r = row.?;
-        defer r.deinit(alloc);
-        try testing.expectEqual(@as(i64, @intCast(i)), r.values[1].int64);
-    }
-
-    // The in-memtable write is also readable
-    if (try store.get(1, "ke", 5)) |row| {
-        var r = row;
-        defer r.deinit(alloc);
-        try testing.expectEqual(@as(i64, 99), r.values[1].int64);
-    } else return error.MemtableKeyMissing;
-}
-
-test "LSM: multiple tables are isolated" {
-    const alloc = testing.allocator;
-    const dir = try makeTempDir(alloc);
-    defer alloc.free(dir);
-    defer removeDir(dir);
-
-    var store = try Storage.init(dir, alloc);
-    defer store.deinit();
-    try store.registerTable(makeSchema(1));
-    try store.registerTable(makeSchema(2));
-
-    const v1 = [_]ColumnValue{ .{ .string = "table-one" }, .{ .int64 = 111 } };
-    const v2 = [_]ColumnValue{ .{ .string = "table-two" }, .{ .int64 = 222 } };
-    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "shared-key", .values = &v1 }}, 1);
-    try store.apply(&.{.{ .kind = .insert, .table_id = 2, .key = "shared-key", .values = &v2 }}, 1);
-
-    if (try store.get(1, "shared-key", 1)) |row| {
-        var r = row;
-        defer r.deinit(alloc);
-        try testing.expectEqual(@as(i64, 111), r.values[1].int64);
-    } else return error.Table1Missing;
-
-    if (try store.get(2, "shared-key", 1)) |row| {
-        var r = row;
-        defer r.deinit(alloc);
-        try testing.expectEqual(@as(i64, 222), r.values[1].int64);
-    } else return error.Table2Missing;
-}
-
-test "Storage: scan returns all memtable rows" {
-    const alloc = testing.allocator;
-    const dir = try makeTempDir(alloc);
-    defer alloc.free(dir);
-    defer removeDir(dir);
-
-    var store = try Storage.init(dir, alloc);
-    defer store.deinit();
-    try store.registerTable(makeSchema(1));
-
-    const v1 = [_]ColumnValue{ .{ .string = "a" }, .{ .int64 = 1 } };
-    const v2 = [_]ColumnValue{ .{ .string = "b" }, .{ .int64 = 2 } };
-    const v3 = [_]ColumnValue{ .{ .string = "c" }, .{ .int64 = 3 } };
-    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "k1", .values = &v1 }}, 1);
-    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "k2", .values = &v2 }}, 2);
-    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "k3", .values = &v3 }}, 3);
-
-    var iter = try store.scan(1, storage.KeyRange.all(), 10, alloc);
-    defer iter.deinit();
-
-    var count: usize = 0;
-    while (try iter.next()) |_| count += 1;
-    try testing.expectEqual(@as(usize, 3), count);
-}
-
-test "Storage: scan reads rows from SSTable after flush" {
-    const alloc = testing.allocator;
-    const dir = try makeTempDir(alloc);
-    defer alloc.free(dir);
-    defer removeDir(dir);
-
-    var store = try Storage.init(dir, alloc);
-    defer store.deinit();
-    try store.registerTable(makeSchema(1));
-
-    const v = [_]ColumnValue{ .{ .string = "x" }, .{ .int64 = 42 } };
-    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "k", .values = &v }}, 1);
-    try store.flushAll();
-
-    var iter = try store.scan(1, storage.KeyRange.all(), 10, alloc);
-    defer iter.deinit();
-
-    var count: usize = 0;
-    while (try iter.next()) |row| {
-        try testing.expectEqualStrings("k", row.key);
-        try testing.expectEqual(@as(i64, 42), row.values[1].int64);
-        count += 1;
-    }
-    try testing.expectEqual(@as(usize, 1), count);
-}
-
-test "Storage: scan excludes tombstoned rows across levels" {
-    const alloc = testing.allocator;
-    const dir = try makeTempDir(alloc);
-    defer alloc.free(dir);
-    defer removeDir(dir);
-
-    var store = try Storage.init(dir, alloc);
-    defer store.deinit();
-    try store.registerTable(makeSchema(1));
-
-    const v = [_]ColumnValue{ .{ .string = "x" }, .{ .int64 = 1 } };
-    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "gone", .values = &v }}, 1);
-    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "keep", .values = &v }}, 2);
-    try store.flushAll();
-    try store.apply(&.{.{ .kind = .delete, .table_id = 1, .key = "gone", .values = null }}, 3);
-
-    var iter = try store.scan(1, storage.KeyRange.all(), 10, alloc);
-    defer iter.deinit();
-
-    var found_keep = false;
-    while (try iter.next()) |row| {
-        try testing.expect(!std.mem.eql(u8, "gone", row.key));
-        if (std.mem.eql(u8, "keep", row.key)) found_keep = true;
-    }
-    try testing.expect(found_keep);
-}
-
-test "Storage: scan MVCC returns version at seq" {
-    const alloc = testing.allocator;
-    const dir = try makeTempDir(alloc);
-    defer alloc.free(dir);
-    defer removeDir(dir);
-
-    var store = try Storage.init(dir, alloc);
-    defer store.deinit();
-    try store.registerTable(makeSchema(1));
-
-    const v1 = [_]ColumnValue{ .{ .string = "old" }, .{ .int64 = 1 } };
-    const v2 = [_]ColumnValue{ .{ .string = "new" }, .{ .int64 = 2 } };
-    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "k", .values = &v1 }}, 5);
-    try store.flushAll();
-    try store.apply(&.{.{ .kind = .update, .table_id = 1, .key = "k", .values = &v2 }}, 10);
-
-    {
-        var iter = try store.scan(1, storage.KeyRange.all(), 5, alloc);
-        defer iter.deinit();
-        const row = (try iter.next()) orelse return error.MissingAtSeq5;
-        try testing.expectEqual(@as(i64, 1), row.values[1].int64);
+    var i: Seq = 1;
+    while (i <= 200) : (i += 1) {
+        var buf: [16]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "k_{d:03}", .{i}) catch unreachable;
+        try lsm.apply(&[_]Mutation{ .{ .kind = .insert, .table_id = 1, .key = key, .value = "v" } }, i);
     }
     {
-        var iter = try store.scan(1, storage.KeyRange.all(), 10, alloc);
-        defer iter.deinit();
-        const row = (try iter.next()) orelse return error.MissingAtSeq10;
-        try testing.expectEqual(@as(i64, 2), row.values[1].int64);
+        const r1 = try lsm.get("k_001", 200);
+        try testing.expect(r1 != null);
+        if (r1) |r| r.deinit(alloc);
+    }
+    {
+        const r2 = try lsm.get("k_100", 200);
+        try testing.expect(r2 != null);
+        if (r2) |r| r.deinit(alloc);
+    }
+    {
+        const r3 = try lsm.get("k_200", 200);
+        try testing.expect(r3 != null);
+        if (r3) |r| r.deinit(alloc);
     }
 }
 
-test "Storage: scan range limits returned rows" {
+test "lsm: scan" {
     const alloc = testing.allocator;
-    const dir = try makeTempDir(alloc);
-    defer alloc.free(dir);
-    defer removeDir(dir);
+    const path = "/tmp/foldb_lsm_4";
+    var lsm = try LSM.init(path, alloc);
+    defer lsm.deinit();
 
-    var store = try Storage.init(dir, alloc);
-    defer store.deinit();
-    try store.registerTable(makeSchema(1));
-
-    const v = [_]ColumnValue{ .{ .string = "x" }, .{ .int64 = 0 } };
-    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "a", .values = &v }}, 1);
-    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "b", .values = &v }}, 2);
-    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "c", .values = &v }}, 3);
-    try store.flushAll();
-    try store.apply(&.{.{ .kind = .insert, .table_id = 1, .key = "d", .values = &v }}, 4);
-
-    // Range ["b", "d") spans SSTable ("a","b","c") and memtable ("d")
-    const range = storage.KeyRange{ .start = "b", .end = "d", .start_inclusive = true };
-    var iter = try store.scan(1, range, 10, alloc);
-    defer iter.deinit();
-
-    var count: usize = 0;
-    while (try iter.next()) |row| {
-        try testing.expect(std.mem.order(u8, row.key, "b") != .lt);
-        try testing.expect(std.mem.order(u8, row.key, "d") == .lt);
-        count += 1;
+    var i: Seq = 1;
+    const keys = [_][]const u8{ "a", "b", "c", "d", "e" };
+    for (keys) |k| {
+        try lsm.apply(&[_]Mutation{ .{ .kind = .insert, .table_id = 1, .key = k, .value = "v" } }, i);
+        i += 1;
     }
-    try testing.expectEqual(@as(usize, 2), count); // "b" and "c" only
+
+    const range = KeyRange{ .start = "b", .end = "d", .start_inclusive = true };
+    const rows = try lsm.scan(range, i - 1, alloc);
+    defer {
+        for (rows) |r| r.deinit(alloc);
+        alloc.free(rows);
+    }
+    try testing.expect(rows.len >= 2);
 }

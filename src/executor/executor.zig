@@ -1,67 +1,37 @@
-/// Fold Executor: consumes committed LogEntries, applies mutations to Storage deterministically.
+/// Fold Executor: consumes committed LogEntries, applies KV mutations to Storage deterministically.
 const std = @import("std");
 const assert = std.debug.assert;
 const types_mod = @import("types.zig");
-const registry_mod = @import("registry.zig");
 const log_mod = @import("log.zig");
 const storage_mod = @import("storage.zig");
 const determinism_mod = @import("determinism.zig");
 const cdc_mod = @import("cdc.zig");
 const obs = @import("observability.zig");
 
-// Verify determinism invariants at compile time.
 comptime {
     determinism_mod.verifyExecutorModule();
 }
 
-pub const QueryHash = types_mod.QueryHash;
-pub const ResolvedValue = types_mod.ResolvedValue;
-pub const ResolvedKind = types_mod.ResolvedKind;
 pub const AbortCode = types_mod.AbortCode;
 pub const ExecResult = types_mod.ExecResult;
 pub const TxnIntentDecoded = types_mod.TxnIntentDecoded;
 pub const ValidatedTxnEntry = types_mod.ValidatedTxnEntry;
-pub const TxnIntentHeader = types_mod.TxnIntentHeader;
 pub const serialize_txn_intent = types_mod.serialize_txn_intent;
 pub const deserialize_txn_intent = types_mod.deserialize_txn_intent;
 pub const PartitionId = types_mod.PartitionId;
-
-pub const QueryContext = registry_mod.QueryContext;
-pub const QueryHandler = registry_mod.QueryHandler;
-pub const RegisteredHandler = registry_mod.RegisteredHandler;
-pub const QueryRegistry = registry_mod.QueryRegistry;
-
 pub const LogEntry = log_mod.LogEntry;
 pub const EntryKind = log_mod.EntryKind;
-
 pub const Storage = storage_mod.Storage;
-pub const ReadTracker = storage_mod.ReadTracker;
 pub const Mutation = storage_mod.Mutation;
-pub const ColumnValue = storage_mod.ColumnValue;
-pub const Row = storage_mod.Row;
 pub const Seq = types_mod.Seq;
 
-pub const ExecutorError = error{
-    ConstraintViolation,
-};
-
-/// Maximum drain iterations before treating the log as broken.
-const drain_iterations_max: u32 = 1 << 20;
-
-/// Domain boundary — CRC-verifies and decodes a txn_intent LogEntry.
-/// Returns error for corrupt or malformed entries; never returns partial state.
-/// Call this before handing the entry to the Executor core.
 pub fn validate_txn_entry(entry: LogEntry, alloc: std.mem.Allocator) !ValidatedTxnEntry {
     assert(entry.header.kind == .txn_intent);
     if (!entry.verify_crc()) return error.CrcMismatch;
     const decoded = try deserialize_txn_intent(entry.payload, alloc);
-    assert(decoded.query_hash.len == 32);
-    return .{ .seq = entry.header.seq, .epoch = entry.header.epoch, .decoded = decoded };
+    return .{ .seq = entry.header.seq, .partition = 0, .decoded = decoded };
 }
 
-/// Domain boundary — decodes a snapshot_marker LogEntry payload.
-/// Returns only the inner marker sequence — the only field the core uses.
-/// Returns error if the payload is malformed.
 fn validate_snapshot_entry(entry: LogEntry, alloc: std.mem.Allocator) !Seq {
     assert(entry.header.kind == .snapshot_marker);
     const marker = try storage_mod.SnapshotMarkerPayload.deserialize(entry.payload, alloc);
@@ -73,113 +43,31 @@ fn validate_snapshot_entry(entry: LogEntry, alloc: std.mem.Allocator) !Seq {
 }
 
 pub const ExecutorMetrics = obs.ExecutorMetrics;
-
 pub const Log = log_mod.Log;
-pub const LogMux = log_mod.LogMux;
 pub const CdcManager = cdc_mod.CdcManager;
-pub const CdcSubscription = cdc_mod.CdcSubscription;
-pub const CdcEvent = cdc_mod.CdcEvent;
-pub const CdcEffect = cdc_mod.CdcEffect;
-pub const CdcOperation = cdc_mod.CdcOperation;
-pub const BeforeImages = cdc_mod.BeforeImages;
 
-// ─── Schema-change payload envelope ─────────────────────────────────────────
-//
-// All schema_change log entries carry a 5-byte header:
-//   [1 byte: SchemaPayloadKind][4 bytes: database_id, little-endian][sql text...]
-//
-// This allows FoldExecutors to route DDL and query registration to the correct
-// per-database SchemaRegistry. Payloads shorter than 5 bytes or with an unknown
-// kind byte are silently skipped (the entry still advances the seq counter).
-
-pub const DatabaseId = u32;
-pub const default_database_id: DatabaseId = 1;
-
-pub const SchemaPayloadKind = enum(u8) {
-    /// DDL SQL (CREATE TABLE, DROP TABLE, etc.) scoped to database_id.
-    ddl = 0x01,
-    /// Query registration SQL scoped to database_id.
-    query = 0x02,
-    /// Cluster-level DDL (CREATE DATABASE, DROP DATABASE) — database_id unused.
-    cluster = 0x03,
-};
-
-pub const DecodedSchemaPayload = struct {
-    kind: SchemaPayloadKind,
-    db_id: DatabaseId,
-    sql: []const u8,
-};
-
-pub fn encodeSchemaPayload(
-    kind: SchemaPayloadKind,
-    db_id: DatabaseId,
-    sql: []const u8,
-    alloc: std.mem.Allocator,
-    buf: *std.ArrayList(u8),
-) !void {
-    try buf.append(alloc, @intFromEnum(kind));
-    var db_bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &db_bytes, db_id, .little);
-    try buf.appendSlice(alloc, &db_bytes);
-    try buf.appendSlice(alloc, sql);
-}
-
-pub fn decodeSchemaPayload(payload: []const u8) ?DecodedSchemaPayload {
-    if (payload.len < 5) return null;
-    const kind: SchemaPayloadKind = switch (payload[0]) {
-        @intFromEnum(SchemaPayloadKind.ddl) => .ddl,
-        @intFromEnum(SchemaPayloadKind.query) => .query,
-        @intFromEnum(SchemaPayloadKind.cluster) => .cluster,
-        else => return null,
-    };
-    const db_id = std.mem.readInt(u32, payload[1..5], .little);
-    return .{ .kind = kind, .db_id = db_id, .sql = payload[5..] };
-}
+const TableId = storage_mod.TableId;
+const default_table_id: TableId = 1;
+const drain_iterations_max: u32 = 1 << 20;
 
 pub const Executor = struct {
     storage: *Storage,
-    registry: QueryRegistry,
     committed_seq: Seq,
     alloc: std.mem.Allocator,
-    /// Number of storage partitions; used to validate write_set_hint against actual mutations.
-    /// Must match the sequencer's partition_count. Defaults to 1 (single-partition).
     partition_count: PartitionId = 1,
-    /// Optional log reference for notifying snapshot advancement.
     log: ?*Log = null,
-    /// Optional CDC manager for change-data-capture event dispatch.
     cdc: ?*CdcManager = null,
     metrics: obs.ExecutorMetrics = .{},
+    table_id: TableId = default_table_id,
 
     pub fn init(storage: *Storage, alloc: std.mem.Allocator) Executor {
-        return .{
-            .storage = storage,
-            .registry = QueryRegistry.init(alloc),
-            .committed_seq = 0,
-            .alloc = alloc,
-        };
+        return .{ .storage = storage, .committed_seq = 0, .alloc = alloc };
     }
 
-    /// Wire a log for snapshot_marker notification.
-    pub fn with_log(self: *Executor, log: *Log) void {
-        self.log = log;
-    }
-
-    /// Wire a CDC manager to receive change events from each committed transaction.
-    pub fn with_cdc(self: *Executor, manager: *CdcManager) void {
-        self.cdc = manager;
-    }
-
-    pub fn deinit(self: *Executor) void {
-        self.registry.deinit();
-    }
-
-    pub fn register(self: *Executor, hash: [32]u8, handler: QueryHandler) !void {
-        try self.registry.register(hash, handler);
-    }
-
-    pub fn current_seq(self: *const Executor) Seq {
-        return self.committed_seq;
-    }
+    pub fn with_log(self: *Executor, log: *Log) void { self.log = log; }
+    pub fn with_cdc(self: *Executor, manager: *CdcManager) void { self.cdc = manager; }
+    pub fn deinit(self: *Executor) void { _ = self; }
+    pub fn current_seq(self: *const Executor) Seq { return self.committed_seq; }
 
     pub fn run(self: *Executor, entry: LogEntry) !ExecResult {
         defer {
@@ -187,159 +75,183 @@ pub const Executor = struct {
             self.metrics.current_seq.set(@intCast(entry.header.seq));
         }
 
-        // Non-txn entries advance seq; snapshot_marker additionally notifies the log.
         if (entry.header.kind != .txn_intent) {
             if (entry.header.kind == .snapshot_marker) {
-                // Domain boundary — decode snapshot marker; skip notification if payload is malformed.
-                if (validate_snapshot_entry(entry, self.alloc)) |marker_seq| {
-                    if (self.log) |l| l.notify_snapshot(marker_seq);
+                if (validate_snapshot_entry(entry, self.alloc)) |ms| {
+                    if (self.log) |l| l.notify_snapshot(ms);
                 } else |_| {}
             }
             self.metrics.noops_processed.inc();
             return .{ .ok = .{ .rows_affected = 0 } };
         }
 
-        // This is the domain boundary — all data past this point is validated.
         var validated = validate_txn_entry(entry, self.alloc) catch |e| {
             self.metrics.txns_aborted.inc();
             return switch (e) {
-                error.CrcMismatch => .{ .abort = .{ .code = .bad_params, .detail = "crc mismatch" } },
-                else => .{ .abort = .{ .code = .bad_params, .detail = "invalid payload" } },
+                error.CrcMismatch => .{ .abort = .{ .code = .bad_payload, .detail = "crc mismatch" } },
+                else => .{ .abort = .{ .code = .bad_payload, .detail = "invalid payload" } },
             };
         };
-        defer validated.decoded.deinit();
-
-        return self.run_validated(validated);
-    }
-
-    pub fn run_validated(self: *Executor, entry: ValidatedTxnEntry) !ExecResult {
-        assert(entry.seq > 0);
-        const decoded = entry.decoded;
-
-        const registered = self.registry.lookup(decoded.query_hash.*) orelse {
-            self.metrics.txns_missing_query.inc();
-            return .{ .abort = .{ .code = .missing_query, .detail = "unknown query hash" } };
-        };
-
-        const handler = switch (registered) {
-            .single => |single_handler| single_handler,
-        };
-
-        const ctx = QueryContext{
-            .params = decoded.params,
-            .resolved = decoded.nondet,
-            .seq = entry.seq,
-            .alloc = self.alloc,
-        };
+        defer validated.decoded.deinit(self.alloc);
 
         var mutations: std.ArrayList(Mutation) = .empty;
         defer {
-            for (mutations.items) |mutation| {
-                self.alloc.free(mutation.key);
-                if (mutation.values) |values| {
-                    for (values) |value| value.freeIfOwned(self.alloc);
-                    self.alloc.free(values);
-                }
+            for (mutations.items) |m| {
+                self.alloc.free(m.key);
+                if (m.value) |v| self.alloc.free(v);
             }
             mutations.deinit(self.alloc);
         }
 
-        // Activate read tracking when recon_seq is set — enables OCC conflict detection.
-        var read_tracker: ?storage_mod.ReadTracker = if (decoded.recon_seq > 0)
-            storage_mod.ReadTracker.init(self.alloc)
-        else
-            null;
-        defer if (read_tracker) |*tracker| tracker.deinit();
-        if (read_tracker != null) self.storage.read_tracker = &read_tracker.?;
-
-        assert(mutations.items.len == 0);
-        handler(ctx, self.storage, &mutations) catch |err| {
-            self.storage.read_tracker = null;
-            if (err == error.ConstraintViolation) {
-                self.metrics.txns_aborted.inc();
-                return .{ .abort = .{ .code = .constraint_violation, .detail = "constraint failed" } };
-            }
-            return err;
-        };
-        self.storage.read_tracker = null;
-
-        // OCC: if any read key was written after recon_seq, the gateway's hints are stale.
-        if (read_tracker) |*tracker| {
-            assert(decoded.recon_seq > 0);
-            if (read_write_conflict(tracker, decoded.recon_seq)) {
-                self.metrics.txns_aborted.inc();
-                return .{ .abort = .{ .code = .retry, .detail = "read-write conflict" } };
+        const decoded = validated.decoded;
+        for (decoded.ops) |op| {
+            switch (op) {
+                .set => |s| {
+                    const key_copy = try self.alloc.dupe(u8, s.key);
+                    errdefer self.alloc.free(key_copy);
+                    const val = try self.alloc.dupe(u8, s.value);
+                    errdefer self.alloc.free(val);
+                    try mutations.append(self.alloc, .{ .kind = .update, .table_id = self.table_id, .key = key_copy, .value = val });
+                },
+                .delete => |d| {
+                    const key_copy = try self.alloc.dupe(u8, d.key);
+                    errdefer self.alloc.free(key_copy);
+                    try mutations.append(self.alloc, .{ .kind = .delete, .table_id = self.table_id, .key = key_copy, .value = null });
+                },
             }
         }
 
-        try self.run_validated_apply(entry, mutations.items);
+        var before_images: ?cdc_mod.BeforeImages = null;
+        defer if (before_images) |*bi| bi.deinit();
+        if (self.cdc) |mgr| {
+            const pre_seq: Seq = if (entry.header.seq > 0) entry.header.seq - 1 else 0;
+            before_images = try mgr.capture_before_images(mutations.items, self.storage, pre_seq, self.alloc);
+        }
+        try self.storage.apply(mutations.items, entry.header.seq);
+        if (self.cdc) |mgr| {
+            if (before_images) |bi| {
+                try mgr.dispatch(entry.header.seq, 0, .txn_intent, mutations.items, bi, self.alloc);
+            }
+        }
 
         const rows: u64 = @intCast(mutations.items.len);
-        assert(rows == @as(u64, mutations.items.len));
         self.metrics.txns_ok.inc();
         self.metrics.rows_affected.add(rows);
         return .{ .ok = .{ .rows_affected = rows } };
     }
 
-    fn run_validated_apply(
-        self: *Executor,
-        entry: ValidatedTxnEntry,
-        mutations: []const Mutation,
-    ) !void {
-        var before_images: ?cdc_mod.BeforeImages = null;
-        defer if (before_images) |*before_img| before_img.deinit();
-        if (self.cdc) |mgr| {
-            const pre_seq: Seq = if (entry.seq > 0) entry.seq - 1 else 0;
-            before_images = try mgr.capture_before_images(mutations, self.storage, pre_seq, self.alloc);
+    fn run_collect(self: *Executor, entry: LogEntry, mut_buf: *std.ArrayList(Mutation)) !CollectOutcome {
+        if (entry.header.kind != .txn_intent) {
+            if (entry.header.kind == .snapshot_marker) {
+                if (validate_snapshot_entry(entry, self.alloc)) |ms| {
+                    if (self.log) |l| l.notify_snapshot(ms);
+                } else |_| {}
+            }
+            self.metrics.noops_processed.inc();
+            return .noop;
         }
-        try self.storage.apply(mutations, entry.seq);
-        if (self.cdc) |mgr| {
-            if (before_images) |before_img| {
-                try mgr.dispatch(entry.seq, entry.epoch, .txn_intent, mutations, before_img, self.alloc);
+
+        var validated = validate_txn_entry(entry, self.alloc) catch {
+            self.metrics.txns_aborted.inc();
+            return .aborted;
+        };
+        defer validated.decoded.deinit(self.alloc);
+
+        const start = mut_buf.items.len;
+        var committed = false;
+        defer {
+            if (!committed) {
+                for (mut_buf.items[start..]) |m| {
+                    self.alloc.free(m.key);
+                    if (m.value) |v| self.alloc.free(v);
+                }
+                mut_buf.shrinkRetainingCapacity(start);
             }
         }
+
+        const decoded = validated.decoded;
+        for (decoded.ops) |op| {
+            switch (op) {
+                .set => |s| {
+                    const key_copy = try self.alloc.dupe(u8, s.key);
+                    errdefer self.alloc.free(key_copy);
+                    const val = try self.alloc.dupe(u8, s.value);
+                    errdefer self.alloc.free(val);
+                    try mut_buf.append(self.alloc, .{ .kind = .update, .table_id = self.table_id, .key = key_copy, .value = val });
+                },
+                .delete => |d| {
+                    const key_copy = try self.alloc.dupe(u8, d.key);
+                    errdefer self.alloc.free(key_copy);
+                    try mut_buf.append(self.alloc, .{ .kind = .delete, .table_id = self.table_id, .key = key_copy, .value = null });
+                },
+            }
+        }
+
+        self.metrics.txns_ok.inc();
+        self.metrics.rows_affected.add(@intCast(mut_buf.items.len - start));
+        committed = true;
+        return .committed;
     }
 };
 
-/// Returns true if any tracked read has a row_seq newer than recon_seq, meaning
-/// the key was written after reconnaissance — the gateway's hints are stale.
-fn read_write_conflict(tracker: *const storage_mod.ReadTracker, recon_seq: Seq) bool {
-    assert(recon_seq > 0);
-    for (tracker.reads.items) |r| {
-        if (r.row_seq > recon_seq) return true;
-    }
-    return false;
-}
+const CollectOutcome = enum { committed, aborted, noop };
 
-/// Drains committed log entries into an Executor. Decouples the log from the executor
-/// so the executor only processes what's been committed rather than polling blindly.
+
+/// Drains committed log entries into an Executor.
 pub const ExecutorDriver = struct {
     log: *Log,
     executor: *Executor,
     alloc: std.mem.Allocator,
 
-    /// Process up to 256 log entries starting at executor.committed_seq+1.
-    /// Returns the number of entries processed.
     pub fn drain_once(self: *ExecutorDriver) !usize {
         const from_seq = self.executor.committed_seq + 1;
         assert(from_seq > 0);
         const entries = try self.log.read(from_seq, 256, self.alloc);
         defer {
-            for (entries) |*entry| entry.deinit(self.alloc);
+            for (entries) |*e| e.deinit(self.alloc);
             self.alloc.free(entries);
         }
-        for (entries) |entry| {
-            _ = try self.executor.run(entry);
+        if (entries.len == 0) return 0;
+
+        var mut_buf: std.ArrayList(Mutation) = .empty;
+        defer {
+            for (mut_buf.items) |m| {
+                self.alloc.free(m.key);
+                if (m.value) |v| self.alloc.free(v);
+            }
+            mut_buf.deinit(self.alloc);
         }
+
+        const PendingBatch = struct { start: usize, end: usize, seq: Seq };
+        var pending: std.ArrayList(PendingBatch) = .empty;
+        defer pending.deinit(self.alloc);
+
+        for (entries) |entry| {
+            const start = mut_buf.items.len;
+            const outcome = try self.executor.run_collect(entry, &mut_buf);
+            if (outcome == .committed) {
+                try pending.append(self.alloc, .{ .start = start, .end = mut_buf.items.len, .seq = entry.header.seq });
+            }
+        }
+
+        if (pending.items.len > 0) {
+            const apply_batch = try self.alloc.alloc(storage_mod.ApplyBatch, pending.items.len);
+            defer self.alloc.free(apply_batch);
+            for (pending.items, 0..) |p, i| {
+                apply_batch[i] = .{ .mutations = mut_buf.items[p.start..p.end], .seq = p.seq };
+            }
+            try self.executor.storage.apply_sequenced(apply_batch);
+        }
+
+        self.executor.committed_seq = entries[entries.len - 1].header.seq;
+        self.executor.metrics.current_seq.set(@intCast(self.executor.committed_seq));
         return entries.len;
     }
 
-    /// Drain until the log head is reached (no new entries). Used in tests and
-    /// single-threaded operation.
     pub fn drain_all(self: *ExecutorDriver) !void {
         for (0..drain_iterations_max) |_| {
-            const entries_count = try self.drain_once();
-            if (entries_count == 0) return;
+            const n = try self.drain_once();
+            if (n == 0) return;
         }
         return error.TooManyDrainIterations;
     }

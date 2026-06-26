@@ -89,8 +89,7 @@ test "SequencerMetrics: zero init" {
 }
 
 test "GatewayMetrics: zero init" {
-    const m: obs.GatewayMetrics = .{};
-    try testing.expectEqual(@as(u64, 0), m.queries_registered.get());
+    _ = obs.GatewayMetrics{};
 }
 
 // ---------------------------------------------------------------------------
@@ -130,12 +129,11 @@ test "TxnSummary: round-trip via debug" {
     // Test the whole SeqDescription path using the LogReader interface.
     _ = obs.EntryKindTag.txn_intent;
     _ = obs.TxnSummary{
-        .query_hash = [_]u8{0} ** 32,
+        
         .client_id = 1,
         .client_seq = 1,
-        .params_len = 0,
         .read_partition_count = 0,
         .write_partition_count = 0,
-        .nondet_count = 0,
+        .op_count = 0,
     };
 }

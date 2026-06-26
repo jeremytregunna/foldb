@@ -46,4 +46,4 @@ These two clocks are independent; the harness is responsible for keeping them co
 - `src/sim/clock.zig` — `VirtualClock`: injectable `i64` Unix seconds clock with saturating `advance` and absolute `setTo`
 - `src/sim/network.zig` — `NetworkSim` + `NetworkConfig`: deterministic message drop (`shouldDrop`) and delay sampling (`delayNs`)
 - `src/sim/disk.zig` — `DiskSim` + `DiskConfig`: deterministic I/O fault injection (`shouldFault`)
-- `src/sim/workload.zig` — stateful SQL op generator; produces a seeded sequence of insert/update/delete/select ops against a `sim_kv (id INT64, value INT64)` table, tracking live keys to avoid invalid deletes and PK conflicts
+- `src/sim/workload.zig` — deterministic KV workload helpers for seeded mutation/read scenarios

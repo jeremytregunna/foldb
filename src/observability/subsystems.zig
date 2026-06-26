@@ -116,8 +116,6 @@ pub const ExecutorMetrics = struct {
     rows_affected: Counter = .{},
     /// Noop log entries processed (heartbeats / gap fillers).
     noops_processed: Counter = .{},
-    /// Transactions aborted because the query hash was not registered.
-    txns_missing_query: Counter = .{},
     /// Highest seq the executor has processed.
     current_seq: Gauge = .{},
     /// Seq behind the log head (how far behind the executor is).
@@ -130,7 +128,6 @@ pub const ExecutorMetrics = struct {
         self.txns_aborted.reset();
         self.rows_affected.reset();
         self.noops_processed.reset();
-        self.txns_missing_query.reset();
         self.exec_latency.reset();
         // Gauges are not reset — they reflect current state.
     }
@@ -168,8 +165,6 @@ pub const SequencerMetrics = struct {
 // ---------------------------------------------------------------------------
 
 pub const GatewayMetrics = struct {
-    /// SQL queries registered.
-    queries_registered: Counter = .{},
     /// execute() calls.
     queries_executed: Counter = .{},
     /// Transactions that ended in an abort visible to the client.
@@ -182,7 +177,6 @@ pub const GatewayMetrics = struct {
     exec_latency: Histogram = .{},
 
     pub fn reset(self: *GatewayMetrics) void {
-        self.queries_registered.reset();
         self.queries_executed.reset();
         self.queries_aborted.reset();
         self.nondet_resolved.reset();

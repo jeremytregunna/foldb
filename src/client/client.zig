@@ -1,3 +1,4 @@
+/// FoldDB client — KV wire protocol (GET, SET, DELETE, RANGE, BATCH).
 const std = @import("std");
 const assert = std.debug.assert;
 const frame = @import("frame.zig");
@@ -6,32 +7,37 @@ const messages = @import("messages.zig");
 
 const net = std.Io.net;
 
-pub const QueryHash = [32]u8;
-
 /// Maximum frames consumed per response before treating the connection as broken.
 const frames_per_response_max: u32 = 1 << 20;
 
-pub const ExecResult = struct {
-    rows_affected: u64,
+pub const MutateResult = struct {
     committed_seq: u64,
+    cas_failed: ?u64 = null,
 };
 
-pub const Row = []messages.TypedValue;
+pub const RangeEntry = messages.RangeEntry;
 
-pub const ResultSet = struct {
-    columns: []messages.ColumnDesc,
-    rows: []Row,
+pub const RangeResult = struct {
+    entries: []const RangeEntry,
+    committed_seq: u64,
     alloc: std.mem.Allocator,
 
-    pub fn deinit(self: *ResultSet) void {
-        assert(self.rows.len == 0 or self.columns.len > 0);
-        for (self.rows) |row| {
-            for (row) |value| value.deinit(self.alloc);
-            self.alloc.free(row);
+    pub fn deinit(self: *RangeResult) void {
+        for (self.entries) |*e| {
+            self.alloc.free(e.key);
+            self.alloc.free(e.value);
         }
-        self.alloc.free(self.rows);
-        for (self.columns) |column_desc| codec.freeColumnDesc(column_desc, self.alloc);
-        if (self.columns.len > 0) self.alloc.free(self.columns);
+        self.alloc.free(self.entries);
+    }
+};
+
+pub const GetResult = struct {
+    value: ?[]const u8,
+    committed_seq: u64,
+    alloc: std.mem.Allocator,
+
+    pub fn deinit(self: *GetResult) void {
+        if (self.value) |v| self.alloc.free(v);
     }
 };
 
@@ -47,31 +53,35 @@ pub const Client = struct {
     stream: net.Stream,
     reader: net.Stream.Reader,
     writer: net.Stream.Writer,
-    read_buf: [8192]u8,
-    write_buf: [8192]u8,
+    read_buf: []u8,
+    write_buf: []u8,
     alloc: std.mem.Allocator,
     stream_id_next: u64,
     last_error: [256]u8,
     last_error_len: u32 = 0,
 
-    fn init(io: std.Io, stream: net.Stream, alloc: std.mem.Allocator) Client {
-        // SAFETY: reader, writer, read_buf, write_buf, and last_error are all initialized
-        // in connect() before any method that reads them is called.
+    pub fn init(io: std.Io, stream: net.Stream, alloc: std.mem.Allocator) !Client {
+        const read_buf = try alloc.alloc(u8, 8192);
+        errdefer alloc.free(read_buf);
+        const write_buf = try alloc.alloc(u8, 8192);
         return .{
             .io = io,
             .stream = stream,
-            .reader = undefined,
-            .writer = undefined,
-            .read_buf = undefined,
-            .write_buf = undefined,
+            .reader = stream.reader(io, read_buf),
+            .writer = stream.writer(io, write_buf),
+            .read_buf = read_buf,
+            .write_buf = write_buf,
             .alloc = alloc,
             .stream_id_next = 1,
             .last_error = undefined,
+            .last_error_len = 0,
         };
     }
 
     pub fn deinit(self: *Client) void {
         self.stream.close(self.io);
+        self.alloc.free(self.read_buf);
+        self.alloc.free(self.write_buf);
     }
 
     fn alloc_stream_id(self: *Client) u64 {
@@ -84,7 +94,7 @@ pub const Client = struct {
 
     fn store_error(self: *Client, payload: []const u8) void {
         if (payload.len < 7) return;
-        var cursor = codec.Cursor.init(payload);
+        var cursor = codec.Cursor{ .data = payload };
         cursor.pos += 3; // skip code(2) + severity(1)
         const msg_len = cursor.readU32Le() catch return;
         const msg = cursor.readSlice(@min(msg_len, self.last_error.len)) catch return;
@@ -101,6 +111,8 @@ pub const Client = struct {
     pub fn close(self: *Client) void {
         frame.sendFrame(&self.writer.interface, 0, .goodbye, frame.Flags.final_only, null, &.{}) catch |err| std.log.warn("close goodbye: {}", .{err});
         self.stream.close(self.io);
+        self.alloc.free(self.read_buf);
+        self.alloc.free(self.write_buf);
     }
 
     fn read_frame(self: *Client) !Frame {
@@ -113,6 +125,26 @@ pub const Client = struct {
         return .{ .kind = kind, .stream_id = header.stream_id, .payload = payload };
     }
 
+    /// Wait for a response frame on the given stream_id.
+    fn read_response(self: *Client, stream_id: u64) !Frame {
+        assert(stream_id > 0);
+        for (0..frames_per_response_max) |_| {
+            const f = try self.read_frame();
+            if (f.stream_id != stream_id) continue;
+            switch (f.kind) {
+                .response => return f,
+                .range_rows => return f,
+                .err => {
+                    self.store_error(f.payload);
+                    self.alloc.free(f.payload);
+                    return error.ServerError;
+                },
+                else => continue,
+            }
+        }
+        return error.TooManyFrames;
+    }
+
     pub fn handshake(self: *Client, database_name: []const u8) !void {
         hello_wait: {
             for (0..frames_per_response_max) |_| {
@@ -120,7 +152,7 @@ pub const Client = struct {
                 defer self.alloc.free(f.payload);
                 switch (f.kind) {
                     .hello => {
-                        var cursor = codec.Cursor.init(f.payload);
+                        var cursor = codec.Cursor{ .data = f.payload };
                         const hello = try messages.decodeHello(&cursor, self.alloc);
                         messages.freeHello(hello, self.alloc);
                         break :hello_wait;
@@ -157,28 +189,124 @@ pub const Client = struct {
         return error.TooManyFrames;
     }
 
-    pub fn register(self: *Client, sql: []const u8) !QueryHash {
-        assert(sql.len > 0);
+    // ─── KV Operations ───
+
+    /// GET key → value | null
+    pub fn get(self: *Client, key: []const u8) !GetResult {
+        return self.get_at(key, std.math.maxInt(u64));
+    }
+
+    /// GET key at specific sequence (historical read).
+    pub fn get_at(self: *Client, key: []const u8, at_seq: u64) !GetResult {
         const stream_id = self.alloc_stream_id();
         var payload: std.ArrayListUnmanaged(u8) = .empty;
         defer payload.deinit(self.alloc);
-        try messages.encodeRegisterQuery(&payload, self.alloc, .{ .sql = sql });
-        try frame.sendFrameList(&self.writer.interface, stream_id, .register, frame.Flags.final_only, null, payload);
-        return self.register_read_response(stream_id);
+        try messages.encodeGetRequest(&payload, self.alloc, .{ .key = key, .at_seq = at_seq });
+        try frame.sendFrameList(&self.writer.interface, stream_id, .get, frame.Flags.final_only, null, payload);
+
+        const f = try self.read_response(stream_id);
+        defer self.alloc.free(f.payload);
+        var cursor = codec.Cursor{ .data = f.payload };
+        const res = try messages.decodeGetResponse(&cursor, self.alloc);
+        return .{ .value = res.value, .committed_seq = res.committed_seq, .alloc = self.alloc };
     }
 
-    fn register_read_response(self: *Client, stream_id: u64) !QueryHash {
-        assert(stream_id > 0);
+    /// SET key value → committed sequence number.
+    pub fn set(self: *Client, key: []const u8, value: []const u8) !MutateResult {
+        return self.set_cas(key, value, 0);
+    }
+
+    /// SET key value if current seq == expected_seq (compare-and-swap).
+    pub fn set_cas(self: *Client, key: []const u8, value: []const u8, expected_seq: u64) !MutateResult {
+        const stream_id = self.alloc_stream_id();
+        var payload: std.ArrayListUnmanaged(u8) = .empty;
+        defer payload.deinit(self.alloc);
+        try messages.encodeSetRequest(&payload, self.alloc, .{
+            .key = key,
+            .value = value,
+            .expected_seq = expected_seq,
+        });
+        try frame.sendFrameList(&self.writer.interface, stream_id, .set, frame.Flags.final_only, null, payload);
+
+        const f = try self.read_response(stream_id);
+        defer self.alloc.free(f.payload);
+        var cursor = codec.Cursor{ .data = f.payload };
+        const res = try messages.decodeMutateResponse(&cursor);
+        return .{ .committed_seq = res.committed_seq, .cas_failed = res.cas_failed };
+    }
+
+    /// DELETE key → committed sequence number.
+    pub fn delete(self: *Client, key: []const u8) !MutateResult {
+        const stream_id = self.alloc_stream_id();
+        var payload: std.ArrayListUnmanaged(u8) = .empty;
+        defer payload.deinit(self.alloc);
+        try messages.encodeDeleteRequest(&payload, self.alloc, .{ .key = key });
+        try frame.sendFrameList(&self.writer.interface, stream_id, .delete, frame.Flags.final_only, null, payload);
+
+        const f = try self.read_response(stream_id);
+        defer self.alloc.free(f.payload);
+        var cursor = codec.Cursor{ .data = f.payload };
+        const res = try messages.decodeMutateResponse(&cursor);
+        return .{ .committed_seq = res.committed_seq, .cas_failed = null };
+    }
+
+    /// RANGE start end → slice of (key, value) pairs.
+    pub fn range(self: *Client, start: []const u8, end: []const u8) !RangeResult {
+        return self.range_limit(start, end, 0);
+    }
+
+    /// RANGE start end with max limit.
+    pub fn range_limit(self: *Client, start: []const u8, end: []const u8, limit: u32) !RangeResult {
+        const stream_id = self.alloc_stream_id();
+        var payload: std.ArrayListUnmanaged(u8) = .empty;
+        defer payload.deinit(self.alloc);
+        try messages.encodeRangeRequest(&payload, self.alloc, .{
+            .start = start,
+            .end = end,
+            .limit = limit,
+        });
+        try frame.sendFrameList(&self.writer.interface, stream_id, .range, frame.Flags.final_only, null, payload);
+
+        const f = try self.read_response(stream_id);
+        defer self.alloc.free(f.payload);
+        var cursor = codec.Cursor{ .data = f.payload };
+        const res = try messages.decodeRangeResponse(&cursor, self.alloc);
+        return .{ .entries = res.entries, .committed_seq = res.committed_seq, .alloc = self.alloc };
+    }
+
+    /// BATCH []op → []result.
+    pub fn batch(self: *Client, ops: []const messages.BatchOp) ![]messages.BatchResult {
+        const stream_id = self.alloc_stream_id();
+        var payload: std.ArrayListUnmanaged(u8) = .empty;
+        defer payload.deinit(self.alloc);
+        try messages.encodeBatch(&payload, self.alloc, ops);
+        try frame.sendFrameList(&self.writer.interface, stream_id, .batch, frame.Flags.final_only, null, payload);
+
+        const f = try self.read_response(stream_id);
+        defer self.alloc.free(f.payload);
+        var cursor = codec.Cursor{ .data = f.payload };
+        return try messages.decodeBatchResponse(&cursor, self.alloc);
+    }
+
+    // ─── Ping ───
+
+    pub fn ping(self: *Client) !u64 {
+        var payload: std.ArrayListUnmanaged(u8) = .empty;
+        defer payload.deinit(self.alloc);
+        try messages.encodePing(&payload, self.alloc, .{
+            .client_wall_micros = blk: { var tv: std.os.linux.timeval = undefined; _ = std.os.linux.gettimeofday(&tv, null); break :blk @as(u64, @intCast(tv.sec)) * 1000000 + @as(u64, @intCast(tv.usec)); }
+        });
+        try frame.sendFrameList(&self.writer.interface, 0, .ping, frame.Flags.final_only, null, payload);
+
         for (0..frames_per_response_max) |_| {
             const f = try self.read_frame();
             defer self.alloc.free(f.payload);
-            if (f.stream_id != stream_id) continue;
             switch (f.kind) {
-                .registered => {
-                    var cursor = codec.Cursor.init(f.payload);
-                    const registered = try messages.decodeRegistered(&cursor, self.alloc);
-                    messages.freeRegistered(registered, self.alloc);
-                    return registered.query_hash;
+                .pong => {
+                    const now_micros: u64 = blk: { var tv: std.os.linux.timeval = undefined; _ = std.os.linux.gettimeofday(&tv, null); break :blk @as(u64, @intCast(tv.sec)) * 1000000 + @as(u64, @intCast(tv.usec)); };
+                    var cursor = codec.Cursor{ .data = f.payload };
+                    const pong = try messages.decodePong(&cursor);
+                    return now_micros - pong.client_wall_micros;
                 },
                 .err => {
                     self.store_error(f.payload);
@@ -188,156 +316,37 @@ pub const Client = struct {
             }
         }
         return error.TooManyFrames;
-    }
-
-    pub fn execute(self: *Client, hash: QueryHash, params: []const messages.TypedValue) !ExecResult {
-        const stream_id = self.alloc_stream_id();
-        var payload: std.ArrayListUnmanaged(u8) = .empty;
-        defer payload.deinit(self.alloc);
-        try messages.encodeExecute(&payload, self.alloc, .{ .query_hash = hash, .params = params });
-        try frame.sendFrameList(&self.writer.interface, stream_id, .execute, frame.Flags.final_only, null, payload);
-        return self.execute_read_ok(stream_id);
-    }
-
-    fn execute_read_ok(self: *Client, stream_id: u64) !ExecResult {
-        assert(stream_id > 0);
-        for (0..frames_per_response_max) |_| {
-            const f = try self.read_frame();
-            defer self.alloc.free(f.payload);
-            if (f.stream_id != stream_id) continue;
-            switch (f.kind) {
-                .exec_ok => {
-                    var cursor = codec.Cursor.init(f.payload);
-                    const exec_ok = try messages.decodeExecOk(&cursor);
-                    return .{
-                        .rows_affected = exec_ok.rows_affected,
-                        .committed_seq = exec_ok.committed_seq,
-                    };
-                },
-                .err => {
-                    self.store_error(f.payload);
-                    return error.ServerError;
-                },
-                else => {},
-            }
-        }
-        return error.TooManyFrames;
-    }
-
-    pub fn query(self: *Client, hash: QueryHash, params: []const messages.TypedValue) !ResultSet {
-        const stream_id = self.alloc_stream_id();
-        var payload: std.ArrayListUnmanaged(u8) = .empty;
-        defer payload.deinit(self.alloc);
-        try messages.encodeExecute(&payload, self.alloc, .{ .query_hash = hash, .params = params });
-        try frame.sendFrameList(&self.writer.interface, stream_id, .execute, frame.Flags.final_only, null, payload);
-        return self.query_read_result_set(stream_id);
-    }
-
-    fn query_read_result_set(self: *Client, stream_id: u64) !ResultSet {
-        assert(stream_id > 0);
-        var columns: []messages.ColumnDesc = &.{};
-        var rows: std.ArrayListUnmanaged(Row) = .empty;
-        errdefer {
-            for (rows.items) |row| {
-                for (row) |value| value.deinit(self.alloc);
-                self.alloc.free(row);
-            }
-            rows.deinit(self.alloc);
-            for (columns) |column_desc| codec.freeColumnDesc(column_desc, self.alloc);
-            if (columns.len > 0) self.alloc.free(columns);
-        }
-
-        for (0..frames_per_response_max) |_| {
-            const f = try self.read_frame();
-            defer self.alloc.free(f.payload);
-            if (f.stream_id != stream_id) continue;
-            switch (f.kind) {
-                .rows_begin => {
-                    assert(columns.len == 0); // protocol: rows_begin appears at most once
-                    columns = try self.query_read_columns(f.payload);
-                },
-                .rows_batch => {
-                    assert(columns.len > 0); // protocol: rows_batch must follow rows_begin
-                    try self.query_read_batch(f.payload, columns, &rows);
-                },
-                .exec_ok => {
-                    assert(rows.items.len == 0 or columns.len > 0);
-                    return ResultSet{
-                        .columns = columns,
-                        .rows = try rows.toOwnedSlice(self.alloc),
-                        .alloc = self.alloc,
-                    };
-                },
-                .err => {
-                    self.store_error(f.payload);
-                    return error.ServerError;
-                },
-                else => {},
-            }
-        }
-        return error.TooManyFrames;
-    }
-
-    fn query_read_columns(self: *Client, payload: []const u8) ![]messages.ColumnDesc {
-        var cursor = codec.Cursor.init(payload);
-        const col_count = try cursor.readU16Le();
-        assert(col_count > 0);
-        const columns = try self.alloc.alloc(messages.ColumnDesc, col_count);
-        var col_index: usize = 0;
-        errdefer {
-            for (columns[0..col_index]) |column_desc| codec.freeColumnDesc(column_desc, self.alloc);
-            self.alloc.free(columns);
-        }
-        while (col_index < col_count) : (col_index += 1) {
-            columns[col_index] = try codec.decodeColumnDesc(&cursor, self.alloc);
-        }
-        assert(col_index == col_count);
-        return columns;
-    }
-
-    fn query_read_batch(
-        self: *Client,
-        payload: []const u8,
-        columns: []const messages.ColumnDesc,
-        rows: *std.ArrayListUnmanaged(Row),
-    ) !void {
-        assert(columns.len > 0);
-        var cursor = codec.Cursor.init(payload);
-        const row_count = try cursor.readU32Le();
-        for (0..row_count) |_| {
-            const row = try self.alloc.alloc(messages.TypedValue, columns.len);
-            var values_decoded: usize = 0;
-            errdefer {
-                for (row[0..values_decoded]) |value| value.deinit(self.alloc);
-                self.alloc.free(row);
-            }
-            while (values_decoded < columns.len) : (values_decoded += 1) {
-                row[values_decoded] = try codec.decode(&cursor, self.alloc);
-            }
-            assert(values_decoded == columns.len);
-            try rows.append(self.alloc, row);
-        }
     }
 };
 
-/// Open a TCP connection to host:port using std.Io networking.
-/// host must be a dotted-quad IPv4 string, e.g. "127.0.0.1".
+// ─── Connection helpers ───
+
+fn setNoDelay(fd: std.posix.fd_t) void {
+    const one: u32 = 1;
+    _ = std.os.linux.setsockopt(
+        fd,
+        std.os.linux.IPPROTO.TCP,
+        std.os.linux.TCP.NODELAY,
+        @ptrCast(&one),
+        @sizeOf(u32),
+    );
+}
+
 pub fn connect_stream(io: std.Io, host: []const u8, port: u16) !net.Stream {
     assert(host.len > 0);
     assert(port > 0);
     const address = try net.IpAddress.parse(host, port);
-    return address.connect(io, .{ .mode = .stream });
+    const stream = try address.connect(io, .{ .mode = .stream });
+    setNoDelay(stream.socket.handle);
+    return stream;
 }
 
 /// Connect to host:port and complete the Hello → Auth(none) → AuthOk handshake.
-/// Pass an empty string for database_name to connect to the default database.
 pub fn connect(io: std.Io, host: []const u8, port: u16, database_name: []const u8, alloc: std.mem.Allocator) !Client {
     assert(host.len > 0);
     assert(port > 0);
     const stream = try connect_stream(io, host, port);
-    var client = Client.init(io, stream, alloc);
-    client.reader = stream.reader(io, &client.read_buf);
-    client.writer = stream.writer(io, &client.write_buf);
+    var client = try Client.init(io, stream, alloc);
     errdefer client.deinit();
     try client.handshake(database_name);
     return client;

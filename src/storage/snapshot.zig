@@ -6,7 +6,6 @@ const types = @import("types.zig");
 
 const LSM = lsm_mod.LSM;
 const ObjectStore = object_store_mod.ObjectStore;
-const TableSchema = types.TableSchema;
 
 /// Callback for writing a snapshot_marker entry to a log.
 /// Implemented by callers who have a *Log reference.
@@ -188,12 +187,11 @@ pub fn restoreFromSnapshot(
     manifest: *const SnapshotManifest,
     lsm_dir: []const u8,
     store: ObjectStore,
-    schema: TableSchema,
     alloc: std.mem.Allocator,
 ) !LSM {
     try mkdirAll(lsm_dir);
 
-    var lsm = try LSM.init(schema, lsm_dir, alloc);
+    var lsm = try LSM.init(lsm_dir, alloc);
     errdefer lsm.deinit();
 
     for (manifest.sstable_keys) |obj_key| {
@@ -211,7 +209,7 @@ pub fn restoreFromSnapshot(
         try writeFile(local_path, file_data);
 
         // Open and register with LSM
-        var reader = try sstable_mod.SSTableReader.open(local_path, schema, alloc);
+        var reader = try sstable_mod.SSTableReader.open(local_path, alloc);
         defer reader.deinit();
         var m = try reader.meta(local_path, alloc);
         m.remote_key = try alloc.dupe(u8, obj_key);

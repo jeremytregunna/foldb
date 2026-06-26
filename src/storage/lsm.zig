@@ -6,8 +6,6 @@ const sstable_mod = @import("sstable.zig");
 const block_cache_mod = @import("block_cache.zig");
 const object_store_mod = @import("object_store.zig");
 
-const TableSchema = types.TableSchema;
-const ColumnValue = types.ColumnValue;
 const Mutation = types.Mutation;
 const Seq = types.Seq;
 const Row = types.Row;
@@ -57,7 +55,7 @@ pub const Level = struct {
 };
 
 pub const LSM = struct {
-    schema: TableSchema,
+
     dir: []const u8,
     memtable: Memtable,
     levels: [4]Level,
@@ -68,14 +66,14 @@ pub const LSM = struct {
     cache_dir: ?[]const u8,
     fault_hook: ?DiskFaultHook = null,
 
-    pub fn init(schema: TableSchema, dir: []const u8, alloc: std.mem.Allocator) !LSM {
+    pub fn init(dir: []const u8, alloc: std.mem.Allocator) !LSM {
         try mkdirAll(dir);
         const dir_copy = try alloc.dupe(u8, dir);
         // NOTE: if BlockCache.init fails here, dir_copy leaks — pre-existing issue.
         var lsm = LSM{
-            .schema = schema,
+            
             .dir = dir_copy,
-            .memtable = Memtable.init(schema, alloc),
+            .memtable = Memtable.init(alloc),
             .levels = .{ Level.init(), Level.init(), Level.init(), Level.init() },
             .cache = try BlockCache.init(BLOCK_CACHE_BYTES, alloc),
             .next_file_id = 0,
@@ -86,13 +84,13 @@ pub const LSM = struct {
         errdefer lsm.deinit();
 
         // Load existing SSTables from disk so storage state survives restarts.
-        loadSSTables(&lsm, dir_copy, schema, alloc);
+        loadSSTables(&lsm, dir_copy, alloc);
 
         return lsm;
     }
 
     pub fn deinit(self: *LSM) void {
-        self.memtable.deinit(self.alloc);
+        self.memtable.deinit();
         for (&self.levels) |*l| l.deinit(self.alloc);
         self.cache.deinit();
         self.alloc.free(self.dir);
@@ -102,8 +100,8 @@ pub const LSM = struct {
     /// Delete all on-disk SSTables and reset in-memory state. Used when an
     /// index LSM must be rebuilt from scratch after a partial-failure inconsistency.
     pub fn reset(self: *LSM) void {
-        self.memtable.deinit(self.alloc);
-        self.memtable = Memtable.init(self.schema, self.alloc);
+        self.memtable.deinit();
+        self.memtable = Memtable.init(self.alloc);
         for (&self.levels) |*level| {
             for (level.files.items) |*meta| {
                 deleteFile(meta.path);
@@ -122,12 +120,11 @@ pub const LSM = struct {
 
     pub fn apply(self: *LSM, mutations: []const Mutation, at_seq: Seq) !void {
         for (mutations) |m| {
-            if (m.table_id != self.schema.table_id) continue;
-            const vals: ?[]const ColumnValue = switch (m.kind) {
+            const vals: ?[]const u8 = switch (m.kind) {
                 .delete => null,
-                .insert, .update => m.values,
+                .insert, .update => m.value,
             };
-            try self.memtable.put(m.key, at_seq, vals, self.alloc);
+            try self.memtable.put(m.key, at_seq, vals);
         }
 
         if (self.memtable.isFull()) try self.flushMemtable();
@@ -142,11 +139,8 @@ pub const LSM = struct {
             if (entry.is_tombstone) return null;
             const key_copy = try self.alloc.dupe(u8, entry.key);
             errdefer self.alloc.free(key_copy);
-            const vals = entry.values.?;
-            const vals_copy = try self.alloc.alloc(ColumnValue, vals.len);
-            errdefer self.alloc.free(vals_copy);
-            for (vals, 0..) |v, i| vals_copy[i] = try v.dupe(self.alloc);
-            return Row{ .key = key_copy, .seq = entry.seq, .values = vals_copy };
+            const value = try self.alloc.dupe(u8, entry.value orelse "");
+            return Row{ .key = key_copy, .value = value, .seq = entry.seq };
         }
 
         // 2. L0 files (newest first)
@@ -156,7 +150,7 @@ pub const LSM = struct {
             li -= 1;
             const meta = &l0_files[li];
             if (at_seq < meta.seq_min) continue;
-            var reader = try SSTableReader.open(meta.path, self.schema, self.alloc);
+            var reader = try SSTableReader.open(meta.path, self.alloc);
             defer reader.deinit();
             if (try reader.get(key, at_seq)) |row| return row;
         }
@@ -167,7 +161,7 @@ pub const LSM = struct {
             const idx = findFileForKey(files, key) orelse continue;
             const meta = &files[idx];
             if (at_seq < meta.seq_min) continue;
-            var reader = try SSTableReader.open(meta.path, self.schema, self.alloc);
+            var reader = try SSTableReader.open(meta.path, self.alloc);
             defer reader.deinit();
             if (try reader.get(key, at_seq)) |row| return row;
         }
@@ -183,7 +177,7 @@ pub const LSM = struct {
             const local_path = try self.ensureCached(store, remote_key, meta.path);
             defer if (!std.mem.eql(u8, local_path, meta.path)) self.alloc.free(local_path);
 
-            var reader = try SSTableReader.open(local_path, self.schema, self.alloc);
+            var reader = try SSTableReader.open(local_path, self.alloc);
             defer reader.deinit();
             if (try reader.get(key, at_seq)) |row| return row;
         }
@@ -223,10 +217,7 @@ pub const LSM = struct {
         defer {
             for (all_entries.items) |*e| {
                 alloc.free(e.key);
-                if (e.values) |vs| {
-                    for (vs) |v| v.freeIfOwned(alloc);
-                    alloc.free(vs);
-                }
+                alloc.free(e.value);
             }
             all_entries.deinit(alloc);
         }
@@ -258,7 +249,7 @@ pub const LSM = struct {
         // 4. Deduplicate: first (most-recent) entry per key; skip tombstones.
         var rows: std.ArrayListUnmanaged(Row) = .empty;
         errdefer {
-            for (rows.items) |*r| r.deinit(alloc);
+            for (rows.items) |r| r.deinit(alloc);
             rows.deinit(alloc);
         }
         var last_key: ?[]const u8 = null;
@@ -268,13 +259,11 @@ pub const LSM = struct {
             }
             last_key = e.key;
             if (e.is_tombstone) continue;
-            const vals = e.values orelse &.{};
+            const vals = e.value;
             const key_copy = try alloc.dupe(u8, e.key);
             errdefer alloc.free(key_copy);
-            const vals_copy = try alloc.alloc(ColumnValue, vals.len);
-            errdefer alloc.free(vals_copy);
-            for (vals, 0..) |v, i| vals_copy[i] = try v.dupe(alloc);
-            try rows.append(alloc, Row{ .key = key_copy, .seq = e.seq, .values = vals_copy });
+            const value = try alloc.dupe(u8, vals);
+            try rows.append(alloc, Row{ .key = key_copy, .value = value, .seq = e.seq, .is_tombstone = e.is_tombstone });
         }
         return rows.toOwnedSlice(alloc);
     }
@@ -289,32 +278,24 @@ pub const LSM = struct {
             if (!range.contains(entry.key)) continue;
             const key_copy = try alloc.dupe(u8, entry.key);
             errdefer alloc.free(key_copy);
-            var vals: ?[]ColumnValue = null;
-            if (!entry.is_tombstone) {
-                if (entry.values) |vs| {
-                    const vc = try alloc.alloc(ColumnValue, vs.len);
-                    errdefer alloc.free(vc);
-                    for (vs, 0..) |v, i| vc[i] = try v.dupe(alloc);
-                    vals = vc;
-                }
-            }
+            const value = if (entry.value) |v| try alloc.dupe(u8, v) else try alloc.dupe(u8, "");
             try out.append(alloc, .{
                 .key = key_copy,
                 .seq = entry.seq,
-                .values = vals,
+                .value = value,
                 .is_tombstone = entry.is_tombstone,
             });
         }
     }
 
-    fn collectRangeFromFile(self: *LSM, meta: *const SSTableMeta, range: KeyRange, at_seq: Seq, out: *std.ArrayList(MergeEntry), alloc: std.mem.Allocator) !void {
-        var reader = try SSTableReader.open(meta.path, self.schema, alloc);
+    fn collectRangeFromFile(_: *LSM, meta: *const SSTableMeta, range: KeyRange, at_seq: Seq, out: *std.ArrayList(MergeEntry), alloc: std.mem.Allocator) !void {
+        var reader = try SSTableReader.open(meta.path, alloc);
         defer reader.deinit();
 
         for (0..reader.header.block_count) |bi| {
             const blk = try reader.readBlock(bi);
             defer alloc.free(blk);
-            const block_reader = try @import("block.zig").BlockReader.init(blk, self.schema);
+            const block_reader = try @import("block.zig").BlockReader.init(blk);
             for (0..block_reader.row_count) |ri| {
                 const kv = try block_reader.readKey(@intCast(ri));
                 if (kv.seq > at_seq) continue;
@@ -324,14 +305,14 @@ pub const LSM = struct {
                 if (!range.contains(kv.key)) continue;
                 const key_copy = try alloc.dupe(u8, kv.key);
                 errdefer alloc.free(key_copy);
-                var vals: ?[]ColumnValue = null;
-                if (!kv.is_tombstone) {
-                    vals = try block_reader.readRowValues(@intCast(ri), alloc);
-                }
+                const value = if (!kv.is_tombstone)
+                    try block_reader.readValue(@intCast(ri), alloc)
+                else
+                    try alloc.dupe(u8, "");
                 try out.append(alloc, .{
                     .key = key_copy,
                     .seq = kv.seq,
-                    .values = vals,
+                    .value = value,
                     .is_tombstone = kv.is_tombstone,
                 });
             }
@@ -343,15 +324,15 @@ pub const LSM = struct {
         if (self.memtable.isEmpty()) return;
         const path = try self.nextFilePath(0);
         defer self.alloc.free(path);
-        try self.memtable.flush(path, 0, self.alloc);
+        try self.memtable.flush(path, 0);
 
-        var reader = try SSTableReader.open(path, self.schema, self.alloc);
+        var reader = try SSTableReader.open(path, self.alloc);
         defer reader.deinit();
         const m = try reader.meta(path, self.alloc);
         try self.levels[0].files.append(self.alloc, m);
 
-        self.memtable.deinit(self.alloc);
-        self.memtable = Memtable.init(self.schema, self.alloc);
+        self.memtable.deinit();
+        self.memtable = Memtable.init(self.alloc);
     }
 
     pub fn maybeCompact(self: *LSM) !void {
@@ -373,10 +354,7 @@ pub const LSM = struct {
         defer {
             for (all_entries.items) |*e| {
                 self.alloc.free(e.key);
-                if (e.values) |vs| {
-                    for (vs) |v| v.freeIfOwned(self.alloc);
-                    self.alloc.free(vs);
-                }
+                self.alloc.free(e.value);
             }
             all_entries.deinit(self.alloc);
         }
@@ -404,10 +382,7 @@ pub const LSM = struct {
         defer {
             for (all_entries.items) |*e| {
                 self.alloc.free(e.key);
-                if (e.values) |vs| {
-                    for (vs) |v| v.freeIfOwned(self.alloc);
-                    self.alloc.free(vs);
-                }
+                self.alloc.free(e.value);
             }
             all_entries.deinit(self.alloc);
         }
@@ -437,10 +412,7 @@ pub const LSM = struct {
         defer {
             for (all_entries.items) |*e| {
                 self.alloc.free(e.key);
-                if (e.values) |vs| {
-                    for (vs) |v| v.freeIfOwned(self.alloc);
-                    self.alloc.free(vs);
-                }
+                self.alloc.free(e.value);
             }
             all_entries.deinit(self.alloc);
         }
@@ -470,7 +442,7 @@ pub const LSM = struct {
             const path = try self.nextFilePath(3);
             defer self.alloc.free(path);
             try self.compactL2toL3WriteFile(path, all_entries.items);
-            var reader = try SSTableReader.open(path, self.schema, self.alloc);
+            var reader = try SSTableReader.open(path, self.alloc);
             defer reader.deinit();
             var m = try reader.meta(path, self.alloc);
             try self.compactL2toL3Upload(store, path, &m);
@@ -493,7 +465,7 @@ pub const LSM = struct {
     }
 
     fn compactL2toL3WriteFile(self: *LSM, path: []const u8, entries: []const MergeEntry) !void {
-        var writer = try SSTableWriter.create(path, self.schema, 3, self.alloc);
+        var writer = try SSTableWriter.create(path, 3, self.alloc);
         defer writer.deinit();
         var last_key: ?[]const u8 = null;
         for (entries) |e| {
@@ -501,7 +473,7 @@ pub const LSM = struct {
                 if (std.mem.eql(u8, lk, e.key)) continue;
             }
             last_key = e.key;
-            try writer.append(e.key, e.seq, e.values);
+            try writer.append(e.key, e.seq, e.value);
         }
         try writer.finish();
     }
@@ -526,25 +498,25 @@ pub const LSM = struct {
     }
 
     fn collectFromFile(self: *LSM, meta: *const SSTableMeta, out: *std.ArrayList(MergeEntry)) !void {
-        var reader = try SSTableReader.open(meta.path, self.schema, self.alloc);
+        var reader = try SSTableReader.open(meta.path, self.alloc);
         defer reader.deinit();
 
         for (0..reader.header.block_count) |bi| {
             const blk = try reader.readBlock(bi);
             defer self.alloc.free(blk);
-            const block_reader = try @import("block.zig").BlockReader.init(blk, self.schema);
+            const block_reader = try @import("block.zig").BlockReader.init(blk);
             for (0..block_reader.row_count) |ri| {
                 const kv = try block_reader.readKey(@intCast(ri));
                 const key_copy = try self.alloc.dupe(u8, kv.key);
                 errdefer self.alloc.free(key_copy);
-                var vals: ?[]ColumnValue = null;
-                if (!kv.is_tombstone) {
-                    vals = try block_reader.readRowValues(@intCast(ri), self.alloc);
-                }
+                const value = if (!kv.is_tombstone)
+                    try block_reader.readValue(@intCast(ri), self.alloc)
+                else
+                    try self.alloc.dupe(u8, "");
                 try out.append(self.alloc, .{
                     .key = key_copy,
                     .seq = kv.seq,
-                    .values = vals,
+                    .value = value,
                     .is_tombstone = kv.is_tombstone,
                 });
             }
@@ -555,7 +527,7 @@ pub const LSM = struct {
         const path = try self.nextFilePath(target_level);
         defer self.alloc.free(path);
 
-        var writer = try SSTableWriter.create(path, self.schema, @intCast(target_level), self.alloc);
+        var writer = try SSTableWriter.create(path, @intCast(target_level), self.alloc);
         defer writer.deinit();
 
         var last_key: ?[]const u8 = null;
@@ -564,11 +536,11 @@ pub const LSM = struct {
                 if (std.mem.eql(u8, lk, e.key)) continue;
             }
             last_key = e.key;
-            try writer.append(e.key, e.seq, e.values);
+            try writer.append(e.key, e.seq, e.value);
         }
         try writer.finish();
 
-        var reader = try SSTableReader.open(path, self.schema, self.alloc);
+        var reader = try SSTableReader.open(path, self.alloc);
         defer reader.deinit();
         const m = try reader.meta(path, self.alloc);
         try self.levels[target_level].files.append(self.alloc, m);
@@ -592,8 +564,7 @@ pub const LSM = struct {
                 }
                 try result.append(alloc, .{
                     .path = path_copy,
-                    .table_id = meta.table_id,
-                    .level = meta.level,
+                                        .level = meta.level,
                     .seq_min = meta.seq_min,
                     .seq_max = meta.seq_max,
                     .key_min = key_min_copy,
@@ -607,7 +578,7 @@ pub const LSM = struct {
         return result.toOwnedSlice(alloc);
     }
 
-    fn loadSSTables(lsm: *LSM, dir: []const u8, schema: TableSchema, alloc: std.mem.Allocator) void {
+    fn loadSSTables(lsm: *LSM, dir: []const u8, alloc: std.mem.Allocator) void {
         const null_dir = std.heap.page_allocator.allocSentinel(u8, dir.len, 0) catch return;
         defer std.heap.page_allocator.free(null_dir);
         @memcpy(null_dir[0..dir.len], dir);
@@ -637,7 +608,7 @@ pub const LSM = struct {
                 if (level_u >= lsm.levels.len) continue;
                 const file_path = std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name }) catch continue;
                 defer alloc.free(file_path);
-                var reader = SSTableReader.open(file_path, schema, alloc) catch continue;
+                var reader = SSTableReader.open(file_path, alloc) catch continue;
                 defer reader.deinit();
                 const m = reader.meta(file_path, alloc) catch continue;
                 lsm.levels[level_u].files.append(alloc, m) catch {
@@ -660,7 +631,7 @@ pub const LSM = struct {
 const MergeEntry = struct {
     key: []const u8,
     seq: Seq,
-    values: ?[]ColumnValue,
+    value: []const u8,
     is_tombstone: bool,
 };
 

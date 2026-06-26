@@ -1,12 +1,9 @@
-/// SSTable file: header + PAX blocks + sparse index + footer.
+/// SSTable file: header + KV blocks + sparse index + footer.
 const std = @import("std");
 const types = @import("types.zig");
 const block_mod = @import("block.zig");
 const crc_mod = @import("crc.zig");
 
-const TableSchema = types.TableSchema;
-const ColumnValue = types.ColumnValue;
-const TableId = types.TableId;
 const Seq = types.Seq;
 const Row = types.Row;
 const BlockWriter = block_mod.BlockWriter;
@@ -16,23 +13,19 @@ pub const MAGIC: [4]u8 = .{ 'F', 'S', 'S', 'T' };
 pub const FOOTER_MAGIC: [8]u8 = .{ 'F', 'S', 'S', 'T', 'F', 'O', 'O', 'T' };
 pub const VERSION: u32 = 1;
 
-/// On-disk SSTable header, 64 bytes.
+/// On-disk SSTable header, 52 bytes.
 pub const SSTableHeader = extern struct {
     magic: [4]u8,
     version: u32,
-    table_id: TableId,
     level: u8,
-    _pad: [3]u8,
+    _pad: [7]u8,
     seq_min: Seq,
     seq_max: Seq,
     block_count: u32,
-    column_count: u16,
-    _pad2: [2]u8,
-    col_types: [16]u8,
-    reserved: [8]u8,
+    reserved: [16]u8,
 
     comptime {
-        std.debug.assert(@sizeOf(SSTableHeader) == 64);
+        std.debug.assert(@sizeOf(SSTableHeader) == 56);
     }
 };
 
@@ -65,20 +58,19 @@ fn toNullZ(alloc: std.mem.Allocator, path: []const u8) ![:0]u8 {
 // --- SSTableWriter ---
 
 pub const SSTableWriter = struct {
-    schema: TableSchema,
     path: []const u8,
     fd: std.posix.fd_t,
     block_writer: BlockWriter,
-    index: std.ArrayList(IndexEntry),
-    write_offset: u64,
-    block_count: u32,
-    entry_count: u32,
-    seq_min: Seq,
-    seq_max: Seq,
+    index: std.ArrayListUnmanaged(IndexEntry) = .empty,
+    write_offset: u64 = 0,
+    block_count: u32 = 0,
+    entry_count: u64 = 0,
+    seq_min: Seq = std.math.maxInt(Seq),
+    seq_max: Seq = 0,
     level: u8,
     alloc: std.mem.Allocator,
 
-    pub fn create(path: []const u8, schema: TableSchema, level: u8, alloc: std.mem.Allocator) !SSTableWriter {
+    pub fn create(path: []const u8, level: u8, alloc: std.mem.Allocator) !SSTableWriter {
         const null_path = try toNullZ(std.heap.page_allocator, path);
         defer std.heap.page_allocator.free(null_path);
 
@@ -87,22 +79,14 @@ pub const SSTableWriter = struct {
         if (fd < 0) return error.FileCreateError;
 
         var writer = SSTableWriter{
-            .schema = schema,
             .path = path,
             .fd = fd,
-            .block_writer = try BlockWriter.init(schema),
-            .index = .empty,
-            .write_offset = 0,
-            .block_count = 0,
-            .entry_count = 0,
-            .seq_min = std.math.maxInt(Seq),
-            .seq_max = 0,
+            .block_writer = BlockWriter.init(alloc),
             .level = level,
             .alloc = alloc,
         };
 
-        // Reserve space for the header; will overwrite on finish().
-        var header_bytes: [64]u8 = [_]u8{0} ** 64;
+        var header_bytes: [56]u8 = [_]u8{0} ** 56;
         try writer.writeBytes(&header_bytes);
 
         return writer;
@@ -115,12 +99,11 @@ pub const SSTableWriter = struct {
         _ = std.os.linux.close(@intCast(self.fd));
     }
 
-    pub fn append(self: *SSTableWriter, key: []const u8, seq: Seq, values: ?[]const ColumnValue) !void {
+    pub fn append(self: *SSTableWriter, key: []const u8, seq: Seq, value: []const u8) !void {
         if (self.block_writer.isFull()) try self.flushBlock();
-        // Record first key of block for sparse index.
         const is_first = self.block_writer.isEmpty();
         const first_key: ?[]const u8 = if (is_first) key else null;
-        try self.block_writer.append(self.alloc, key, seq, values);
+        try self.block_writer.append(self.alloc, key, seq, value);
         if (is_first) {
             const key_copy = try self.alloc.dupe(u8, first_key.?);
             try self.index.append(self.alloc, .{
@@ -152,7 +135,7 @@ pub const SSTableWriter = struct {
         // Write footer
         const footer = SSTableFooter{
             .index_offset = index_offset,
-            .entry_count = self.entry_count,
+            .entry_count = @intCast(self.entry_count),
             .footer_crc = 0,
             .footer_magic = FOOTER_MAGIC,
         };
@@ -164,27 +147,17 @@ pub const SSTableWriter = struct {
 
         // Seek back and write header
         _ = std.os.linux.lseek(@intCast(self.fd), 0, std.os.linux.SEEK.SET);
-        const col_count: u16 = @intCast(self.schema.columns.len);
-        var col_types: [16]u8 = [_]u8{0} ** 16;
-        for (self.schema.columns, 0..) |col, ci| {
-            if (ci >= 16) break;
-            col_types[ci] = @intFromEnum(col.col_type);
-        }
         const header = SSTableHeader{
             .magic = MAGIC,
             .version = VERSION,
-            .table_id = self.schema.table_id,
             .level = self.level,
-            ._pad = [_]u8{0} ** 3,
+            ._pad = [_]u8{0} ** 7,
             .seq_min = self.seq_min,
             .seq_max = self.seq_max,
             .block_count = self.block_count,
-            .column_count = col_count,
-            ._pad2 = [_]u8{0} ** 2,
-            .col_types = col_types,
-            .reserved = [_]u8{0} ** 8,
+            .reserved = [_]u8{0} ** 16,
         };
-        _ = std.os.linux.write(@intCast(self.fd), std.mem.asBytes(&header).ptr, 64);
+        _ = std.os.linux.write(@intCast(self.fd), std.mem.asBytes(&header).ptr, @sizeOf(SSTableHeader));
 
         _ = std.os.linux.fsync(@intCast(self.fd));
     }
@@ -194,9 +167,8 @@ pub const SSTableWriter = struct {
         defer self.alloc.free(block_data);
         try self.writeBytes(block_data);
         self.block_count += 1;
-        // Reset block writer
         self.block_writer.deinit(self.alloc);
-        self.block_writer = try BlockWriter.init(self.schema);
+        self.block_writer = BlockWriter.init(self.alloc);
     }
 
     fn writeBytes(self: *SSTableWriter, data: []const u8) !void {
@@ -215,7 +187,6 @@ pub const SSTableWriter = struct {
 
 pub const SSTableMeta = struct {
     path: []const u8,
-    table_id: TableId,
     level: u8,
     seq_min: Seq,
     seq_max: Seq,
@@ -234,13 +205,12 @@ pub const SSTableMeta = struct {
 };
 
 pub const SSTableReader = struct {
-    schema: TableSchema,
     header: SSTableHeader,
     index: []IndexEntry,
     data: []u8,
     alloc: std.mem.Allocator,
 
-    pub fn open(path: []const u8, schema: TableSchema, alloc: std.mem.Allocator) !SSTableReader {
+    pub fn open(path: []const u8, alloc: std.mem.Allocator) !SSTableReader {
         const null_path = try toNullZ(std.heap.page_allocator, path);
         defer std.heap.page_allocator.free(null_path);
 
@@ -298,7 +268,6 @@ pub const SSTableReader = struct {
         }
 
         return .{
-            .schema = schema,
             .header = header,
             .index = try index.toOwnedSlice(alloc),
             .data = data,
@@ -323,7 +292,7 @@ pub const SSTableReader = struct {
 
             const blk = try self.readBlock(bi);
             defer self.alloc.free(blk);
-            const reader = try BlockReader.init(blk, self.schema);
+            const reader = try BlockReader.init(blk);
 
             const first_idx = try reader.lowerBound(key);
             var ri = first_idx;
@@ -332,10 +301,10 @@ pub const SSTableReader = struct {
                 if (!std.mem.eql(u8, kv.key, key)) break;
                 if (kv.seq <= at_seq) {
                     if (kv.is_tombstone) return null;
-                    const values = try reader.readRowValues(ri, self.alloc);
+                    const value = try reader.readValue(ri, self.alloc);
                     const key_copy = try self.alloc.dupe(u8, key);
                     errdefer self.alloc.free(key_copy);
-                    return Row{ .key = key_copy, .seq = kv.seq, .values = values };
+                    return Row{ .key = key_copy, .value = value, .seq = kv.seq };
                 }
             }
         }
@@ -353,7 +322,7 @@ pub const SSTableReader = struct {
             // key_max = true last key in the last block (not just first_key of last block)
             const last_blk_data = try self.readBlock(self.header.block_count - 1);
             defer alloc.free(last_blk_data);
-            const last_blk = try block_mod.BlockReader.init(last_blk_data, self.schema);
+            const last_blk = try block_mod.BlockReader.init(last_blk_data);
             if (last_blk.row_count > 0) {
                 const last_kv = try last_blk.readKey(last_blk.row_count - 1);
                 key_max = try alloc.dupe(u8, last_kv.key);
@@ -366,7 +335,6 @@ pub const SSTableReader = struct {
         }
         return .{
             .path = path_copy,
-            .table_id = self.header.table_id,
             .level = self.header.level,
             .seq_min = self.header.seq_min,
             .seq_max = self.header.seq_max,

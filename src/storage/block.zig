@@ -1,41 +1,32 @@
-/// PAX block: column-major layout for SSTable storage.
+/// KV block: key-value pairs packed for SSTable storage.
+/// Format: [header][keys:offsets + key_data + seqs][values:len-prefix blobs][footer]
 const std = @import("std");
 
 const assert = std.debug.assert;
 const types = @import("types.zig");
-const codec_mod = @import("codec.zig");
 const crc_mod = @import("crc.zig");
 
-const ColumnValue = types.ColumnValue;
-const ColumnType = types.ColumnType;
-const TableSchema = types.TableSchema;
 const Row = types.Row;
 const Seq = types.Seq;
-const CodecId = codec_mod.CodecId;
 
-pub const MAGIC: [4]u8 = .{ 'F', 'P', 'A', 'X' };
+pub const MAGIC: [4]u8 = .{ 'F', 'K', 'V', '1' };
 pub const MAX_ROWS_PER_BLOCK: usize = 512;
 /// Tombstone marker: high bit of seq indicates deleted row.
 pub const TOMBSTONE_BIT: Seq = 1 << 63;
 pub const MAX_BLOCK_SIZE: usize = 64 * 1024;
-pub const HEADER_SIZE: usize = 28;
+pub const HEADER_SIZE: usize = 20;
 pub const FOOTER_SIZE: usize = 8;
 
-/// On-disk block header, fixed 32 bytes.
+/// On-disk block header, fixed 20 bytes.
 pub const BlockHeader = extern struct {
     magic: [4]u8,
     row_count: u32,
-    column_count: u16,
-    compression: u8,
-    _pad: u8,
-    key_data_offset: u32,
-    col_data_offset: u32,
-    null_bmp_offset: u32,
+    key_data_offset: u32,  // == HEADER_SIZE
+    values_offset: u32,    // after key section + seqs
     footer_offset: u32,
 
     comptime {
         std.debug.assert(@sizeOf(BlockHeader) == HEADER_SIZE);
-        std.debug.assert(@offsetOf(BlockHeader, "footer_offset") == 24);
     }
 };
 
@@ -52,42 +43,22 @@ pub const BlockFooter = extern struct {
 // --- BlockWriter ---
 
 pub const BlockWriter = struct {
-    schema: TableSchema,
-    // keys and seqs stored parallel
-    keys: std.ArrayList([]const u8),
-    seqs: std.ArrayList(Seq),
-    // one ArrayList per column
-    columns: []std.ArrayList(ColumnValue),
-    null_bits: []std.ArrayList(bool),
-    size_estimate: usize,
+    // Parallel arrays
+    keys: std.ArrayListUnmanaged([]const u8) = .empty,
+    seqs: std.ArrayListUnmanaged(Seq) = .empty,
+    values: std.ArrayListUnmanaged([]const u8) = .empty,
+    size_estimate: usize = HEADER_SIZE + FOOTER_SIZE,
 
-    pub fn init(schema: TableSchema) !BlockWriter {
-        const col_count = schema.columns.len;
-        const columns = try std.heap.page_allocator.alloc(std.ArrayList(ColumnValue), col_count);
-        for (columns) |*c| c.* = .empty;
-        const null_bits = try std.heap.page_allocator.alloc(std.ArrayList(bool), col_count);
-        for (null_bits) |*n| n.* = .empty;
-        return .{
-            .schema = schema,
-            .keys = .empty,
-            .seqs = .empty,
-            .columns = columns,
-            .null_bits = null_bits,
-            .size_estimate = HEADER_SIZE + FOOTER_SIZE,
-        };
+    pub fn init(_: std.mem.Allocator) BlockWriter {
+        return .{};
     }
 
     pub fn deinit(self: *BlockWriter, alloc: std.mem.Allocator) void {
         for (self.keys.items) |k| alloc.free(k);
         self.keys.deinit(alloc);
         self.seqs.deinit(alloc);
-        for (self.columns) |*c| {
-            for (c.items) |v| v.freeIfOwned(alloc);
-            c.deinit(alloc);
-        }
-        for (self.null_bits) |*n| n.deinit(alloc);
-        std.heap.page_allocator.free(self.columns);
-        std.heap.page_allocator.free(self.null_bits);
+        for (self.values.items) |v| alloc.free(v);
+        self.values.deinit(alloc);
     }
 
     pub fn isFull(self: *const BlockWriter) bool {
@@ -99,84 +70,64 @@ pub const BlockWriter = struct {
         return self.keys.items.len == 0;
     }
 
-    /// Append a row. values=null means tombstone (bit 63 of seq set).
+    /// Append a row. value=null means tombstone (TOMBSTONE_BIT set on seq).
     pub fn append(
         self: *BlockWriter,
         alloc: std.mem.Allocator,
         key: []const u8,
         seq: Seq,
-        values: ?[]const ColumnValue,
+        value: ?[]const u8,
     ) !void {
         const key_copy = try alloc.dupe(u8, key);
         errdefer alloc.free(key_copy);
         try self.keys.append(alloc, key_copy);
-        const encoded_seq = if (values == null) seq | TOMBSTONE_BIT else seq;
+
+        const encoded_seq = if (value == null) seq | TOMBSTONE_BIT else seq;
         try self.seqs.append(alloc, encoded_seq);
 
-        for (self.schema.columns, 0..) |col_schema, ci| {
-            const is_tombstone = values == null;
-            if (is_tombstone) {
-                try self.null_bits[ci].append(alloc, true);
-                try self.columns[ci].append(alloc, zeroValue(col_schema.col_type));
-            } else if (values.?[ci] == .null_t) {
-                // SQL NULL: record in null bitmap, store type-safe zero in column data
-                // so the codec can encode/decode the column without gaps.
-                try self.null_bits[ci].append(alloc, true);
-                try self.columns[ci].append(alloc, zeroValue(col_schema.col_type));
-            } else {
-                try self.columns[ci].append(alloc, try values.?[ci].dupe(alloc));
-                try self.null_bits[ci].append(alloc, false);
-            }
+        if (value) |v| {
+            const val_copy = try alloc.dupe(u8, v);
+            errdefer alloc.free(val_copy);
+            try self.values.append(alloc, val_copy);
+        } else {
+            try self.values.append(alloc, ""); // empty placeholder for tombstones
         }
-        self.size_estimate += key.len + 8 + self.schema.columns.len * 8;
+        self.size_estimate += key.len + 8 + (if (value) |v| v.len else 0) + 4; // +4 for value length prefix
     }
 
     /// Serialize to a heap-allocated buffer (caller owns result).
     pub fn flush(self: *BlockWriter, alloc: std.mem.Allocator) ![]u8 {
         assert(self.keys.items.len > 0);
         assert(self.keys.items.len <= std.math.maxInt(u32));
-        assert(self.schema.columns.len <= std.math.maxInt(u16));
         const row_count: u32 = @intCast(self.keys.items.len);
-        const col_count: u16 = @intCast(self.schema.columns.len);
 
-        var key_section = try flushBuildKeySection(self, row_count, alloc);
+        var key_section = try buildKeySection(self, row_count, alloc);
         defer key_section.deinit(alloc);
 
-        var col_section = try flushBuildColSection(self, alloc);
-        defer col_section.deinit(alloc);
+        var values_section = try buildValuesSection(self, alloc);
+        defer values_section.deinit(alloc);
 
-        var null_section = try flushBuildNullSection(self, row_count, alloc);
-        defer null_section.deinit(alloc);
-
-        // Compute section offsets and assemble final block.
         assert(key_section.items.len <= std.math.maxInt(u32));
-        assert(col_section.items.len <= std.math.maxInt(u32));
-        assert(null_section.items.len <= std.math.maxInt(u32));
-        const key_section_offset: u32 = HEADER_SIZE;
-        const col_section_offset: u32 = key_section_offset + @as(u32, @intCast(key_section.items.len));
-        const null_bmp_offset: u32 = col_section_offset + @as(u32, @intCast(col_section.items.len));
-        const footer_offset: u32 = null_bmp_offset + @as(u32, @intCast(null_section.items.len));
-        const total_size: u32 = footer_offset + @as(u32, FOOTER_SIZE);
+        assert(values_section.items.len <= std.math.maxInt(u32));
+        const key_offset: u32 = HEADER_SIZE;
+        const values_offset: u32 = key_offset + @as(u32, @intCast(key_section.items.len));
+        const footer_offset: u32 = values_offset + @as(u32, @intCast(values_section.items.len));
+        const total_size: u32 = @intCast(footer_offset + FOOTER_SIZE);
 
         var out: std.ArrayList(u8) = .empty;
-        defer out.deinit(alloc);
-        try out.ensureTotalCapacity(alloc, total_size);
+        errdefer out.deinit(alloc);
+        try out.ensureTotalCapacity(alloc, @as(usize, total_size));
 
         const hdr = BlockHeader{
             .magic = MAGIC,
             .row_count = row_count,
-            .column_count = col_count,
-            .compression = 0,
-            ._pad = 0,
-            .key_data_offset = key_section_offset,
-            .col_data_offset = col_section_offset,
-            .null_bmp_offset = null_bmp_offset,
+            .key_data_offset = key_offset,
+            .values_offset = values_offset,
             .footer_offset = footer_offset,
         };
         try out.appendSlice(alloc, std.mem.asBytes(&hdr));
         try out.appendSlice(alloc, key_section.items);
-        try out.appendSlice(alloc, col_section.items);
-        try out.appendSlice(alloc, null_section.items);
+        try out.appendSlice(alloc, values_section.items);
 
         const checksum = crc_mod.crc32c(out.items);
         const footer = BlockFooter{ .block_size = total_size, .crc = checksum };
@@ -186,81 +137,46 @@ pub const BlockWriter = struct {
     }
 };
 
-/// Build the key section: key_offsets (row_count×4) + key_data + seqs (row_count×8).
-fn flushBuildKeySection(w: *const BlockWriter, row_count: u32, alloc: std.mem.Allocator) !std.ArrayList(u8) {
+/// Build key section: [row_count × 4 offsets][key_data][row_count × 8 seqs]
+fn buildKeySection(w: *const BlockWriter, row_count: u32, alloc: std.mem.Allocator) !std.ArrayList(u8) {
     assert(row_count == w.keys.items.len);
-    var key_offsets_buf: std.ArrayList(u8) = .empty;
-    defer key_offsets_buf.deinit(alloc);
-    var key_data_buf: std.ArrayList(u8) = .empty;
-    defer key_data_buf.deinit(alloc);
-    var seq_buf: std.ArrayList(u8) = .empty;
-    defer seq_buf.deinit(alloc);
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(alloc);
 
-    for (w.keys.items, w.seqs.items) |k, s| {
-        assert(key_data_buf.items.len <= std.math.maxInt(u32));
+    // Key offsets
+    var key_data: std.ArrayList(u8) = .empty;
+    defer key_data.deinit(alloc);
+    for (w.keys.items) |k| {
+        assert(key_data.items.len <= std.math.maxInt(u32));
         var off_buf: [4]u8 = undefined;
-        std.mem.writeInt(u32, &off_buf, @intCast(key_data_buf.items.len), .little);
-        try key_offsets_buf.appendSlice(alloc, &off_buf);
-        try key_data_buf.appendSlice(alloc, k);
+        std.mem.writeInt(u32, &off_buf, @intCast(key_data.items.len), .little);
+        try buf.appendSlice(alloc, &off_buf);
+        try key_data.appendSlice(alloc, k);
+    }
+
+    // Key data
+    try buf.appendSlice(alloc, key_data.items);
+
+    // Seqs
+    for (w.seqs.items) |s| {
         var seq_b: [8]u8 = undefined;
         std.mem.writeInt(u64, &seq_b, s, .little);
-        try seq_buf.appendSlice(alloc, &seq_b);
+        try buf.appendSlice(alloc, &seq_b);
     }
 
-    var section: std.ArrayList(u8) = .empty;
-    errdefer section.deinit(alloc);
-    try section.appendSlice(alloc, key_offsets_buf.items);
-    try section.appendSlice(alloc, key_data_buf.items);
-    try section.appendSlice(alloc, seq_buf.items);
-    return section;
+    return buf;
 }
 
-/// Build the column data section: [codec_tag(1) + size(4) + encoded_data] per column.
-fn flushBuildColSection(w: *const BlockWriter, alloc: std.mem.Allocator) !std.ArrayList(u8) {
+/// Build values section: [len32 + data] per row
+fn buildValuesSection(w: *const BlockWriter, alloc: std.mem.Allocator) !std.ArrayList(u8) {
     var section: std.ArrayList(u8) = .empty;
     errdefer section.deinit(alloc);
-    for (w.schema.columns, 0..) |col_schema, ci| {
-        const chosen = codec_mod.chooseCodec(col_schema.col_type, w.columns[ci].items);
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(alloc);
-        try codec_mod.encode(chosen, col_schema.col_type, w.columns[ci].items, &encoded, alloc);
-        assert(encoded.items.len <= std.math.maxInt(u32));
-        try section.append(alloc, @intFromEnum(chosen));
-        var sz_buf: [4]u8 = undefined;
-        std.mem.writeInt(u32, &sz_buf, @intCast(encoded.items.len), .little);
-        try section.appendSlice(alloc, &sz_buf);
-        try section.appendSlice(alloc, encoded.items);
-    }
-    return section;
-}
-
-/// Build the null bitmap section (column-major, 1 bit per cell). Empty if no nulls.
-fn flushBuildNullSection(w: *const BlockWriter, row_count: u32, alloc: std.mem.Allocator) !std.ArrayList(u8) {
-    var section: std.ArrayList(u8) = .empty;
-    errdefer section.deinit(alloc);
-    var has_nulls = false;
-    outer: for (w.null_bits) |nb| {
-        for (nb.items) |b| {
-            if (b) {
-                has_nulls = true;
-                break :outer;
-            }
-        }
-    }
-    if (!has_nulls) return section;
-    for (w.null_bits) |nb| {
-        const byte_count = (row_count + 7) / 8;
-        var i: u32 = 0;
-        while (i < byte_count) : (i += 1) {
-            var b: u8 = 0;
-            for (0..8) |bit| {
-                const row_idx = i * 8 + @as(u32, @intCast(bit));
-                if (row_idx < row_count and nb.items[row_idx]) {
-                    b |= @as(u8, 1) << @intCast(bit);
-                }
-            }
-            try section.append(alloc, b);
-        }
+    for (w.values.items) |v| {
+        const len: u32 = @intCast(v.len);
+        var len_buf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &len_buf, len, .little);
+        try section.appendSlice(alloc, &len_buf);
+        try section.appendSlice(alloc, v);
     }
     return section;
 }
@@ -270,12 +186,11 @@ fn flushBuildNullSection(w: *const BlockWriter, row_count: u32, alloc: std.mem.A
 pub const BlockReader = struct {
     data: []const u8,
     header: BlockHeader,
-    schema: TableSchema,
     row_count: u32,
     key_data_start: u32,
     seq_section_start: u32,
 
-    pub fn init(data: []const u8, schema: TableSchema) !BlockReader {
+    pub fn init(data: []const u8) !BlockReader {
         if (data.len < HEADER_SIZE + FOOTER_SIZE) return error.BlockTooSmall;
         const hdr: BlockHeader = std.mem.bytesToValue(BlockHeader, data[0..HEADER_SIZE]);
         if (!std.mem.eql(u8, &hdr.magic, &MAGIC)) return error.InvalidMagic;
@@ -289,13 +204,11 @@ pub const BlockReader = struct {
         // layout: [row_count * 4 offsets] [key_data] [row_count * 8 seqs]
         const key_sec = hdr.key_data_offset;
         const key_data_start = key_sec + hdr.row_count * 4;
-        // seqs are just before col_data
-        const seq_section_start = hdr.col_data_offset -| hdr.row_count * 8;
+        const seq_section_start = hdr.values_offset -| hdr.row_count * 8;
 
         return .{
             .data = data,
             .header = hdr,
-            .schema = schema,
             .row_count = hdr.row_count,
             .key_data_start = key_data_start,
             .seq_section_start = seq_section_start,
@@ -320,52 +233,20 @@ pub const BlockReader = struct {
         return .{ .key = key, .seq = seq, .is_tombstone = is_tombstone };
     }
 
-    /// Decode column values for a specific row. Caller owns result.
-    /// SQL NULLs stored via the null bitmap are returned as ColumnValue.null_t.
-    pub fn readRowValues(self: *const BlockReader, row_idx: u32, alloc: std.mem.Allocator) ![]ColumnValue {
+    /// Read value for a specific row. Caller owns result.
+    pub fn readValue(self: *const BlockReader, row_idx: u32, alloc: std.mem.Allocator) ![]const u8 {
         if (row_idx >= self.row_count) return error.OutOfBounds;
-        const col_count = self.header.column_count;
-        const out = try alloc.alloc(ColumnValue, col_count);
-        errdefer alloc.free(out);
-
-        var pos: usize = self.header.col_data_offset;
-        for (0..col_count) |ci| {
-            const col_schema = self.schema.columns[ci];
-            if (pos + 5 > self.data.len) return error.InvalidData;
-            const codec_id: CodecId = @enumFromInt(self.data[pos]);
-            pos += 1;
-            const encoded_size = std.mem.readInt(u32, self.data[pos..][0..4], .little);
-            pos += 4;
-            const encoded_data = self.data[pos .. pos + encoded_size];
-            pos += encoded_size;
-
-            const col_vals = try alloc.alloc(ColumnValue, self.row_count);
-            defer alloc.free(col_vals);
-            try codec_mod.decode(codec_id, col_schema.col_type, encoded_data, self.row_count, col_vals, alloc);
-            out[ci] = try col_vals[row_idx].dupe(alloc);
-            for (col_vals) |v| v.freeIfOwned(alloc);
+        var pos: u32 = self.header.values_offset;
+        for (0..row_idx) |_| {
+            if (pos + 4 > self.data.len) return error.InvalidData;
+            const len: u32 = std.mem.readInt(u32, self.data[pos..][0..4], .little);
+            pos += 4 + len;
         }
-
-        // Apply the null bitmap: replace stored zero values with null_t where the bit is set.
-        const null_bmp_offset = self.header.null_bmp_offset;
-        const footer_offset = self.header.footer_offset;
-        if (null_bmp_offset < footer_offset) {
-            const bits_per_col: u32 = (self.row_count + 7) / 8;
-            for (0..col_count) |ci| {
-                const byte_idx: u32 = bits_per_col * @as(u32, @intCast(ci)) + row_idx / 8;
-                const bit_idx: u3 = @intCast(row_idx % 8);
-                const byte_offset = null_bmp_offset + byte_idx;
-                if (byte_offset < self.data.len) {
-                    const is_null = (self.data[byte_offset] >> bit_idx) & 1;
-                    if (is_null != 0) {
-                        out[ci].freeIfOwned(alloc);
-                        out[ci] = .null_t;
-                    }
-                }
-            }
-        }
-
-        return out;
+        if (pos + 4 > self.data.len) return error.InvalidData;
+        const len: u32 = std.mem.readInt(u32, self.data[pos..][0..4], .little);
+        pos += 4;
+        if (pos + len > self.data.len) return error.InvalidData;
+        return try alloc.dupe(u8, self.data[pos .. pos + len]);
     }
 
     /// Binary search for first row where key matches. Returns row index or null.
@@ -382,7 +263,7 @@ pub const BlockReader = struct {
                 .eq => {
                     found = mid;
                     hi = mid;
-                }, // keep searching left for first match
+                },
                 .gt => hi = mid,
             }
         }
@@ -406,29 +287,12 @@ pub const BlockReader = struct {
         return lo;
     }
 
+    /// Read full row (key, value, seq, tombstone). Caller owns key and value.
     pub fn readRow(self: *const BlockReader, row_idx: u32, alloc: std.mem.Allocator) !Row {
         const kv = try self.readKey(row_idx);
         const key_copy = try alloc.dupe(u8, kv.key);
         errdefer alloc.free(key_copy);
-        const values = try self.readRowValues(row_idx, alloc);
-        return .{ .key = key_copy, .seq = kv.seq, .values = values, .is_tombstone = kv.is_tombstone };
+        const value = try self.readValue(row_idx, alloc);
+        return .{ .key = key_copy, .value = value, .seq = kv.seq, .is_tombstone = kv.is_tombstone };
     }
 };
-
-fn zeroValue(col_type: ColumnType) ColumnValue {
-    return switch (col_type) {
-        .bool_t => .{ .bool_t = false },
-        .int8 => .{ .int8 = 0 },
-        .int16 => .{ .int16 = 0 },
-        .int32 => .{ .int32 = 0 },
-        .int64 => .{ .int64 = 0 },
-        .uint8 => .{ .uint8 = 0 },
-        .uint16 => .{ .uint16 = 0 },
-        .uint32 => .{ .uint32 = 0 },
-        .uint64 => .{ .uint64 = 0 },
-        .bytes => .{ .bytes = "" },
-        .string => .{ .string = "" },
-        .decimal => .{ .decimal = .{ .coefficient = 0, .scale = 0 } },
-        .null_t => .null_t,
-    };
-}

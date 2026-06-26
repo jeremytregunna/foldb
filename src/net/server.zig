@@ -63,8 +63,9 @@ fn handleConn(
     gw: *gateway_mod.Gateway,
     users: []const config_mod.UserEntry,
     alloc: std.mem.Allocator,
-) !void {
-    try conn_mod.Conn.run(io, stream, gw, users, alloc);
+) error{Canceled}!void {
+    conn_mod.Conn.run(io, stream, gw, users, alloc) catch |err|
+        std.log.warn("connection: {}", .{err});
 }
 
 /// Main server loop. Accepts connections and spawns a cooperative fiber per

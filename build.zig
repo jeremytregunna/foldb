@@ -83,37 +83,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // Sim clock tests
-    const sim_clock_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sim/clock_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sim_clock_test_module.addImport("sim.zig", sim_module);
-
-    const sim_clock_tests = b.addTest(.{ .root_module = sim_clock_test_module });
-    const run_sim_clock_tests = b.addRunArtifact(sim_clock_tests);
-
-    // Sim scheduler tests
-    const sim_scheduler_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sim/scheduler_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sim_scheduler_test_module.addImport("sim.zig", sim_module);
-    const sim_scheduler_tests = b.addTest(.{ .root_module = sim_scheduler_test_module });
-    const run_sim_scheduler_tests = b.addRunArtifact(sim_scheduler_tests);
-
-    // Sim network tests
-    const sim_network_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sim/network_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sim_network_test_module.addImport("sim.zig", sim_module);
-    const sim_network_tests = b.addTest(.{ .root_module = sim_network_test_module });
-    const run_sim_network_tests = b.addRunArtifact(sim_network_tests);
-
     // Observability tests
     const obs_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/observability/metrics_test.zig"),
@@ -146,20 +115,6 @@ pub fn build(b: *std.Build) void {
 
     const run_log_segment_tests = b.addRunArtifact(log_segment_tests);
 
-    // Log manager tests
-    const log_manager_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/log/manager_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    log_manager_test_module.addImport("log.zig", log_module);
-
-    const log_manager_tests = b.addTest(.{
-        .root_module = log_manager_test_module,
-    });
-
-    const run_log_manager_tests = b.addRunArtifact(log_manager_tests);
-
     // Log mux tests
     const log_mux_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/log/mux_test.zig"),
@@ -169,20 +124,6 @@ pub fn build(b: *std.Build) void {
     log_mux_test_module.addImport("log.zig", log_module);
     const log_mux_tests = b.addTest(.{ .root_module = log_mux_test_module });
     const run_log_mux_tests = b.addRunArtifact(log_mux_tests);
-
-// Log durability tests
-    const log_durability_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/log/durability_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    log_durability_test_module.addImport("log.zig", log_module);
-
-    const log_durability_tests = b.addTest(.{
-        .root_module = log_durability_test_module,
-    });
-
-    const run_log_durability_tests = b.addRunArtifact(log_durability_tests);
 
     // Log replay (DST)
     const log_replay_test_module = b.createModule(.{
@@ -360,56 +301,6 @@ pub fn build(b: *std.Build) void {
     const storage_snapshot_tests = b.addTest(.{ .root_module = storage_snapshot_test_module });
     const run_storage_snapshot_tests = b.addRunArtifact(storage_snapshot_tests);
 
-    // Vector codec tests
-    const vector_codec_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/storage/vector_codec_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    vector_codec_test_module.addImport("storage.zig", storage_module);
-    const vector_codec_tests = b.addTest(.{ .root_module = vector_codec_test_module });
-    const run_vector_codec_tests = b.addRunArtifact(vector_codec_tests);
-
-    // JSON path tests
-    const json_path_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/storage/json_path_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    json_path_test_module.addImport("storage.zig", storage_module);
-    const json_path_tests = b.addTest(.{ .root_module = json_path_test_module });
-    const run_json_path_tests = b.addRunArtifact(json_path_tests);
-
-    // JSON index tests
-    const json_index_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/storage/json_index_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    json_index_test_module.addImport("storage.zig", storage_module);
-    const json_index_tests = b.addTest(.{ .root_module = json_index_test_module });
-    const run_json_index_tests = b.addRunArtifact(json_index_tests);
-
-    // HNSW tests
-    const hnsw_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/storage/hnsw_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    hnsw_test_module.addImport("storage.zig", storage_module);
-    const hnsw_tests = b.addTest(.{ .root_module = hnsw_test_module });
-    const run_hnsw_tests = b.addRunArtifact(hnsw_tests);
-
-    // Storage replay (DST) tests
-    const storage_replay_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/storage/replay_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    storage_replay_test_module.addImport("storage.zig", storage_module);
-    const storage_replay_tests = b.addTest(.{ .root_module = storage_replay_test_module });
-    const run_storage_replay_tests = b.addRunArtifact(storage_replay_tests);
-
     // CDC module
     const cdc_module = b.createModule(.{
         .root_source_file = b.path("src/cdc/cdc.zig"),
@@ -421,19 +312,6 @@ pub fn build(b: *std.Build) void {
     cdc_module.addImport("observability.zig", observability_module);
 
     // Deterministic std shim — approved import surface for execution-path modules (spec §7.4).
-    const deterministic_std_module = b.createModule(.{
-        .root_source_file = b.path("src/executor/deterministic_std.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    // Exchange types module (named so exchange.zig is compiled once, shared across executor/exchange_bus modules)
-    const exchange_module = b.createModule(.{
-        .root_source_file = b.path("src/executor/exchange.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    exchange_module.addImport("storage.zig", storage_module);
 
     // Executor module
     const executor_module = b.createModule(.{
@@ -455,218 +333,6 @@ pub fn build(b: *std.Build) void {
     recovery_module.addImport("storage.zig", storage_module);
     recovery_module.addImport("executor.zig", executor_module);
     recovery_module.addImport("log.zig", log_module);
-
-    // Recovery tests
-    const recovery_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/storage/recovery_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    recovery_test_module.addImport("recovery.zig", recovery_module);
-    recovery_test_module.addImport("storage.zig", storage_module);
-    recovery_test_module.addImport("executor.zig", executor_module);
-    recovery_test_module.addImport("log.zig", log_module);
-    const recovery_tests = b.addTest(.{ .root_module = recovery_test_module });
-    const run_recovery_tests = b.addRunArtifact(recovery_tests);
-
-    // ExchangeBus module
-    const exchange_bus_module = b.createModule(.{
-        .root_source_file = b.path("src/executor/exchange_bus.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    exchange_bus_module.addImport("exchange.zig", exchange_module);
-
-    // ExchangeBus unit tests
-    const exchange_bus_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/executor/exchange_bus_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    exchange_bus_test_module.addImport("exchange_bus.zig", exchange_bus_module);
-    const exchange_bus_tests = b.addTest(.{ .root_module = exchange_bus_test_module });
-    const run_exchange_bus_tests = b.addRunArtifact(exchange_bus_tests);
-
-    // (partition_set.zig and cross_partition_test.zig removed in Step 7 cleanup)
-
-    // Executor unit tests
-    const executor_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/executor/executor_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    executor_test_module.addImport("executor.zig", executor_module);
-    executor_test_module.addImport("storage.zig", storage_module);
-    executor_test_module.addImport("log.zig", log_module);
-    const executor_tests = b.addTest(.{ .root_module = executor_test_module });
-    const run_executor_tests = b.addRunArtifact(executor_tests);
-
-    // ExecutorDriver tests
-    const driver_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/executor/driver_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    driver_test_module.addImport("executor.zig", executor_module);
-    driver_test_module.addImport("storage.zig", storage_module);
-    driver_test_module.addImport("log.zig", log_module);
-    const driver_tests = b.addTest(.{ .root_module = driver_test_module });
-    const run_driver_tests = b.addRunArtifact(driver_tests);
-
-    // Executor replay (DST)
-    const executor_replay_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/executor/replay_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    executor_replay_module.addImport("executor.zig", executor_module);
-    executor_replay_module.addImport("storage.zig", storage_module);
-    executor_replay_module.addImport("log.zig", log_module);
-    const executor_replay_tests = b.addTest(.{ .root_module = executor_replay_module });
-    const run_executor_replay_tests = b.addRunArtifact(executor_replay_tests);
-
-    // SQL module
-    const sql_module = b.createModule(.{
-        .root_source_file = b.path("src/sql/sql.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sql_module.addImport("storage.zig", storage_module);
-    sql_module.addImport("executor.zig", executor_module);
-    sql_module.addImport("log.zig", log_module);
-    sql_module.addImport("cdc.zig", cdc_module);
-
-    // FoldExecutor module — SQL-aware OS-thread executor wrapping SqlExecutor.
-    const fold_executor_module = b.createModule(.{
-        .root_source_file = b.path("src/executor/fold_executor.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    fold_executor_module.addImport("sql.zig", sql_module);
-    fold_executor_module.addImport("executor_bridge.zig", sql_module);
-    fold_executor_module.addImport("storage.zig", storage_module);
-    fold_executor_module.addImport("log.zig", log_module);
-    fold_executor_module.addImport("cdc.zig", cdc_module);
-    fold_executor_module.addImport("executor.zig", executor_module);
-    fold_executor_module.addImport("observability.zig", observability_module);
-    fold_executor_module.addImport("exchange_bus.zig", exchange_bus_module);
-    fold_executor_module.addImport("exchange.zig", exchange_module);
-    fold_executor_module.addImport("deterministic_std.zig", deterministic_std_module);
-
-    // SQL lexer tests
-    const sql_lexer_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sql/lexer_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sql_lexer_test_module.addImport("sql.zig", sql_module);
-    const sql_lexer_tests = b.addTest(.{ .root_module = sql_lexer_test_module });
-    const run_sql_lexer_tests = b.addRunArtifact(sql_lexer_tests);
-
-    // SQL parser tests
-    const sql_parser_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sql/parser_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sql_parser_test_module.addImport("sql.zig", sql_module);
-    const sql_parser_tests = b.addTest(.{ .root_module = sql_parser_test_module });
-    const run_sql_parser_tests = b.addRunArtifact(sql_parser_tests);
-
-    // SQL registry tests
-    const sql_registry_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sql/registry_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sql_registry_test_module.addImport("sql.zig", sql_module);
-    const sql_registry_tests = b.addTest(.{ .root_module = sql_registry_test_module });
-    const run_sql_registry_tests = b.addRunArtifact(sql_registry_tests);
-
-    // SQL integration tests
-    const sql_integration_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sql/integration_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sql_integration_test_module.addImport("sql.zig", sql_module);
-    const sql_integration_tests = b.addTest(.{ .root_module = sql_integration_test_module });
-    const run_sql_integration_tests = b.addRunArtifact(sql_integration_tests);
-
-    // SQL type checker tests
-    const sql_tc_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sql/type_checker_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sql_tc_test_module.addImport("sql.zig", sql_module);
-    const sql_tc_tests = b.addTest(.{ .root_module = sql_tc_test_module });
-    const run_sql_tc_tests = b.addRunArtifact(sql_tc_tests);
-
-    // SQL schema tests
-    const sql_schema_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sql/schema_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sql_schema_test_module.addImport("sql.zig", sql_module);
-    const sql_schema_tests = b.addTest(.{ .root_module = sql_schema_test_module });
-    const run_sql_schema_tests = b.addRunArtifact(sql_schema_tests);
-
-    // SQL executor expression tests
-    const sql_executor_expr_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sql/executor_expr_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sql_executor_expr_test_module.addImport("sql.zig", sql_module);
-    const sql_executor_expr_tests = b.addTest(.{ .root_module = sql_executor_expr_test_module });
-    const run_sql_executor_expr_tests = b.addRunArtifact(sql_executor_expr_tests);
-
-    // Decimal type tests
-    const sql_decimal_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sql/decimal_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sql_decimal_test_module.addImport("sql.zig", sql_module);
-    sql_decimal_test_module.addImport("storage.zig", storage_module);
-    const sql_decimal_tests = b.addTest(.{ .root_module = sql_decimal_test_module });
-    const run_sql_decimal_tests = b.addRunArtifact(sql_decimal_tests);
-
-    // SQL replay (DST) tests
-    const sql_replay_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sql/replay_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sql_replay_test_module.addImport("sql.zig", sql_module);
-    sql_replay_test_module.addImport("executor.zig", executor_module);
-    sql_replay_test_module.addImport("storage.zig", storage_module);
-    const sql_replay_tests = b.addTest(.{ .root_module = sql_replay_test_module });
-    const run_sql_replay_tests = b.addRunArtifact(sql_replay_tests);
-
-    // SQL FK enforcement tests
-    const sql_fk_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sql/fk_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sql_fk_test_module.addImport("sql.zig", sql_module);
-    sql_fk_test_module.addImport("executor.zig", executor_module);
-    sql_fk_test_module.addImport("storage.zig", storage_module);
-    const sql_fk_tests = b.addTest(.{ .root_module = sql_fk_test_module });
-    const run_sql_fk_tests = b.addRunArtifact(sql_fk_tests);
-
-    // SQL planner tests
-    const sql_planner_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sql/planner_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sql_planner_test_module.addImport("sql.zig", sql_module);
-    const sql_planner_tests = b.addTest(.{ .root_module = sql_planner_test_module });
-    const run_sql_planner_tests = b.addRunArtifact(sql_planner_tests);
 
     // Sequencer sub-modules
     const seq_mpsc_module = b.createModule(.{
@@ -747,155 +413,7 @@ pub fn build(b: *std.Build) void {
     const errors_tests = b.addTest(.{ .root_module = errors_test_module });
     const run_errors_tests = b.addRunArtifact(errors_tests);
 
-    // Gateway module
-    const gateway_module = b.createModule(.{
-        .root_source_file = b.path("src/gateway/gateway.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gateway_module.addImport("sql.zig", sql_module);
-    gateway_module.addImport("storage.zig", storage_module);
-    gateway_module.addImport("executor.zig", executor_module);
-    gateway_module.addImport("fold_executor.zig", fold_executor_module);
-    gateway_module.addImport("log.zig", log_module);
-    gateway_module.addImport("sequencer.zig", sequencer_module);
-    gateway_module.addImport("registry.zig", sql_module);
-    gateway_module.addImport("executor_bridge.zig", sql_module);
-    gateway_module.addImport("observability.zig", observability_module);
-    gateway_module.addImport("schema.zig", sql_module);
-    gateway_module.addImport("parser.zig", sql_module);
-    gateway_module.addImport("ast.zig", sql_module);
-    gateway_module.addImport("types.zig", executor_module);
-    gateway_module.addImport("cdc.zig", cdc_module);
-    gateway_module.addImport("errors.zig", errors_module);
-    gateway_module.addImport("config.zig", config_module);
-    gateway_module.addImport("exchange_bus.zig", exchange_bus_module);
-
-    // SQL multi-partition tests — exercises filter_partition with partition_count=2
-    const sql_partition_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/executor/sql_partition_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sql_partition_test_module.addImport("gateway.zig", gateway_module);
-    const sql_partition_tests = b.addTest(.{ .root_module = sql_partition_test_module });
-    const run_sql_partition_tests = b.addRunArtifact(sql_partition_tests);
-
-    // Sim transaction DST test
-    const sim_txn_dst_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sim/txn_dst_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sim_txn_dst_test_module.addImport("sim.zig", sim_module);
-    sim_txn_dst_test_module.addImport("gateway.zig", gateway_module);
-    sim_txn_dst_test_module.addImport("storage.zig", storage_module);
-    sim_txn_dst_test_module.addImport("sequencer.zig", sequencer_module);
-    const sim_txn_dst_tests = b.addTest(.{ .root_module = sim_txn_dst_test_module });
-    const run_sim_txn_dst_tests = b.addRunArtifact(sim_txn_dst_tests);
-
-    // Sim subquery DST tests
-    const sim_subquery_dst_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sim/subquery_dst_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sim_subquery_dst_test_module.addImport("sim.zig", sim_module);
-    sim_subquery_dst_test_module.addImport("gateway.zig", gateway_module);
-    sim_subquery_dst_test_module.addImport("storage.zig", storage_module);
-    sim_subquery_dst_test_module.addImport("sequencer.zig", sequencer_module);
-    const sim_subquery_dst_tests = b.addTest(.{ .root_module = sim_subquery_dst_test_module });
-    const run_sim_subquery_dst_tests = b.addRunArtifact(sim_subquery_dst_tests);
-
-    // Sim determinism property test
-    const sim_determinism_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sim/determinism_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sim_determinism_test_module.addImport("sim.zig", sim_module);
-    sim_determinism_test_module.addImport("gateway.zig", gateway_module);
-    sim_determinism_test_module.addImport("storage.zig", storage_module);
-    sim_determinism_test_module.addImport("sequencer.zig", sequencer_module);
-    const sim_determinism_tests = b.addTest(.{ .root_module = sim_determinism_test_module });
-    const run_sim_determinism_tests = b.addRunArtifact(sim_determinism_tests);
-
-    // Sim recovery property test
-    const sim_recovery_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sim/recovery_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sim_recovery_test_module.addImport("sim.zig", sim_module);
-    sim_recovery_test_module.addImport("gateway.zig", gateway_module);
-    sim_recovery_test_module.addImport("storage.zig", storage_module);
-    sim_recovery_test_module.addImport("sequencer.zig", sequencer_module);
-    const sim_recovery_tests = b.addTest(.{ .root_module = sim_recovery_test_module });
-    const run_sim_recovery_tests = b.addRunArtifact(sim_recovery_tests);
-
-    // Sim kill-9 mid-flush recovery test
-    const sim_kill9_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sim/kill9_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sim_kill9_test_module.addImport("sim.zig", sim_module);
-    sim_kill9_test_module.addImport("gateway.zig", gateway_module);
-    sim_kill9_test_module.addImport("storage.zig", storage_module);
-    const sim_kill9_tests = b.addTest(.{ .root_module = sim_kill9_test_module });
-    const run_sim_kill9_tests = b.addRunArtifact(sim_kill9_tests);
-
-    // Sim seed sweep DST (200 seeds × 20 ops determinism check)
-    const sim_sweep_dst_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sim/sweep_dst_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sim_sweep_dst_module.addImport("sim.zig", sim_module);
-    sim_sweep_dst_module.addImport("gateway.zig", gateway_module);
-    sim_sweep_dst_module.addOptions("options", dst_seeds_options);
-    const sim_sweep_dst_tests = b.addTest(.{ .root_module = sim_sweep_dst_module });
-    const run_sim_sweep_dst_tests = b.addRunArtifact(sim_sweep_dst_tests);
-
-    // Sim snapshot round-trip DST
-    const sim_snapshot_dst_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sim/snapshot_dst_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sim_snapshot_dst_module.addImport("sim.zig", sim_module);
-    sim_snapshot_dst_module.addImport("gateway.zig", gateway_module);
-    sim_snapshot_dst_module.addImport("storage.zig", storage_module);
-    const sim_snapshot_dst_tests = b.addTest(.{ .root_module = sim_snapshot_dst_module });
-    const run_sim_snapshot_dst_tests = b.addRunArtifact(sim_snapshot_dst_tests);
-
-    // Sim disk fault recovery test
-    const sim_disk_fault_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sim/disk_fault_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sim_disk_fault_test_module.addImport("sim.zig", sim_module);
-    sim_disk_fault_test_module.addImport("gateway.zig", gateway_module);
-    sim_disk_fault_test_module.addImport("storage.zig", storage_module);
-    sim_disk_fault_test_module.addImport("sequencer.zig", sequencer_module);
-    const sim_disk_fault_tests = b.addTest(.{ .root_module = sim_disk_fault_test_module });
-    const run_sim_disk_fault_tests = b.addRunArtifact(sim_disk_fault_tests);
-
-    // Sim OCC DST test
-    const sim_occ_dst_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/sim/occ_dst_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sim_occ_dst_test_module.addImport("sim.zig", sim_module);
-    sim_occ_dst_test_module.addImport("executor.zig", executor_module);
-    sim_occ_dst_test_module.addImport("storage.zig", storage_module);
-    sim_occ_dst_test_module.addImport("log.zig", log_module);
-    const sim_occ_dst_tests = b.addTest(.{ .root_module = sim_occ_dst_test_module });
-    const run_sim_occ_dst_tests = b.addRunArtifact(sim_occ_dst_tests);
-
-    // Net sub-modules (wire protocol layer)
+    // Net payload modules used by both gateway and client/server code.
     const net_frame_module = b.createModule(.{
         .root_source_file = b.path("src/net/frame.zig"),
         .target = target,
@@ -915,6 +433,25 @@ pub fn build(b: *std.Build) void {
     });
     net_messages_module.addImport("frame.zig", net_frame_module);
     net_messages_module.addImport("codec.zig", net_codec_module);
+
+    // Gateway module
+    const gateway_module = b.createModule(.{
+        .root_source_file = b.path("src/gateway/gateway.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gateway_module.addImport("storage.zig", storage_module);
+    gateway_module.addImport("executor.zig", executor_module);
+    gateway_module.addImport("log.zig", log_module);
+    gateway_module.addImport("sequencer.zig", sequencer_module);
+    gateway_module.addImport("observability.zig", observability_module);
+    gateway_module.addImport("types.zig", executor_module);
+    gateway_module.addImport("cdc.zig", cdc_module);
+    gateway_module.addImport("errors.zig", errors_module);
+    gateway_module.addImport("config.zig", config_module);
+    gateway_module.addImport("codec.zig", net_codec_module);
+    gateway_module.addImport("frame.zig", net_frame_module);
+    gateway_module.addImport("messages.zig", net_messages_module);
 
     const net_conn_module = b.createModule(.{
         .root_source_file = b.path("src/net/conn.zig"),
@@ -971,7 +508,7 @@ pub fn build(b: *std.Build) void {
 
     const run_repl = b.addRunArtifact(repl_exe);
     if (b.args) |bargs| run_repl.addArgs(bargs);
-    const repl_step = b.step("repl", "Run the interactive SQL REPL");
+    const repl_step = b.step("repl", "Run the interactive KV REPL");
     repl_step.dependOn(&run_repl.step);
 
     const net_module = b.createModule(.{
@@ -1100,19 +637,6 @@ pub fn build(b: *std.Build) void {
     const seq_mono_tests = b.addTest(.{ .root_module = seq_mono_test_module });
     const run_seq_mono_tests = b.addRunArtifact(seq_mono_tests);
 
-    // CDC unit tests
-    const cdc_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/cdc/cdc_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    cdc_test_module.addImport("cdc.zig", cdc_module);
-    cdc_test_module.addImport("storage.zig", storage_module);
-    cdc_test_module.addImport("executor.zig", executor_module);
-    cdc_test_module.addImport("log.zig", log_module);
-    const cdc_tests = b.addTest(.{ .root_module = cdc_test_module });
-    const run_cdc_tests = b.addRunArtifact(cdc_tests);
-
     // CDC concurrent tests
     const cdc_concurrent_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/cdc/cdc_concurrent_test.zig"),
@@ -1125,237 +649,13 @@ pub fn build(b: *std.Build) void {
     const cdc_concurrent_tests = b.addTest(.{ .root_module = cdc_concurrent_test_module });
     const run_cdc_concurrent_tests = b.addRunArtifact(cdc_concurrent_tests);
 
-    // Gateway unit tests
-    const gateway_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/gateway_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gateway_test_module.addImport("gateway.zig", gateway_module);
-    gateway_test_module.addImport("sql.zig", sql_module);
-    gateway_test_module.addImport("storage.zig", storage_module);
-    gateway_test_module.addImport("executor.zig", executor_module);
-    gateway_test_module.addImport("sequencer.zig", sequencer_module);
-    const gateway_tests = b.addTest(.{ .root_module = gateway_test_module });
-    const run_gateway_tests = b.addRunArtifact(gateway_tests);
-
-    // Multinode Gateway tests (Fixes 1, 2: DDL replication via Raft, follower error return)
-    const gw_multinode_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/multinode_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gw_multinode_test_module.addImport("gateway.zig", gateway_module);
-    gw_multinode_test_module.addImport("sequencer.zig", sequencer_module);
-    const gw_multinode_tests = b.addTest(.{ .root_module = gw_multinode_test_module });
-    const run_gw_multinode_tests = b.addRunArtifact(gw_multinode_tests);
-
-    // Gateway snapshot tests
-    const gateway_snapshot_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/snapshot_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gateway_snapshot_test_module.addImport("gateway.zig", gateway_module);
-    gateway_snapshot_test_module.addImport("storage.zig", storage_module);
-    gateway_snapshot_test_module.addImport("log.zig", log_module);
-    const gateway_snapshot_tests = b.addTest(.{ .root_module = gateway_snapshot_test_module });
-    const run_gateway_snapshot_tests = b.addRunArtifact(gateway_snapshot_tests);
-
-    // Gateway transaction unit tests
-    const gateway_txn_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/txn_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gateway_txn_test_module.addImport("gateway.zig", gateway_module);
-    gateway_txn_test_module.addImport("storage.zig", storage_module);
-    gateway_txn_test_module.addImport("sequencer.zig", sequencer_module);
-    const gateway_txn_tests = b.addTest(.{ .root_module = gateway_txn_test_module });
-    const run_gateway_txn_tests = b.addRunArtifact(gateway_txn_tests);
-
-    // Gateway subquery tests
-    const gateway_subquery_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/subquery_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gateway_subquery_test_module.addImport("gateway.zig", gateway_module);
-    gateway_subquery_test_module.addImport("storage.zig", storage_module);
-    gateway_subquery_test_module.addImport("sequencer.zig", sequencer_module);
-    const gateway_subquery_tests = b.addTest(.{ .root_module = gateway_subquery_test_module });
-    const run_gateway_subquery_tests = b.addRunArtifact(gateway_subquery_tests);
-
-    const gateway_distinct_returning_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/distinct_returning_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gateway_distinct_returning_test_module.addImport("gateway.zig", gateway_module);
-    gateway_distinct_returning_test_module.addImport("storage.zig", storage_module);
-    gateway_distinct_returning_test_module.addImport("sequencer.zig", sequencer_module);
-    const gateway_distinct_returning_tests = b.addTest(.{ .root_module = gateway_distinct_returning_test_module });
-    const run_gateway_distinct_returning_tests = b.addRunArtifact(gateway_distinct_returning_tests);
-
-    const gateway_on_conflict_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/on_conflict_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gateway_on_conflict_test_module.addImport("gateway.zig", gateway_module);
-    gateway_on_conflict_test_module.addImport("storage.zig", storage_module);
-    gateway_on_conflict_test_module.addImport("sequencer.zig", sequencer_module);
-    const gateway_on_conflict_tests = b.addTest(.{ .root_module = gateway_on_conflict_test_module });
-    const run_gateway_on_conflict_tests = b.addRunArtifact(gateway_on_conflict_tests);
-
-    const gateway_bitwise_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/bitwise_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gateway_bitwise_test_module.addImport("gateway.zig", gateway_module);
-    gateway_bitwise_test_module.addImport("storage.zig", storage_module);
-    gateway_bitwise_test_module.addImport("sequencer.zig", sequencer_module);
-    const gateway_bitwise_tests = b.addTest(.{ .root_module = gateway_bitwise_test_module });
-    const run_gateway_bitwise_tests = b.addRunArtifact(gateway_bitwise_tests);
-
-    const gateway_alter_table_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/alter_table_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gateway_alter_table_test_module.addImport("gateway.zig", gateway_module);
-    gateway_alter_table_test_module.addImport("storage.zig", storage_module);
-    gateway_alter_table_test_module.addImport("sequencer.zig", sequencer_module);
-    const gateway_alter_table_tests = b.addTest(.{ .root_module = gateway_alter_table_test_module });
-    const run_gateway_alter_table_tests = b.addRunArtifact(gateway_alter_table_tests);
-
-    const gateway_create_index_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/create_index_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gateway_create_index_test_module.addImport("gateway.zig", gateway_module);
-    gateway_create_index_test_module.addImport("storage.zig", storage_module);
-    gateway_create_index_test_module.addImport("sequencer.zig", sequencer_module);
-    const gateway_create_index_tests = b.addTest(.{ .root_module = gateway_create_index_test_module });
-    const run_gateway_create_index_tests = b.addRunArtifact(gateway_create_index_tests);
-
-    const gateway_json_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/json_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gateway_json_test_module.addImport("gateway.zig", gateway_module);
-    gateway_json_test_module.addImport("storage.zig", storage_module);
-    gateway_json_test_module.addImport("sequencer.zig", sequencer_module);
-    const gateway_json_tests = b.addTest(.{ .root_module = gateway_json_test_module });
-    const run_gateway_json_tests = b.addRunArtifact(gateway_json_tests);
-
-    const gateway_update_from_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/update_from_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gateway_update_from_test_module.addImport("gateway.zig", gateway_module);
-    gateway_update_from_test_module.addImport("storage.zig", storage_module);
-    gateway_update_from_test_module.addImport("sequencer.zig", sequencer_module);
-    const gateway_update_from_tests = b.addTest(.{ .root_module = gateway_update_from_test_module });
-    const run_gateway_update_from_tests = b.addRunArtifact(gateway_update_from_tests);
-
-    const gateway_delete_using_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/delete_using_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gateway_delete_using_test_module.addImport("gateway.zig", gateway_module);
-    gateway_delete_using_test_module.addImport("storage.zig", storage_module);
-    gateway_delete_using_test_module.addImport("sequencer.zig", sequencer_module);
-    const gateway_delete_using_tests = b.addTest(.{ .root_module = gateway_delete_using_test_module });
-    const run_gateway_delete_using_tests = b.addRunArtifact(gateway_delete_using_tests);
-
-    const gateway_agg_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/agg_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gateway_agg_test_module.addImport("gateway.zig", gateway_module);
-    gateway_agg_test_module.addImport("storage.zig", storage_module);
-    gateway_agg_test_module.addImport("sequencer.zig", sequencer_module);
-    const gateway_agg_tests = b.addTest(.{ .root_module = gateway_agg_test_module });
-    const run_gateway_agg_tests = b.addRunArtifact(gateway_agg_tests);
-
-    const gateway_window_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/window_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gateway_window_test_module.addImport("gateway.zig", gateway_module);
-    gateway_window_test_module.addImport("storage.zig", storage_module);
-    gateway_window_test_module.addImport("sequencer.zig", sequencer_module);
-    const gateway_window_tests = b.addTest(.{ .root_module = gateway_window_test_module });
-    const run_gateway_window_tests = b.addRunArtifact(gateway_window_tests);
-
-    const gateway_join_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/join_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gateway_join_test_module.addImport("gateway.zig", gateway_module);
-    gateway_join_test_module.addImport("storage.zig", storage_module);
-    gateway_join_test_module.addImport("sequencer.zig", sequencer_module);
-    const gateway_join_tests = b.addTest(.{ .root_module = gateway_join_test_module });
-    const run_gateway_join_tests = b.addRunArtifact(gateway_join_tests);
-
-    // Gateway null tests
-    const gateway_null_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/null_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gateway_null_test_module.addImport("gateway.zig", gateway_module);
-    gateway_null_test_module.addImport("storage.zig", storage_module);
-    gateway_null_test_module.addImport("sequencer.zig", sequencer_module);
-    const gateway_null_tests = b.addTest(.{ .root_module = gateway_null_test_module });
-    const run_gateway_null_tests = b.addRunArtifact(gateway_null_tests);
-
-    // SQL file runner tests
-    const sql_file_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/sql_file_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sql_file_test_module.addImport("gateway.zig", gateway_module);
-    sql_file_test_module.addImport("storage.zig", storage_module);
-    sql_file_test_module.addImport("sql.zig", sql_module);
-    sql_file_test_module.addImport("sequencer.zig", sequencer_module);
-    const sql_file_tests = b.addTest(.{ .root_module = sql_file_test_module });
-    const run_sql_file_tests = b.addRunArtifact(sql_file_tests);
-
-    // Gateway replay (DST)
-    const gateway_replay_test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/gateway/replay_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    gateway_replay_test_module.addImport("gateway.zig", gateway_module);
-    gateway_replay_test_module.addImport("storage.zig", storage_module);
-    gateway_replay_test_module.addImport("sequencer.zig", sequencer_module);
-    const gateway_replay_tests = b.addTest(.{ .root_module = gateway_replay_test_module });
-    const run_gateway_replay_tests = b.addRunArtifact(gateway_replay_tests);
-
     // Unit tests: pure logic, no simulation harness
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_sim_clock_tests.step);
-    test_step.dependOn(&run_sim_scheduler_tests.step);
-    test_step.dependOn(&run_sim_network_tests.step);
     test_step.dependOn(&run_obs_tests.step);
     test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
     test_step.dependOn(&run_log_segment_tests.step);
-    test_step.dependOn(&run_log_manager_tests.step);
     test_step.dependOn(&run_log_mux_tests.step);
-    test_step.dependOn(&run_log_durability_tests.step);
     test_step.dependOn(&run_raft_rpc_tests.step);
     test_step.dependOn(&run_raft_node_tests.step);
     test_step.dependOn(&run_raft_transport_tests.step);
@@ -1366,43 +666,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_storage_s3_tests.step);
     test_step.dependOn(&run_storage_tiered_tests.step);
     test_step.dependOn(&run_storage_snapshot_tests.step);
-    test_step.dependOn(&run_vector_codec_tests.step);
-    test_step.dependOn(&run_json_path_tests.step);
-    test_step.dependOn(&run_json_index_tests.step);
-    test_step.dependOn(&run_hnsw_tests.step);
-    test_step.dependOn(&run_exchange_bus_tests.step);
-    test_step.dependOn(&run_executor_tests.step);
-    test_step.dependOn(&run_driver_tests.step);
-    test_step.dependOn(&run_recovery_tests.step);
-    test_step.dependOn(&run_sql_partition_tests.step);
-    test_step.dependOn(&run_sql_lexer_tests.step);
-    test_step.dependOn(&run_sql_parser_tests.step);
-    test_step.dependOn(&run_sql_registry_tests.step);
-    test_step.dependOn(&run_sql_integration_tests.step);
-    test_step.dependOn(&run_sql_tc_tests.step);
-    test_step.dependOn(&run_sql_schema_tests.step);
-    test_step.dependOn(&run_sql_planner_tests.step);
-    test_step.dependOn(&run_sql_executor_expr_tests.step);
-    test_step.dependOn(&run_sql_decimal_tests.step);
-    test_step.dependOn(&run_sql_fk_tests.step);
-    test_step.dependOn(&run_cdc_tests.step);
     test_step.dependOn(&run_cdc_concurrent_tests.step);
-    test_step.dependOn(&run_gateway_tests.step);
-    test_step.dependOn(&run_gateway_snapshot_tests.step);
-    test_step.dependOn(&run_gateway_txn_tests.step);
-    test_step.dependOn(&run_gateway_subquery_tests.step);
-    test_step.dependOn(&run_gateway_distinct_returning_tests.step);
-    test_step.dependOn(&run_gateway_on_conflict_tests.step);
-    test_step.dependOn(&run_gateway_bitwise_tests.step);
-    test_step.dependOn(&run_gateway_alter_table_tests.step);
-    test_step.dependOn(&run_gateway_create_index_tests.step);
-    test_step.dependOn(&run_gateway_json_tests.step);
-    test_step.dependOn(&run_gateway_update_from_tests.step);
-    test_step.dependOn(&run_gateway_delete_using_tests.step);
-    test_step.dependOn(&run_gateway_agg_tests.step);
-    test_step.dependOn(&run_gateway_window_tests.step);
-    test_step.dependOn(&run_gateway_join_tests.step);
-    test_step.dependOn(&run_gateway_null_tests.step);
     test_step.dependOn(&run_seq_epoch_tests.step);
     test_step.dependOn(&run_seq_idem_tests.step);
     test_step.dependOn(&run_seq_tests.step);
@@ -1415,44 +679,13 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_seq_tcp_actor_tests.step);
     test_step.dependOn(&run_seq_reconfig_tests.step);
     test_step.dependOn(&run_seq_follower_submit_tests.step);
-    test_step.dependOn(&run_gw_multinode_tests.step);
-    test_step.dependOn(&run_sql_file_tests.step);
 
     // Deterministic simulation tests
     const dst_step = b.step("dst-test", "Run deterministic simulation tests");
     dst_step.dependOn(&run_raft_cluster_tests.step);
     dst_step.dependOn(&run_raft_linear_tests.step);
-    dst_step.dependOn(&run_storage_replay_tests.step);
-    dst_step.dependOn(&run_executor_replay_tests.step);
-    dst_step.dependOn(&run_sql_replay_tests.step);
     dst_step.dependOn(&run_log_replay_tests.step);
-    dst_step.dependOn(&run_gateway_replay_tests.step);
-    dst_step.dependOn(&run_sim_determinism_tests.step);
-    dst_step.dependOn(&run_sim_recovery_tests.step);
-    dst_step.dependOn(&run_sim_disk_fault_tests.step);
-    dst_step.dependOn(&run_sim_txn_dst_tests.step);
-    dst_step.dependOn(&run_sim_subquery_dst_tests.step);
-    dst_step.dependOn(&run_sim_occ_dst_tests.step);
     dst_step.dependOn(&run_raft_tcp_dst_tests.step);
     dst_step.dependOn(&run_raft_sweep_tests.step);
-    dst_step.dependOn(&run_sim_snapshot_dst_tests.step);
-    dst_step.dependOn(&run_sim_kill9_tests.step);
     dst_step.dependOn(&run_seq_mono_tests.step);
-    dst_step.dependOn(&run_sim_sweep_dst_tests.step);
-
-    // S3 snapshot integration test — requires test-s3.json in the project root.
-    // Skips gracefully if the file is absent or S3 fields are not populated.
-    const s3_integration_module = b.createModule(.{
-        .root_source_file = b.path("src/tests/integration/s3_snapshot_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    s3_integration_module.addImport("config.zig", config_module);
-    s3_integration_module.addImport("gateway.zig", gateway_module);
-    s3_integration_module.addImport("storage.zig", storage_module);
-    const s3_integration_tests = b.addTest(.{ .root_module = s3_integration_module });
-    const run_s3_integration = b.addRunArtifact(s3_integration_tests);
-
-    const s3_integration_step = b.step("s3-integration", "Run S3 snapshot integration test (requires test-s3.json)");
-    s3_integration_step.dependOn(&run_s3_integration.step);
 }

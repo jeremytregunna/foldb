@@ -10,7 +10,6 @@ const obs = @import("observability.zig");
 
 pub const TableId = storage_mod.TableId;
 pub const Seq = storage_mod.Seq;
-pub const ColumnValue = storage_mod.ColumnValue;
 pub const MutationKind = storage_mod.MutationKind;
 pub const Mutation = storage_mod.Mutation;
 pub const Storage = storage_mod.Storage;
@@ -47,19 +46,17 @@ pub const CdcEffect = struct {
     key: []const u8,
     op: CdcOperation,
     /// State before the change. Null for inserts or if row did not previously exist.
-    before: ?[]ColumnValue,
+    before: ?[]const u8,
     /// State after the change. Null for deletes.
-    after: ?[]ColumnValue,
+    after: ?[]const u8,
 
     pub fn deinit(self: *CdcEffect, alloc: std.mem.Allocator) void {
         assert(self.key.len > 0);
         alloc.free(self.key);
         if (self.before) |before_values| {
-            for (before_values) |value| value.freeIfOwned(alloc);
             alloc.free(before_values);
         }
         if (self.after) |after_values| {
-            for (after_values) |value| value.freeIfOwned(alloc);
             alloc.free(after_values);
         }
     }
@@ -83,13 +80,12 @@ pub const CdcEvent = struct {
 /// Before-images captured prior to a storage.apply() call. Parallel to the mutations slice.
 pub const BeforeImages = struct {
     /// images[i] is the before-state for mutations[i]. Null for inserts or missing rows.
-    images: []?[]ColumnValue,
+    images: []?[]const u8,
     alloc: std.mem.Allocator,
 
     pub fn deinit(self: *BeforeImages) void {
         for (self.images) |image_opt| {
             if (image_opt) |image| {
-                for (image) |value| value.freeIfOwned(self.alloc);
                 self.alloc.free(image);
             }
         }
@@ -324,12 +320,11 @@ pub const CdcManager = struct {
         at_seq: Seq,
         alloc: std.mem.Allocator,
     ) !BeforeImages {
-        const images = try alloc.alloc(?[]ColumnValue, mutations.len);
+        const images = try alloc.alloc(?[]const u8, mutations.len);
         var committed: usize = 0;
         errdefer {
             for (images[0..committed]) |image_opt| {
                 if (image_opt) |image| {
-                    for (image) |value| value.freeIfOwned(alloc);
                     alloc.free(image);
                 }
             }
@@ -346,7 +341,7 @@ pub const CdcManager = struct {
             if (row_opt) |row| {
                 var r = row;
                 defer r.deinit(storage.alloc);
-                images[committed] = try clone_column_values(r.values, alloc);
+                images[committed] = try alloc.dupe(u8, r.value);
             } else {
                 images[committed] = null;
             }
@@ -428,18 +423,7 @@ fn mutation_kind_to_op(kind: MutationKind) CdcOperation {
     };
 }
 
-fn clone_column_values(source: []const ColumnValue, alloc: std.mem.Allocator) ![]ColumnValue {
-    const target = try alloc.alloc(ColumnValue, source.len);
-    var i: usize = 0;
-    errdefer {
-        for (target[0..i]) |value| value.freeIfOwned(alloc);
-        alloc.free(target);
-    }
-    while (i < source.len) : (i += 1) target[i] = try source[i].dupe(alloc);
-    return target;
-}
-
-fn build_effect(alloc: std.mem.Allocator, mutation: Mutation, before_img: ?[]ColumnValue) !CdcEffect {
+fn build_effect(alloc: std.mem.Allocator, mutation: Mutation, before_img: ?[]const u8) !CdcEffect {
     assert(mutation.key.len > 0);
     const op = mutation_kind_to_op(mutation.kind);
 
@@ -447,18 +431,15 @@ fn build_effect(alloc: std.mem.Allocator, mutation: Mutation, before_img: ?[]Col
     errdefer alloc.free(key);
     assert(key.len == mutation.key.len);
 
-    const before: ?[]ColumnValue = if (before_img) |img|
-        try clone_column_values(img, alloc)
+    const before: ?[]const u8 = if (before_img) |img|
+        try alloc.dupe(u8, img)
     else
         null;
-    errdefer if (before) |b| {
-        for (b) |value| value.freeIfOwned(alloc);
-        alloc.free(b);
-    };
+    errdefer if (before) |b| alloc.free(b);
 
-    const after: ?[]ColumnValue = if (op != .delete) blk: {
-        const src = mutation.values orelse break :blk null;
-        break :blk try clone_column_values(src, alloc);
+    const after: ?[]const u8 = if (op != .delete) blk: {
+        const src = mutation.value orelse break :blk null;
+        break :blk try alloc.dupe(u8, src);
     } else null;
 
     return .{ .table_id = mutation.table_id, .key = key, .op = op, .before = before, .after = after };

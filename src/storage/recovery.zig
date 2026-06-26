@@ -6,7 +6,6 @@ const log_mod = @import("log.zig");
 
 const ObjectStore = storage_mod.ObjectStore;
 const LSM = storage_mod.LSM;
-const TableSchema = storage_mod.TableSchema;
 const Seq = storage_mod.Seq;
 const Executor = executor_mod.Executor;
 const Log = log_mod.Log;
@@ -22,7 +21,6 @@ pub fn recoverLatest(
     store: ObjectStore,
     partition_id: u32,
     lsm_dir: []const u8,
-    schema: TableSchema,
     log: *Log,
     executor: *Executor,
     alloc: std.mem.Allocator,
@@ -56,19 +54,19 @@ pub fn recoverLatest(
         }
     }
 
+    var lsm: LSM = undefined;
     if (best_key == null or best_seq == 0) {
-        const lsm = try LSM.init(schema, lsm_dir, alloc);
+        lsm = try LSM.init(lsm_dir, alloc);
         return RecoveryResult{ .lsm = lsm, .recovered_through_seq = 0 };
     }
 
-    // This is the domain boundary — raw bytes from the object store are
-    // deserialized and validated here; only a proven-valid manifest crosses in.
+    // Deserialize and validate manifest from object store.
     const manifest_data = try store.get(best_key.?, alloc);
     defer alloc.free(manifest_data);
     var manifest = try storage_mod.manifestFromBytes(manifest_data, best_key.?, alloc);
     defer manifest.deinit();
 
-    var lsm = try storage_mod.restoreFromSnapshot(&manifest, lsm_dir, store, schema, alloc);
+    lsm = try storage_mod.restoreFromSnapshot(&manifest, lsm_dir, store, alloc);
     errdefer lsm.deinit();
 
     log.notify_snapshot(best_seq);
@@ -83,8 +81,6 @@ pub fn recoverLatest(
         }
         if (entries.len == 0) break;
         for (entries) |entry| {
-            // Domain boundary — executor.run validates txn_intent entries (CRC +
-            // deserialization) and routes snapshot_marker before reaching the core.
             _ = try executor.run(entry);
         }
         replay_from = entries[entries.len - 1].header.seq + 1;
