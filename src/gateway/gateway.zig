@@ -29,6 +29,7 @@ pub const default_table_id: storage_mod.TableId = 1;
 pub const Options = struct {
     io: ?std.Io = null,
     partition_count: u32 = 1,
+    log_partition_count: ?u32 = null,
     node_id: u64 = 1,
     tick_interval_ms: u32 = 10,
     election_timeout_min_ms: u32 = 150,
@@ -49,6 +50,10 @@ pub const Gateway = struct {
     sequencer: Sequencer,
     executor: Executor,
     alloc: std.mem.Allocator,
+    executor_thread: ?std.Thread = null,
+    executor_shutdown: std.atomic.Value(bool) = .init(false),
+    applied_seq: std.atomic.Value(u64) = .init(0),
+    next_submit_seq: std.atomic.Value(u64) = .init(1),
 
     pub fn init(storage_dir: []const u8, alloc: std.mem.Allocator, opts: Options) !*Gateway {
         assert(storage_dir.len > 0);
@@ -61,6 +66,7 @@ pub const Gateway = struct {
 
         var sequencer = try Sequencer.init(storage_dir, .{
             .partition_count = opts.partition_count,
+            .log_partition_count = opts.log_partition_count,
             .node_id = opts.node_id,
             .tick_interval_ms = opts.tick_interval_ms,
             .election_timeout_min_ms = opts.election_timeout_min_ms,
@@ -75,20 +81,97 @@ pub const Gateway = struct {
             .sequencer = sequencer,
             .executor = Executor.init(&gw.storage, alloc),
             .alloc = alloc,
+            .executor_thread = null,
+            .executor_shutdown = .init(false),
+            .applied_seq = .init(0),
+            .next_submit_seq = .init(1),
         };
 
+        try gw.sequencer.catchUpCommitted();
         try gw.replayLogs();
+        gw.applied_seq.store(gw.executor.current_seq(), .release);
         try gw.sequencer.start();
+        try gw.startExecutor();
         return gw;
     }
 
     pub fn deinit(self: *Gateway) void {
+        self.sequencer.stopAndCatchUp();
+        self.stopExecutor();
         self.replayLogs() catch |err| std.log.warn("gateway replay during shutdown: {}", .{err});
         self.storage.flushAll() catch |err| std.log.warn("gateway flush during shutdown: {}", .{err});
         self.executor.deinit();
         self.sequencer.deinit();
         self.storage.deinit();
         self.alloc.destroy(self);
+    }
+
+    fn startExecutor(self: *Gateway) !void {
+        self.executor_thread = try std.Thread.spawn(.{}, executorLoop, .{self});
+    }
+
+    fn stopExecutor(self: *Gateway) void {
+        self.executor_shutdown.store(true, .release);
+        for (self.sequencer.logPartitionLogs()) |*log| log.notifyAppend();
+        if (self.executor_thread) |thread| {
+            thread.join();
+            self.executor_thread = null;
+        }
+    }
+
+    fn executorLoop(self: *Gateway) void {
+        while (!self.executor_shutdown.load(.acquire)) {
+            const applied = self.drainCommitted() catch |err| blk: {
+                std.log.warn("gateway executor drain: {}", .{err});
+                break :blk false;
+            };
+            if (!applied) {
+                const sleep_ns: std.os.linux.timespec = .{ .sec = 0, .nsec = 100_000 };
+                _ = std.os.linux.nanosleep(&sleep_ns, null);
+            }
+        }
+        while (self.drainCommitted() catch false) {}
+    }
+
+    fn drainCommitted(self: *Gateway) !bool {
+        const logs = self.sequencer.logPartitionLogs();
+        const ptrs = try self.alloc.alloc(*log_mod.Log, logs.len);
+        defer self.alloc.free(ptrs);
+        for (logs, 0..) |*log, i| ptrs[i] = log;
+
+        var mux = LogMux.init(try self.alloc.dupe(*log_mod.Log, ptrs), self.alloc);
+        defer mux.deinit();
+
+        const from_seq = self.executor.current_seq() + 1;
+        const entries = try mux.read(from_seq, 256, self.alloc);
+        defer {
+            for (entries) |*entry| entry.deinit(self.alloc);
+            self.alloc.free(entries);
+        }
+        if (entries.len == 0) return false;
+        for (entries) |entry| {
+            _ = try self.executor.run(entry);
+            self.applied_seq.store(self.executor.current_seq(), .release);
+        }
+        return true;
+    }
+
+    fn waitApplied(self: *Gateway, seq: u64) !void {
+        const sleep_ns: std.os.linux.timespec = .{ .sec = 0, .nsec = 100_000 };
+        var spins: u32 = 0;
+        while (self.applied_seq.load(.acquire) < seq) {
+            if (spins >= 300_000) return error.CommitTimeout;
+            spins += 1;
+            _ = std.os.linux.nanosleep(&sleep_ns, null);
+        }
+    }
+
+    pub fn waitCaughtUp(self: *Gateway) !void {
+        try self.waitApplied(self.sequencer.currentSeq());
+    }
+
+    fn allocSubmitSeq(self: *Gateway) u64 {
+        return self.next_submit_seq.fetchAdd(1, .monotonic);
     }
 
     fn replayLogs(self: *Gateway) !void {
@@ -100,7 +183,7 @@ pub const Gateway = struct {
         var mux = LogMux.init(try self.alloc.dupe(*log_mod.Log, ptrs), self.alloc);
         defer mux.deinit();
 
-        var from_seq: u64 = 1;
+        var from_seq: u64 = self.executor.current_seq() + 1;
         while (true) {
             const entries = try mux.read(from_seq, 256, self.alloc);
             defer {
@@ -110,6 +193,7 @@ pub const Gateway = struct {
             if (entries.len == 0) break;
             for (entries) |entry| {
                 _ = try self.executor.run(entry);
+                self.applied_seq.store(self.executor.current_seq(), .release);
             }
             from_seq = entries[entries.len - 1].header.seq + 1;
             if (entries.len < 256) break;
@@ -175,7 +259,10 @@ pub fn decodeRequest(kind: frame.Kind, stream_id: u64, payload: []const u8, allo
 }
 
 /// Encode an error frame payload and send it back to the client.
-pub fn sendError(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
+pub fn sendError(
+    writer: anytype,
+    alloc: std.mem.Allocator,
+    stream_id: u64,
     code: messages.ErrorCode,
     severity: messages.Severity,
     message: []const u8,
@@ -195,12 +282,16 @@ fn sendResponse(writer: anytype, stream_id: u64, kind: frame.Kind, payload: []co
 // ─── KV operation handlers ───
 
 /// Handle GET request.
-pub fn handleGet(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
+pub fn handleGet(
+    writer: anytype,
+    alloc: std.mem.Allocator,
+    stream_id: u64,
     req: messages.GetRequest,
-    storage: *Storage,
+    gw: *Gateway,
 ) !void {
     errdefer sendError(writer, alloc, stream_id, .server_error, .@"error", "get failed", "") catch {};
-    const result = try storage.get(default_table_id, req.key, req.at_seq);
+    try gw.waitApplied(gw.sequencer.currentSeq());
+    const result = try gw.storage.get(default_table_id, req.key, req.at_seq);
     defer if (result) |row| row.deinit(alloc);
     const row_value: ?[]const u8 = if (result) |row| blk: {
         if (row.is_tombstone) break :blk null;
@@ -217,55 +308,39 @@ pub fn handleGet(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
 }
 
 /// Handle SET request — submits through Sequencer for global ordering.
-pub fn handleSet(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
+pub fn handleSet(
+    writer: anytype,
+    alloc: std.mem.Allocator,
+    stream_id: u64,
     req: messages.SetRequest,
-    storage: *Storage,
-    sequencer: *Sequencer,
+    gw: *Gateway,
 ) !void {
     errdefer sendError(writer, alloc, stream_id, .server_error, .@"error", "set failed", "") catch {};
 
-    // CAS check
-    if (req.expected_seq > 0) {
-        const current = try storage.get(default_table_id, req.key, std.math.maxInt(u64));
-        defer if (current) |row| row.deinit(alloc);
-        if (current) |row| {
-            if (row.seq != req.expected_seq) {
-                const res = messages.MutateResponse{ .committed_seq = row.seq, .cas_failed = row.seq };
-                var payload: std.ArrayListUnmanaged(u8) = .empty;
-                defer payload.deinit(alloc);
-                try messages.encodeMutateResponse(&payload, alloc, res);
-                try sendResponse(writer, stream_id, .response, payload.items);
-                return;
-            }
-        } else {
-            // Key not found but expected_seq > 0 → CAS fail
-            const res = messages.MutateResponse{ .committed_seq = 0, .cas_failed = null };
-            var payload: std.ArrayListUnmanaged(u8) = .empty;
-            defer payload.deinit(alloc);
-            try messages.encodeMutateResponse(&payload, alloc, res);
-            try sendResponse(writer, stream_id, .response, payload.items);
-            return;
-        }
-    }
-
     // Build intent and submit through sequencer
-    const ops = [_]KvOp{ .{ .set = .{ .key = req.key, .value = req.value } } };
-    const seq = sequencer.currentSeq() + 1;
-    const payload_bytes = try TxnIntent.init(&ops, &.{}, &.{1}, 1, seq).serialize_to(alloc);
+    const ops = [_]KvOp{.{ .set = .{ .key = req.key, .value = req.value, .expected_seq = req.expected_seq } }};
+    const submit_seq = gw.allocSubmitSeq();
+    const payload_bytes = try TxnIntent.init(&ops, &.{}, &.{1}, 1, submit_seq).serialize_to(alloc);
     defer alloc.free(payload_bytes);
 
     var pending: PendingSubmit = undefined;
-    const handle = sequencer.submitBytes(&pending, payload_bytes, 0, seq, .txn_intent);
+    const handle = gw.sequencer.submitBytes(&pending, payload_bytes, 1, submit_seq, .txn_intent);
     const result = try handle.awaitCommit(null);
 
-    // Apply directly to storage for immediate read-after-write consistency.
-    const mutations = [_]Mutation{
-        .{ .kind = .update, .table_id = default_table_id, .key = req.key, .value = req.value },
-    };
-    try storage.apply(&mutations, result.seq);
+    var cas_failed: ?u64 = null;
+    var committed_seq: u64 = result.seq;
+    if (req.expected_seq > 0) {
+        try gw.waitApplied(result.seq);
+        const current = try gw.storage.get(default_table_id, req.key, std.math.maxInt(u64));
+        defer if (current) |row| row.deinit(alloc);
+        cas_failed = if (current == null or current.?.seq != result.seq)
+            if (current) |row| row.seq else null
+        else
+            null;
+        committed_seq = if (cas_failed) |seq_failed| seq_failed else result.seq;
+    }
 
-    // Send response
-    const res = messages.MutateResponse{ .committed_seq = result.seq, .cas_failed = null };
+    const res = messages.MutateResponse{ .committed_seq = committed_seq, .cas_failed = cas_failed };
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(alloc);
     try messages.encodeMutateResponse(&out, alloc, res);
@@ -273,27 +348,23 @@ pub fn handleSet(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
 }
 
 /// Handle DELETE request — submits through Sequencer for global ordering.
-pub fn handleDelete(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
+pub fn handleDelete(
+    writer: anytype,
+    alloc: std.mem.Allocator,
+    stream_id: u64,
     req: messages.DeleteRequest,
-    storage: *Storage,
-    sequencer: *Sequencer,
+    gw: *Gateway,
 ) !void {
     errdefer sendError(writer, alloc, stream_id, .server_error, .@"error", "delete failed", "") catch {};
 
-    const ops = [_]KvOp{ .{ .delete = .{ .key = req.key } } };
-    const seq = sequencer.currentSeq() + 1;
-    const payload_bytes = try TxnIntent.init(&ops, &.{}, &.{1}, 1, seq).serialize_to(alloc);
+    const ops = [_]KvOp{.{ .delete = .{ .key = req.key } }};
+    const submit_seq = gw.allocSubmitSeq();
+    const payload_bytes = try TxnIntent.init(&ops, &.{}, &.{1}, 1, submit_seq).serialize_to(alloc);
     defer alloc.free(payload_bytes);
 
     var pending: PendingSubmit = undefined;
-    const handle = sequencer.submitBytes(&pending, payload_bytes, 0, seq, .txn_intent);
+    const handle = gw.sequencer.submitBytes(&pending, payload_bytes, 1, submit_seq, .txn_intent);
     const result = try handle.awaitCommit(null);
-
-    // Apply directly to storage for immediate read-after-write consistency.
-    const mutations = [_]Mutation{
-        .{ .kind = .delete, .table_id = default_table_id, .key = req.key, .value = null },
-    };
-    try storage.apply(&mutations, result.seq);
 
     const res = messages.MutateResponse{ .committed_seq = result.seq, .cas_failed = null };
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -303,15 +374,18 @@ pub fn handleDelete(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
 }
 
 /// Handle RANGE request.
-pub fn handleRange(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
+pub fn handleRange(
+    writer: anytype,
+    alloc: std.mem.Allocator,
+    stream_id: u64,
     req: messages.RangeRequest,
-    storage: *Storage,
-    sequencer: *Sequencer,
+    gw: *Gateway,
 ) !void {
     errdefer sendError(writer, alloc, stream_id, .server_error, .@"error", "range failed", "") catch {};
 
+    try gw.waitApplied(gw.sequencer.currentSeq());
     const range = KeyRange{ .start = req.start, .end = req.end, .start_inclusive = true };
-    var iter = try storage.scan(default_table_id, range, std.math.maxInt(u64), alloc);
+    var iter = try gw.storage.scan(default_table_id, range, std.math.maxInt(u64), alloc);
     defer iter.deinit();
 
     var entries: std.ArrayList(messages.RangeEntry) = .empty;
@@ -336,7 +410,7 @@ pub fn handleRange(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
         try entries.append(alloc, entry);
     }
 
-    const res = messages.RangeResponse{ .entries = entries.items, .committed_seq = sequencer.currentSeq() };
+    const res = messages.RangeResponse{ .entries = entries.items, .committed_seq = gw.sequencer.currentSeq() };
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(alloc);
     try messages.encodeRangeResponse(&out, alloc, res);
@@ -344,10 +418,12 @@ pub fn handleRange(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
 }
 
 /// Handle BATCH request — mutations go through Sequencer.
-pub fn handleBatch(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
+pub fn handleBatch(
+    writer: anytype,
+    alloc: std.mem.Allocator,
+    stream_id: u64,
     ops: []messages.BatchOp,
-    storage: *Storage,
-    sequencer: *Sequencer,
+    gw: *Gateway,
 ) !void {
     errdefer sendError(writer, alloc, stream_id, .server_error, .@"error", "batch failed", "") catch {};
 
@@ -357,53 +433,126 @@ pub fn handleBatch(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
         if (results.capacity > 0) results.deinit(alloc);
     }
 
+    var has_reads = false;
+    var has_mutations = false;
+    for (ops) |op| switch (op) {
+        .get, .range => has_reads = true,
+        .set, .delete => has_mutations = true,
+    };
+
+    if (has_reads and has_mutations) {
+        try sendError(
+            writer,
+            alloc,
+            stream_id,
+            .protocol_error,
+            .@"error",
+            "mixed batch unsupported",
+            "transactional batches currently support either reads or mutations, not both",
+        );
+        return;
+    }
+
+    if (has_mutations) {
+        const kv_ops = try alloc.alloc(KvOp, ops.len);
+        defer alloc.free(kv_ops);
+        for (ops, 0..) |op, i| {
+            kv_ops[i] = switch (op) {
+                .set => |req| blk: {
+                    if (req.expected_seq > 0) {
+                        try sendError(
+                            writer,
+                            alloc,
+                            stream_id,
+                            .protocol_error,
+                            .@"error",
+                            "batch CAS unsupported",
+                            "compare-and-swap inside transactional batches is not implemented yet",
+                        );
+                        return;
+                    }
+                    break :blk .{ .set = .{ .key = req.key, .value = req.value, .expected_seq = 0 } };
+                },
+                .delete => |req| .{ .delete = .{ .key = req.key } },
+                .get, .range => unreachable,
+            };
+        }
+
+        const submit_seq = gw.allocSubmitSeq();
+        const payload_bytes = try TxnIntent.init(kv_ops, &.{}, &.{1}, 1, submit_seq).serialize_to(alloc);
+        defer alloc.free(payload_bytes);
+        var pending: PendingSubmit = undefined;
+        const handle = gw.sequencer.submitBytes(&pending, payload_bytes, 1, submit_seq, .txn_intent);
+        const result = try handle.awaitCommit(null);
+
+        for (ops) |_| {
+            try results.append(alloc, .{ .mutate = .{ .committed_seq = result.seq, .cas_failed = null } });
+        }
+
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        defer out.deinit(alloc);
+        try messages.encodeBatchResponse(&out, alloc, results.items);
+        try sendResponse(writer, stream_id, .response, out.items);
+        return;
+    }
+
     for (ops) |op| {
         switch (op) {
             .get => |req| {
-                const result = try storage.get(default_table_id, req.key, req.at_seq);
+                try gw.waitApplied(gw.sequencer.currentSeq());
+                const result = try gw.storage.get(default_table_id, req.key, req.at_seq);
                 defer if (result) |row| row.deinit(alloc);
                 const value: ?[]const u8 = if (result) |row| blk: {
                     if (row.is_tombstone) break :blk null;
-                    break :blk row.value;
+                    break :blk try alloc.dupe(u8, row.value);
                 } else null;
                 const row_seq: u64 = if (result) |row| row.seq else 0;
                 const res = messages.GetResponse{ .value = value, .committed_seq = row_seq };
+                errdefer if (value) |v| alloc.free(v);
                 try results.append(alloc, .{ .get = res });
             },
             .set => |req| {
-                const ops2 = [_]KvOp{ .{ .set = .{ .key = req.key, .value = req.value } } };
-                const seq = sequencer.currentSeq() + 1;
-                const payload_bytes = try TxnIntent.init(&ops2, &.{}, &.{1}, 1, seq).serialize_to(alloc);
+                const ops2 = [_]KvOp{.{ .set = .{ .key = req.key, .value = req.value, .expected_seq = req.expected_seq } }};
+                const submit_seq = gw.allocSubmitSeq();
+                const payload_bytes = try TxnIntent.init(&ops2, &.{}, &.{1}, 1, submit_seq).serialize_to(alloc);
                 defer alloc.free(payload_bytes);
                 var pending: PendingSubmit = undefined;
-                const handle = sequencer.submitBytes(&pending, payload_bytes, 0, seq, .txn_intent);
+                const handle = gw.sequencer.submitBytes(&pending, payload_bytes, 1, submit_seq, .txn_intent);
                 const result = try handle.awaitCommit(null);
-                const mutations = [_]Mutation{
-                    .{ .kind = .update, .table_id = default_table_id, .key = req.key, .value = req.value },
-                };
-                try storage.apply(&mutations, result.seq);
-                try results.append(alloc, .{ .mutate = .{ .committed_seq = result.seq, .cas_failed = null } });
+                var cas_failed: ?u64 = null;
+                var committed_seq: u64 = result.seq;
+                if (req.expected_seq > 0) {
+                    try gw.waitApplied(result.seq);
+                    const current = try gw.storage.get(default_table_id, req.key, std.math.maxInt(u64));
+                    defer if (current) |row| row.deinit(alloc);
+                    cas_failed = if (current == null or current.?.seq != result.seq)
+                        if (current) |row| row.seq else null
+                    else
+                        null;
+                    committed_seq = if (cas_failed) |seq_failed| seq_failed else result.seq;
+                }
+                try results.append(alloc, .{ .mutate = .{
+                    .committed_seq = committed_seq,
+                    .cas_failed = cas_failed,
+                } });
             },
             .delete => |req| {
-                const ops2 = [_]KvOp{ .{ .delete = .{ .key = req.key } } };
-                const seq = sequencer.currentSeq() + 1;
-                const payload_bytes = try TxnIntent.init(&ops2, &.{}, &.{1}, 1, seq).serialize_to(alloc);
+                const ops2 = [_]KvOp{.{ .delete = .{ .key = req.key } }};
+                const submit_seq = gw.allocSubmitSeq();
+                const payload_bytes = try TxnIntent.init(&ops2, &.{}, &.{1}, 1, submit_seq).serialize_to(alloc);
                 defer alloc.free(payload_bytes);
                 var pending: PendingSubmit = undefined;
-                const handle = sequencer.submitBytes(&pending, payload_bytes, 0, seq, .txn_intent);
+                const handle = gw.sequencer.submitBytes(&pending, payload_bytes, 1, submit_seq, .txn_intent);
                 const result = try handle.awaitCommit(null);
-                const mutations = [_]Mutation{
-                    .{ .kind = .delete, .table_id = default_table_id, .key = req.key, .value = null },
-                };
-                try storage.apply(&mutations, result.seq);
                 try results.append(alloc, .{ .mutate = .{ .committed_seq = result.seq, .cas_failed = null } });
             },
             .range => |req| {
+                try gw.waitApplied(gw.sequencer.currentSeq());
                 const range = KeyRange{ .start = req.start, .end = req.end, .start_inclusive = true };
-                var iter = try storage.scan(default_table_id, range, std.math.maxInt(u64), alloc);
+                var iter = try gw.storage.scan(default_table_id, range, std.math.maxInt(u64), alloc);
                 defer iter.deinit();
                 var entries: std.ArrayList(messages.RangeEntry) = .empty;
-                defer {
+                errdefer {
                     for (entries.items) |e| {
                         alloc.free(e.key);
                         alloc.free(e.value);
@@ -422,7 +571,15 @@ pub fn handleBatch(writer: anytype, alloc: std.mem.Allocator, stream_id: u64,
                     }
                     try entries.append(alloc, entry);
                 }
-                try results.append(alloc, .{ .range = .{ .entries = entries.items, .committed_seq = sequencer.currentSeq() } });
+                const owned_entries = try entries.toOwnedSlice(alloc);
+                errdefer {
+                    for (owned_entries) |e| {
+                        alloc.free(e.key);
+                        alloc.free(e.value);
+                    }
+                    alloc.free(owned_entries);
+                }
+                try results.append(alloc, .{ .range = .{ .entries = owned_entries, .committed_seq = gw.sequencer.currentSeq() } });
             },
         }
     }
@@ -449,7 +606,9 @@ pub fn handleHello(writer: anytype, alloc: std.mem.Allocator) !void {
 }
 
 /// Accept client .auth → send .auth_ok.
-pub fn handleAuthResponse(writer: anytype, alloc: std.mem.Allocator,
+pub fn handleAuthResponse(
+    writer: anytype,
+    alloc: std.mem.Allocator,
     payload: []const u8,
 ) !void {
     var cur = codec.Cursor{ .data = payload };

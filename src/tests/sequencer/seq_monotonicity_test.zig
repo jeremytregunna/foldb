@@ -128,6 +128,7 @@ fn runMonotonicityCheck(seed: u64, n_entries: usize, alloc: std.mem.Allocator) !
     }
 
     // Assert: partition log contains every seq in order.
+    try seq.catchUpCommitted();
     const log = seq.partitionLog(0);
     const entries = try log.read(1, n_entries, alloc);
     defer {
@@ -196,6 +197,7 @@ test "seq monotonicity: idempotency dedup does not create gaps" {
     try testing.expectEqual(@as(sequencer_mod.Seq, 2), r3.seq);
 
     // Partition log must have exactly seqs 1 and 2.
+    try seq.catchUpCommitted();
     const log = seq.partitionLog(0);
     const entries = try log.read(1, 4, alloc);
     defer {

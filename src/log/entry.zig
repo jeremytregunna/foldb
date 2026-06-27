@@ -33,7 +33,7 @@ pub const EntryKind = enum(u8) {
 // ─── KV Log Operations ───
 
 pub const KvOp = union(enum) {
-    set: struct { key: []const u8, value: []const u8 },
+    set: struct { key: []const u8, value: []const u8, expected_seq: Seq = 0 },
     delete: struct { key: []const u8 },
 
     pub fn deinit(self: KvOp, alloc: std.mem.Allocator) void {
@@ -103,6 +103,7 @@ pub const TxnIntent = struct {
                     const vlen: u32 = @intCast(s.value.len);
                     try out.appendSlice(alloc, &std.mem.toBytes(vlen));
                     try out.appendSlice(alloc, s.value);
+                    try out.appendSlice(alloc, &std.mem.toBytes(@as(u64, s.expected_seq)));
                 },
                 .delete => |d| {
                     try out.append(alloc, 1);
@@ -160,7 +161,9 @@ pub const TxnIntent = struct {
                     pos += 4;
                     const value = try alloc.dupe(u8, payload[pos .. pos + vlen]);
                     pos += vlen;
-                    break :blk .{ .set = .{ .key = key, .value = value } };
+                    const expected_seq = std.mem.bytesToValue(u64, payload[pos .. pos + 8]);
+                    pos += 8;
+                    break :blk .{ .set = .{ .key = key, .value = value, .expected_seq = expected_seq } };
                 },
                 1 => blk: {
                     const klen = std.mem.bytesToValue(u32, payload[pos .. pos + 4]);
@@ -194,7 +197,7 @@ pub const TxnIntent = struct {
         // Creates a single KvOp.set with key="test" and value=params
         // (for backward compatibility with log tests)
         return .{
-            .ops = &.{.{ .set = .{ .key = "test", .value = params } }},
+            .ops = &.{.{ .set = .{ .key = "test", .value = params, .expected_seq = 0 } }},
             .read_set_hint = &.{},
             .write_set_hint = &.{},
             .client_id = client_id,

@@ -4,7 +4,7 @@ The gateway is the external boundary of FoldDB. It is the sole entry point for c
 
 ## Role
 
-Accepts client requests over the wire protocol, validates KV operations, submits mutations through the Sequencer for global ordering, and serves reads directly from Storage.
+Accepts client requests over the wire protocol, validates KV operations, submits mutations through the Sequencer for global ordering, and serves reads from Storage after the executor has caught up to the committed sequence.
 
 ## Public Operations
 
@@ -14,24 +14,25 @@ Accepts client requests over the wire protocol, validates KV operations, submits
 | `get(key)` | Read a key directly from Storage |
 | `delete(key)` | Submit a deletion through the Sequencer |
 | `range(start, end)` | Scan a key range from Storage |
-| `batch(ops[])` | Submit multiple KV ops atomically |
+| `batch(ops[])` | Run read-only ops in order or commit set/delete ops as one transaction |
 
-All mutations (set, delete, batch) go through the Sequencer for deterministic ordering. Reads (get, range) are served directly from Storage.
+All mutations (set, delete, mutating batch entries) go through the Sequencer for deterministic ordering. Reads (get, range) wait for committed intents to be applied, then read Storage. A mutating batch is submitted as one transaction with one committed sequence. Read-only batches are evaluated in request order. Mixed read/write batches are currently rejected.
 
 ## Mutation Path
 
-1. Client sends a `SetRequest`, `DeleteRequest`, or `BatchOp` via the wire protocol.
+1. Client sends a `SetRequest`, `DeleteRequest`, or mutating `BatchOp` via the wire protocol.
 2. The gateway validates the request (key/value length, batch size limits).
 3. The gateway submits the payload via `sequencer.submitBytes()`, which assigns a global sequence number and replicates the ordering decision via Raft.
-4. The gateway calls `sequencer.awaitCommit()` to wait for the epoch to be committed.
-5. Once committed, the Executor drains the entry from the Log and applies it to Storage.
-6. The gateway sends an `ExecOk` response to the client with the committed sequence number.
+4. The gateway calls `sequencer.awaitCommit()` to wait for the Raft ordering entry to be durable and committed.
+5. The gateway sends a mutation response to the client with the committed sequence number. The executor applies committed intents to Storage in the background.
+6. CAS mutations additionally wait for apply so the response can report whether the expected sequence matched.
 
 ## Read Path
 
 1. Client sends a `GetRequest` or `RangeRequest`.
-2. The gateway decodes the request and calls `storage.get()` or `storage.scan()` directly.
-3. The result is encoded and returned immediately — no Sequencer involvement.
+2. The gateway waits until the executor has applied the current committed sequence.
+3. The gateway calls `storage.get()` or `storage.scan()`.
+4. The result is encoded and returned.
 
 ## Idempotency
 

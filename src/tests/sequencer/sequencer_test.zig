@@ -186,7 +186,7 @@ test "Sequencer: multi-partition routing assigns one seq per txn round-robin" {
     try testing.expectEqual(@as(u32, 0), r4.partition);
 }
 
-test "Sequencer: committed entry readable from partition log" {
+test "Sequencer: committed entry becomes readable after catch-up" {
     const path = try makeTempDir("readable");
     defer {
         removeDirRecursive(path);
@@ -204,6 +204,7 @@ test "Sequencer: committed entry readable from partition log" {
 
     var pending: PendingSubmit = undefined;
     const result = try seq.submitBytes(&pending, payload, 1, 1, .txn_intent).awaitCommit(null);
+    try seq.catchUpCommitted();
 
     const partition_log = seq.partitionLog(result.partition);
     const entries = try partition_log.read(result.seq, 1, testing.allocator);
@@ -324,7 +325,6 @@ test "Sequencer: commitRoute spreads load across log partitions" {
     // 4 log partitions, 1 data partition — partitions are now independent.
     var seq = try Sequencer.init(path, .{ .partition_count = 1, .log_partition_count = 4 }, testing.allocator);
     defer seq.deinit();
-    try seq.start();
 
     const payload = try minimalIntentPayload(testing.allocator);
     defer testing.allocator.free(payload);

@@ -453,6 +453,54 @@ pub fn build(b: *std.Build) void {
     gateway_module.addImport("frame.zig", net_frame_module);
     gateway_module.addImport("messages.zig", net_messages_module);
 
+    // KV benchmark binary
+    const bench_module = b.createModule(.{
+        .root_source_file = b.path("src/cmd/bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_module.addImport("gateway.zig", gateway_module);
+    bench_module.addImport("messages.zig", net_messages_module);
+    const bench_exe = b.addExecutable(.{
+        .name = "foldb-bench",
+        .root_module = bench_module,
+    });
+    b.installArtifact(bench_exe);
+    const run_bench = b.addRunArtifact(bench_exe);
+    if (b.args) |bargs| run_bench.addArgs(bargs);
+    const bench_step = b.step("bench", "Run the in-process KV benchmark");
+    bench_step.dependOn(&run_bench.step);
+
+    // TxnIntent deserialization benchmark binary
+    const bench_deser_module = b.createModule(.{
+        .root_source_file = b.path("src/cmd/bench_deser.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_deser_module.addImport("log.zig", log_module);
+    const bench_deser_exe = b.addExecutable(.{
+        .name = "foldb-bench-deser",
+        .root_module = bench_deser_module,
+    });
+    b.installArtifact(bench_deser_exe);
+    const run_bench_deser = b.addRunArtifact(bench_deser_exe);
+    if (b.args) |bargs| run_bench_deser.addArgs(bargs);
+    const bench_deser_step = b.step("bench-deser", "Run the TxnIntent deserialize benchmark");
+    bench_deser_step.dependOn(&run_bench_deser.step);
+
+    // Gateway KV handler tests
+    const gateway_kv_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/gateway/kv_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gateway_kv_test_module.addImport("gateway.zig", gateway_module);
+    gateway_kv_test_module.addImport("frame.zig", net_frame_module);
+    gateway_kv_test_module.addImport("codec.zig", net_codec_module);
+    gateway_kv_test_module.addImport("messages.zig", net_messages_module);
+    const gateway_kv_tests = b.addTest(.{ .root_module = gateway_kv_test_module });
+    const run_gateway_kv_tests = b.addRunArtifact(gateway_kv_tests);
+
     const net_conn_module = b.createModule(.{
         .root_source_file = b.path("src/net/conn.zig"),
         .target = target,
@@ -637,6 +685,16 @@ pub fn build(b: *std.Build) void {
     const seq_mono_tests = b.addTest(.{ .root_module = seq_mono_test_module });
     const run_seq_mono_tests = b.addRunArtifact(seq_mono_tests);
 
+    // Deterministic KV workload tests
+    const sim_kv_workload_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/sim/kv_workload_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sim_kv_workload_test_module.addImport("sim.zig", sim_module);
+    const sim_kv_workload_tests = b.addTest(.{ .root_module = sim_kv_workload_test_module });
+    const run_sim_kv_workload_tests = b.addRunArtifact(sim_kv_workload_tests);
+
     // CDC concurrent tests
     const cdc_concurrent_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/cdc/cdc_concurrent_test.zig"),
@@ -674,11 +732,13 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_net_codec_tests.step);
     test_step.dependOn(&run_errors_tests.step);
     test_step.dependOn(&run_config_tests.step);
+    test_step.dependOn(&run_gateway_kv_tests.step);
     test_step.dependOn(&run_raft_tcp_dst_tests.step);
     test_step.dependOn(&run_seq_tcp_cluster_tests.step);
     test_step.dependOn(&run_seq_tcp_actor_tests.step);
     test_step.dependOn(&run_seq_reconfig_tests.step);
     test_step.dependOn(&run_seq_follower_submit_tests.step);
+    test_step.dependOn(&run_sim_kv_workload_tests.step);
 
     // Deterministic simulation tests
     const dst_step = b.step("dst-test", "Run deterministic simulation tests");

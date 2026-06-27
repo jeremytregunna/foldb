@@ -202,12 +202,35 @@ pub const RaftNode = struct {
         payload: []const u8,
         out: *std.ArrayList(Output),
     ) !?Seq {
+        return self.proposeInternal(log, kind, payload, out, true);
+    }
+
+    /// Leader appends a new entry and broadcasts to peers without syncing the log.
+    /// Caller must sync the Raft log before treating the returned sequence as durable.
+    pub fn proposeNoSync(
+        self: *RaftNode,
+        log: *Log,
+        kind: log_mod.EntryKind,
+        payload: []const u8,
+        out: *std.ArrayList(Output),
+    ) !?Seq {
+        return self.proposeInternal(log, kind, payload, out, false);
+    }
+
+    fn proposeInternal(
+        self: *RaftNode,
+        log: *Log,
+        kind: log_mod.EntryKind,
+        payload: []const u8,
+        out: *std.ArrayList(Output),
+        sync: bool,
+    ) !?Seq {
         if (self.role != .leader) return null;
 
         const seq = (try log.head()) + 1;
         const entry = LogEntry.create(seq, self.current_term, kind, payload);
         try log.append_entry(entry);
-        log.sync();
+        if (sync) log.sync();
 
         // Update our own match_index conceptually (handled via head() in checkCommit).
         try self.broadcastAppendEntries(log, out);

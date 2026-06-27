@@ -133,15 +133,15 @@ pub const Sequencer = struct {
         const last_applied_path = try std.fmt.allocPrint(alloc, "{s}/last_applied.bin", .{base_path});
         errdefer alloc.free(last_applied_path);
 
-        var persisted_last_applied: Seq = 0;
-        readLastApplied(last_applied_path, &persisted_last_applied);
-
         const seq_partition_id: PartitionId = std.math.maxInt(PartitionId);
         var raft_log = try Log.init_partitioned(raft_path, cfg.node_id, seq_partition_id, alloc);
         errdefer raft_log.deinit();
 
         var raft_node = try initRaftNode(cfg, &raft_log, alloc);
         errdefer raft_node.deinit();
+        if (cfg.peers.len == 0) {
+            raft_node.commit_index = try raft_log.head();
+        }
 
         const partition_logs = try createPartitionLogs(base_path, cfg.node_id, log_partition_count, alloc);
         errdefer {
@@ -180,7 +180,7 @@ pub const Sequencer = struct {
             .alloc = alloc,
             .transport = transport,
             .tick_interval_ms = cfg.tick_interval_ms,
-            .last_applied = persisted_last_applied,
+            .last_applied = 0,
             // queue is intentionally left undefined here; start() calls queue.init() before use.
             .queue = undefined,
         };
@@ -194,9 +194,7 @@ pub const Sequencer = struct {
     }
 
     pub fn deinit(self: *Sequencer) void {
-        self.shutdown.store(true, .release);
-        self.queue.wakeConsumer();
-        if (self.thread) |t| t.join();
+        self.stopAndCatchUp();
         // Clean up any pending batches still in-flight.
         for (self.pending_batches.items) |pb| {
             self.alloc.free(pb.slots);
@@ -212,6 +210,20 @@ pub const Sequencer = struct {
         self.batcher.deinit();
         self.idempotency.deinit();
         self.transport.deinit();
+    }
+
+    pub fn stopAndCatchUp(self: *Sequencer) void {
+        if (self.thread) |t| {
+            self.shutdown.store(true, .release);
+            self.queue.wakeConsumer();
+            t.join();
+            self.thread = null;
+        }
+        self.catchUpCommitted() catch |err| std.log.warn("sequencer shutdown catch-up: {}", .{err});
+    }
+
+    pub fn catchUpCommitted(self: *Sequencer) !void {
+        try self.applyCommitted(self.raft.commit_index, self.alloc);
     }
 
     pub fn currentSeq(self: *const Sequencer) Seq {
@@ -388,7 +400,7 @@ pub const Sequencer = struct {
 
     /// Apply all Raft entries up to commit_seq to the partition logs.
     /// Idempotent: entries already present (seq <= current_seq) are skipped.
-    /// Advances next_seq past every seq the Raft log has assigned and persists last_applied.
+    /// Advances next_seq past every seq the Raft log has assigned.
     fn applyCommitted(self: *Sequencer, commit_seq: Seq, alloc: std.mem.Allocator) !void {
         var idx = self.last_applied + 1;
         while (idx <= commit_seq) : (idx += 1) {
@@ -408,14 +420,11 @@ pub const Sequencer = struct {
                 for (dec.entries) |oe| {
                     assert(oe.partition < self.partition_logs.len);
                     const pl = &self.partition_logs[oe.partition];
-                    // Re-apply is at-least-once: last_applied is persisted after all
-                    // partition writes, so a mid-batch crash replays this epoch.
-                    // Seq uniqueness means oe.seq <= current_seq is the entry already
-                    // on disk — skip rather than error.
+                    // Re-apply is at-least-once. Seq uniqueness means oe.seq <=
+                    // current_seq is the entry already on disk, so skip it.
                     if (oe.seq <= pl.current_seq) continue;
                     const le = LogEntry.create(oe.seq, 0, dec.entry_kind, dec.payload);
                     try pl.append_entry_at(le);
-                    pl.sync();
                 }
                 // Keep next_seq ahead of every seq the Raft log has assigned.
                 // Covers seqs written just now and seqs skipped above as already-present,
@@ -428,15 +437,9 @@ pub const Sequencer = struct {
                 for (dec.entries) |oe| {
                     self.partition_logs[oe.partition].notifyAppend();
                 }
-                // Persist to disk to survive crashes.
-                for (dec.entries) |oe| {
-                    self.partition_logs[oe.partition].sync();
-                }
             }
             self.last_applied = idx;
         }
-        try writeLastApplied(self.last_applied_path, self.last_applied);
-        self.raft_log.sync();
     }
 
     /// Return a pointer to the log for the given partition (for reading committed entries).
@@ -680,6 +683,10 @@ fn runLoop(self: *Sequencer) void {
             commitBatch(self, batch[0..n]);
         } else {
             self.queue.waitForWork(seq, tick_ns);
+            if (self.queue.currentSeq() == seq) {
+                self.applyCommitted(self.raft.commit_index, self.alloc) catch |err|
+                    std.log.warn("idle applyCommitted: {}", .{err});
+            }
         }
 
         self.tickOnce(self.alloc) catch |err| std.log.warn("tick: {}", .{err});
@@ -739,16 +746,11 @@ fn commitBatch(self: *Sequencer, batch: []*types_mod.PendingSubmit) void {
 
     if (n_appended == 0) return;
 
-    // Phase 2: flush the outputs produced by Raft propose().
-    self.flushOutputs(shared_outputs.items, self.alloc) catch |err|
-        std.log.warn("flushOutputs: {}", .{err});
+    // Phase 2: one durable Raft sync covers every entry appended above.
+    self.raft_log.sync();
 
     // Check if already committed (single-node Raft often commits instantly).
     if (self.raft.commit_index >= max_ordering_seq) {
-        // Must apply to partition logs BEFORE marking done,
-        // so the WAL is synced before the client receives the ack.
-        self.applyCommitted(self.raft.commit_index, self.alloc) catch |err|
-            std.log.warn("applyCommitted (immediate): {}", .{err});
         for (slots[0..n_appended]) |s| {
             self.metrics.current_seq.set(@intCast(s.seq));
             s.pending.result = .{ .seq = s.seq, .partition = s.partition };
@@ -756,6 +758,11 @@ fn commitBatch(self: *Sequencer, batch: []*types_mod.PendingSubmit) void {
         }
         return;
     }
+
+    // Multi-node path: now that the appended entries are durable locally, send
+    // Raft messages and process any committed outputs that were produced.
+    self.flushOutputs(shared_outputs.items, self.alloc) catch |err|
+        std.log.warn("flushOutputs: {}", .{err});
 
     // Enqueue into pending batches for async resolution by the runLoop.
     const heap_slots = self.alloc.alloc(BatchSlot, n_appended) catch {
@@ -885,7 +892,7 @@ fn appendOne(self: *Sequencer, submit: ValidatedSubmit, outputs: *std.ArrayList(
     defer payload_buf.deinit(self.alloc);
     try types_mod.serializeEpochDecision(decision, &payload_buf, self.alloc);
 
-    const ordering_seq = try self.raft.propose(
+    const ordering_seq = try self.raft.proposeNoSync(
         &self.raft_log,
         .epoch_decision,
         payload_buf.items,

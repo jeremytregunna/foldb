@@ -47,7 +47,10 @@ Self-describing messages: a type byte identifies the message kind, followed by f
 - `GetRequest` / `GetResponse` — read a key. Returns value or null.
 - `DeleteRequest` / `DeleteResponse` — delete a key. Returns previous value if existed.
 - `RangeRequest` / `RangeResponse` — scan a key range. Returns list of key-value pairs.
-- `BatchOp` / `BatchResponse` — batch multiple set/delete operations atomically.
+- `BatchOp` / `BatchResponse` — group multiple KV operations in one round trip.
+  Mutating batches are committed as one transaction with one sequence. Read-only
+  batches are evaluated in request order; mixed read/write batches are rejected
+  until transactional reads are encoded in intents.
 
 **Control**:
 - `Ping` / `Pong` — health check.

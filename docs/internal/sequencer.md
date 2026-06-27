@@ -20,7 +20,7 @@ Assigns monotonically increasing sequence numbers to transaction intents, wraps 
 - An EpochDecision is sealed and Raft-replicated before any intent payload is written to a partition log.
 - The in-memory idempotency cache is bounded: `evictBefore(seq)` removes entries older than a checkpoint.
 - `next_seq` is always ahead of every seq the Raft log has assigned; it is advanced on startup by replaying committed entries, closing the window where a post-crash restart could reuse a seq from a prior epoch.
-- `last_applied` is persisted to `last_applied.bin` after every batch of partition writes, not before. A crash in the middle of applying an epoch replays that epoch on restart; partition log writes are idempotent on seq (entries with `oe.seq <= current_seq` are skipped).
+- `last_applied` is in-memory catch-up state. The Raft ordering log is the durable source of truth for acknowledged intents. On startup or shutdown catch-up, committed ordering entries are applied to partition logs idempotently (entries with `oe.seq <= current_seq` are skipped).
 
 ## Epochs
 

@@ -149,6 +149,12 @@ Each tagged op embeds the same request payload as the standalone operation.
 Batch response starts with `u32 result_count`; each result is tagged with the
 same operation tag and embeds the corresponding response payload.
 
+Read-only batches are evaluated in request order. Mutating batches are a single
+transaction: all set/delete operations are encoded into one intent, assigned one
+committed sequence, and applied atomically by the executor. Mixed read/write
+batches are currently rejected until transactional read operations are part of
+the intent format.
+
 ## Error
 
 ```text

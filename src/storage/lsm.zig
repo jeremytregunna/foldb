@@ -270,11 +270,11 @@ pub const LSM = struct {
 
     /// Collect matching memtable entries into `out` (sorted key ASC, seq DESC).
     fn scanCollectMemtable(self: *const LSM, range: KeyRange, at_seq: Seq, out: *std.ArrayList(MergeEntry), alloc: std.mem.Allocator) !void {
-        for (self.memtable.entries.items) |entry| {
+        const entries = try self.memtable.sortedEntryRefs(alloc);
+        defer alloc.free(entries);
+        for (entries) |entry_ref| {
+            const entry = entry_ref.*;
             if (entry.seq > at_seq) continue;
-            if (range.end) |e| {
-                if (std.mem.order(u8, entry.key, e) != .lt) break;
-            }
             if (!range.contains(entry.key)) continue;
             const key_copy = try alloc.dupe(u8, entry.key);
             errdefer alloc.free(key_copy);

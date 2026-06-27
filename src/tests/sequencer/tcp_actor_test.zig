@@ -221,6 +221,7 @@ test "3-node actor cluster: submitBytes commits and is readable" {
     try testing.expect(result.seq >= 1);
 
     // Entry must be readable from the leader's partition log.
+    try tc.nodes[leader_idx].catchUpCommitted();
     const log = tc.nodes[leader_idx].partitionLog(result.partition);
     const entries = try log.read(result.seq, 1, alloc);
     defer {

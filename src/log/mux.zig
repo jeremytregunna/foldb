@@ -53,6 +53,7 @@ pub const LogMux = struct {
         }
 
         for (self.logs) |log| {
+            if (log.current_seq < from) continue;
             // Read up to `max` entries from this log. On error (e.g. segment gap),
             // skip this log — other logs may still have the entries we need.
             const entries = log.read(from, max, alloc) catch continue;

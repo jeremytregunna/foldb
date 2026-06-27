@@ -342,7 +342,7 @@ pub const Segment = struct {
                 if (self.index.items[mid].seq < from_seq) lo = mid + 1 else hi = mid;
             }
             if (lo >= self.index.items.len) return try result.toOwnedSlice(alloc);
-            offset = @intCast(self.index.items[lo].file_offset);
+            offset = std.math.cast(i64, self.index.items[lo].file_offset) orelse return error.InvalidSegment;
             remaining = self.entry_count - @as(u32, @intCast(lo));
         } else {
             offset = @intCast(header_size);

@@ -64,10 +64,18 @@ pub const Executor = struct {
         return .{ .storage = storage, .committed_seq = 0, .alloc = alloc };
     }
 
-    pub fn with_log(self: *Executor, log: *Log) void { self.log = log; }
-    pub fn with_cdc(self: *Executor, manager: *CdcManager) void { self.cdc = manager; }
-    pub fn deinit(self: *Executor) void { _ = self; }
-    pub fn current_seq(self: *const Executor) Seq { return self.committed_seq; }
+    pub fn with_log(self: *Executor, log: *Log) void {
+        self.log = log;
+    }
+    pub fn with_cdc(self: *Executor, manager: *CdcManager) void {
+        self.cdc = manager;
+    }
+    pub fn deinit(self: *Executor) void {
+        _ = self;
+    }
+    pub fn current_seq(self: *const Executor) Seq {
+        return self.committed_seq;
+    }
 
     pub fn run(self: *Executor, entry: LogEntry) !ExecResult {
         defer {
@@ -107,16 +115,32 @@ pub const Executor = struct {
         for (decoded.ops) |op| {
             switch (op) {
                 .set => |s| {
+                    if (s.expected_seq > 0) {
+                        const current = try self.storage.get(self.table_id, s.key, entry.header.seq - 1);
+                        defer if (current) |row| row.deinit(self.alloc);
+                        if (current == null or current.?.seq != s.expected_seq) {
+                            self.metrics.txns_aborted.inc();
+                            return .{ .abort = .{ .code = .constraint_violation, .detail = "compare-and-swap failed" } };
+                        }
+                    }
+                },
+                .delete => {},
+            }
+        }
+
+        for (decoded.ops) |op| {
+            switch (op) {
+                .set => |s| {
                     const key_copy = try self.alloc.dupe(u8, s.key);
                     errdefer self.alloc.free(key_copy);
                     const val = try self.alloc.dupe(u8, s.value);
                     errdefer self.alloc.free(val);
-                    try mutations.append(self.alloc, .{ .kind = .update, .table_id = self.table_id, .key = key_copy, .value = val });
+                    try self.appendTxnMutation(&mutations, 0, .{ .kind = .update, .table_id = self.table_id, .key = key_copy, .value = val });
                 },
                 .delete => |d| {
                     const key_copy = try self.alloc.dupe(u8, d.key);
                     errdefer self.alloc.free(key_copy);
-                    try mutations.append(self.alloc, .{ .kind = .delete, .table_id = self.table_id, .key = key_copy, .value = null });
+                    try self.appendTxnMutation(&mutations, 0, .{ .kind = .delete, .table_id = self.table_id, .key = key_copy, .value = null });
                 },
             }
         }
@@ -173,16 +197,32 @@ pub const Executor = struct {
         for (decoded.ops) |op| {
             switch (op) {
                 .set => |s| {
+                    if (s.expected_seq > 0) {
+                        const current = try self.storage.get(self.table_id, s.key, entry.header.seq - 1);
+                        defer if (current) |row| row.deinit(self.alloc);
+                        if (current == null or current.?.seq != s.expected_seq) {
+                            self.metrics.txns_aborted.inc();
+                            return .aborted;
+                        }
+                    }
+                },
+                .delete => {},
+            }
+        }
+
+        for (decoded.ops) |op| {
+            switch (op) {
+                .set => |s| {
                     const key_copy = try self.alloc.dupe(u8, s.key);
                     errdefer self.alloc.free(key_copy);
                     const val = try self.alloc.dupe(u8, s.value);
                     errdefer self.alloc.free(val);
-                    try mut_buf.append(self.alloc, .{ .kind = .update, .table_id = self.table_id, .key = key_copy, .value = val });
+                    try self.appendTxnMutation(mut_buf, start, .{ .kind = .update, .table_id = self.table_id, .key = key_copy, .value = val });
                 },
                 .delete => |d| {
                     const key_copy = try self.alloc.dupe(u8, d.key);
                     errdefer self.alloc.free(key_copy);
-                    try mut_buf.append(self.alloc, .{ .kind = .delete, .table_id = self.table_id, .key = key_copy, .value = null });
+                    try self.appendTxnMutation(mut_buf, start, .{ .kind = .delete, .table_id = self.table_id, .key = key_copy, .value = null });
                 },
             }
         }
@@ -192,10 +232,30 @@ pub const Executor = struct {
         committed = true;
         return .committed;
     }
+
+    fn appendTxnMutation(
+        self: *Executor,
+        mutations: *std.ArrayList(Mutation),
+        start: usize,
+        mutation: Mutation,
+    ) !void {
+        var i = start;
+        while (i < mutations.items.len) {
+            if (mutations.items[i].table_id == mutation.table_id and
+                std.mem.eql(u8, mutations.items[i].key, mutation.key))
+            {
+                const old = mutations.orderedRemove(i);
+                self.alloc.free(old.key);
+                if (old.value) |v| self.alloc.free(v);
+                continue;
+            }
+            i += 1;
+        }
+        try mutations.append(self.alloc, mutation);
+    }
 };
 
 const CollectOutcome = enum { committed, aborted, noop };
-
 
 /// Drains committed log entries into an Executor.
 pub const ExecutorDriver = struct {
