@@ -30,7 +30,7 @@ Each subscription holds a fixed-size ring buffer of `events_capacity_max` (1024)
 
 ## Event Scoping
 
-- Subscriptions can be filtered by `table_id` — only events touching the specified table are delivered. Pass `null` to receive all tables.
+- Subscriptions can be filtered by `namespace_id` — only events touching the specified namespace are delivered. Pass `null` to receive all namespaces.
 - Each partition's executor dispatches independently; events are ordered within a partition but not globally ordered across partitions.
 - Subscribers resume from a known point using `from_seq`; `push()` silently discards any event at or below the consumer's cursor, so replaying from the wrong offset is safe.
 - `CdcEvent` carries `seq`, `epoch`, and `kind` (always `txn_intent` for user transactions) alongside the `effects` slice.
@@ -52,7 +52,7 @@ Each subscription holds a fixed-size ring buffer of `events_capacity_max` (1024)
 
 - Does not persist events — all buffered events are lost on shutdown.
 - Does not provide global cross-partition event ordering.
-- Does not filter by row predicate — only table-level filtering.
+- Does not filter by row predicate — only namespace-level filtering.
 - Does not provide flow control against the publisher — a full inbox aborts the transaction, not the consumer.
 - Does not recover partial dispatch if `dispatch()` fails mid-loop — the transaction aborts.
 - Does not manage subscription cursors — consumers are responsible for durability.

@@ -47,7 +47,7 @@ pub const SnapshotPolicy = struct {
 };
 
 // Core types
-pub const TableId = types.TableId;
+pub const NamespaceId = types.NamespaceId;
 pub const Seq = types.Seq;
 pub const Row = types.Row;
 pub const Mutation = types.Mutation;
@@ -129,14 +129,14 @@ pub const PartitionedStorage = struct {
         return std.hash.Wyhash.hash(0, key) % self.partitions.len;
     }
 
-    pub fn get(self: *PartitionedStorage, table_id: TableId, key: []const u8, at_seq: Seq) !?Row {
-        return self.partitions[self.partitionIdx(key)].get(table_id, key, at_seq);
+    pub fn get(self: *PartitionedStorage, namespace_id: NamespaceId, key: []const u8, at_seq: Seq) !?Row {
+        return self.partitions[self.partitionIdx(key)].get(namespace_id, key, at_seq);
     }
 
     /// Scatter scan across all partitions; merge-sort results by key.
     /// Row ownership is transferred: merged ScanIterator owns all row heap data.
-    pub fn scan(self: *PartitionedStorage, table_id: TableId, range: KeyRange, at_seq: Seq, alloc: std.mem.Allocator) !ScanIterator {
-        if (self.partitions.len <= 1) return self.partitions[0].scan(table_id, range, at_seq, alloc);
+    pub fn scan(self: *PartitionedStorage, namespace_id: NamespaceId, range: KeyRange, at_seq: Seq, alloc: std.mem.Allocator) !ScanIterator {
+        if (self.partitions.len <= 1) return self.partitions[0].scan(namespace_id, range, at_seq, alloc);
         var merged: std.ArrayList(Row) = .empty;
         errdefer {
             for (merged.items) |r| r.deinit(alloc);
@@ -144,8 +144,8 @@ pub const PartitionedStorage = struct {
         }
         var found_any = false;
         for (self.partitions) |p| {
-            const iter = p.scan(table_id, range, at_seq, alloc) catch |e| {
-                if (e == error.TableNotFound) continue;
+            const iter = p.scan(namespace_id, range, at_seq, alloc) catch |e| {
+                if (e == error.NamespaceNotFound) continue;
                 return e;
             };
             found_any = true;
@@ -154,7 +154,7 @@ pub const PartitionedStorage = struct {
             try merged.appendSlice(alloc, iter.rows);
             alloc.free(iter.rows);
         }
-        if (!found_any) return error.TableNotFound;
+        if (!found_any) return error.NamespaceNotFound;
         const rows = try merged.toOwnedSlice(alloc);
         std.sort.block(Row, rows, {}, struct {
             fn lt(_: void, a: Row, b: Row) bool {
@@ -178,13 +178,13 @@ pub const PartitionedStorage = struct {
         }
     }
 
-    /// Register a table schema on every partition (schema is global, not per-partition).
-    pub fn registerTable(self: *PartitionedStorage, table_id: TableId) !void {
-        for (self.partitions) |p| try p.registerTable(table_id);
+    /// Register a namespace on every partition.
+    pub fn registerNamespace(self: *PartitionedStorage, namespace_id: NamespaceId) !void {
+        for (self.partitions) |p| try p.registerNamespace(namespace_id);
     }
 
-    pub fn unregisterTable(self: *PartitionedStorage, table_id: TableId) void {
-        for (self.partitions) |p| p.unregisterTable(table_id);
+    pub fn unregisterNamespace(self: *PartitionedStorage, namespace_id: NamespaceId) void {
+        for (self.partitions) |p| p.unregisterNamespace(namespace_id);
     }
 
     pub fn flushAll(self: *PartitionedStorage) !void {
@@ -210,7 +210,7 @@ pub const StorageMetrics = obs.StorageMetrics;
 pub const DiskFaultHook = lsm_mod.DiskFaultHook;
 
 pub const Storage = struct {
-    tables: std.AutoHashMap(TableId, lsm_mod.LSM),
+    namespaces: std.AutoHashMap(NamespaceId, lsm_mod.LSM),
     dir: []const u8,
     alloc: std.mem.Allocator,
     object_store: ?object_store_mod.ObjectStore = null,
@@ -225,16 +225,16 @@ pub const Storage = struct {
     pub fn init(dir: []const u8, alloc: std.mem.Allocator) !Storage {
         mkdirAll(dir);
         return .{
-            .tables = std.AutoHashMap(TableId, lsm_mod.LSM).init(alloc),
+            .namespaces = std.AutoHashMap(NamespaceId, lsm_mod.LSM).init(alloc),
             .dir = dir,
             .alloc = alloc,
         };
     }
 
     pub fn deinit(self: *Storage) void {
-        var it = self.tables.valueIterator();
+        var it = self.namespaces.valueIterator();
         while (it.next()) |lsm| lsm.deinit();
-        self.tables.deinit();
+        self.namespaces.deinit();
         if (self.cache_dir) |cd| self.alloc.free(cd);
     }
 
@@ -248,27 +248,27 @@ pub const Storage = struct {
         self.snapshot_policy = policy;
     }
 
-    pub fn registerTable(self: *Storage, table_id: TableId) !void {
-        if (self.tables.contains(table_id)) return;
-        const table_dir = try std.fmt.allocPrint(self.alloc, "{s}/t{d}", .{ self.dir, table_id });
-        defer self.alloc.free(table_dir);
-        var lsm = try lsm_mod.LSM.init(table_dir, self.alloc);
+    pub fn registerNamespace(self: *Storage, namespace_id: NamespaceId) !void {
+        if (self.namespaces.contains(namespace_id)) return;
+        const namespace_dir = try std.fmt.allocPrint(self.alloc, "{s}/n{d}", .{ self.dir, namespace_id });
+        defer self.alloc.free(namespace_dir);
+        var lsm = try lsm_mod.LSM.init(namespace_dir, self.alloc);
         lsm.fault_hook = self.fault_hook;
         if (self.object_store) |store| {
-            try lsm.withObjectStore(store, self.cache_dir orelse table_dir);
+            try lsm.withObjectStore(store, self.cache_dir orelse namespace_dir);
         }
-        try self.tables.put(table_id, lsm);
+        try self.namespaces.put(namespace_id, lsm);
     }
 
-    pub fn unregisterTable(self: *Storage, table_id: TableId) void {
-        if (self.tables.fetchRemove(table_id)) |kv| {
+    pub fn unregisterNamespace(self: *Storage, namespace_id: NamespaceId) void {
+        if (self.namespaces.fetchRemove(namespace_id)) |kv| {
             var lsm = kv.value;
             lsm.deinit();
         }
     }
 
-    pub fn get(self: *Storage, table_id: TableId, key: []const u8, at_seq: Seq) !?Row {
-        const lsm = self.tables.getPtr(table_id) orelse return error.TableNotFound;
+    pub fn get(self: *Storage, namespace_id: NamespaceId, key: []const u8, at_seq: Seq) !?Row {
+        const lsm = self.namespaces.getPtr(namespace_id) orelse return error.NamespaceNotFound;
         self.metrics.gets.inc();
         const result = try lsm.get(key, at_seq);
         if (result == null) self.metrics.get_misses.inc();
@@ -276,23 +276,23 @@ pub const Storage = struct {
             const row_seq: Seq = if (result) |row| row.seq else 0;
             // Best-effort: OOM here causes a false negative (no retry trigger).
             // The tracker is advisory; correctness does not depend on it.
-            tracker.record(table_id, key, row_seq) catch |err| std.log.warn("read tracker record: {}", .{err});
+            tracker.record(namespace_id, key, row_seq) catch |err| std.log.warn("read tracker record: {}", .{err});
         }
         return result;
     }
 
     pub fn apply(self: *Storage, mutations: []const Mutation, at_seq: Seq) !void {
-        var table_ids: std.ArrayListUnmanaged(TableId) = .empty;
-        defer table_ids.deinit(self.alloc);
+        var namespace_ids: std.ArrayListUnmanaged(NamespaceId) = .empty;
+        defer namespace_ids.deinit(self.alloc);
         for (mutations) |m| {
             var found = false;
-            for (table_ids.items) |t| {
-                if (t == m.table_id) {
+            for (namespace_ids.items) |t| {
+                if (t == m.namespace_id) {
                     found = true;
                     break;
                 }
             }
-            if (!found) try table_ids.append(self.alloc, m.table_id);
+            if (!found) try namespace_ids.append(self.alloc, m.namespace_id);
         }
 
         assert(mutations.len <= std.math.maxInt(u32));
@@ -301,8 +301,8 @@ pub const Storage = struct {
         self.metrics.mutations_applied.add(@intCast(mutations.len));
         self.metrics.current_seq.set(@intCast(at_seq));
 
-        for (table_ids.items) |tid| {
-            const lsm = self.tables.getPtr(tid) orelse return error.TableNotFound;
+        for (namespace_ids.items) |nid| {
+            const lsm = self.namespaces.getPtr(nid) orelse return error.NamespaceNotFound;
             const l0_before = lsm.levels[0].files.items.len;
             try lsm.apply(mutations, at_seq);
             const l0_after = lsm.levels[0].files.items.len;
@@ -315,7 +315,7 @@ pub const Storage = struct {
             policy.counter += @intCast(mutations.len);
             if (policy.counter >= policy.interval) {
                 policy.counter = 0;
-                var it = self.tables.valueIterator();
+                var it = self.namespaces.valueIterator();
                 while (it.next()) |lsm| {
                     var manifest = try snapshot_mod.takeSnapshot(
                         lsm,
@@ -348,21 +348,21 @@ pub const Storage = struct {
                 continue;
             }
 
-            var table_ids: std.ArrayListUnmanaged(TableId) = .empty;
-            defer table_ids.deinit(self.alloc);
+            var namespace_ids: std.ArrayListUnmanaged(NamespaceId) = .empty;
+            defer namespace_ids.deinit(self.alloc);
             for (b.mutations) |m| {
                 var found = false;
-                for (table_ids.items) |t| {
-                    if (t == m.table_id) {
+                for (namespace_ids.items) |t| {
+                    if (t == m.namespace_id) {
                         found = true;
                         break;
                     }
                 }
-                if (!found) try table_ids.append(self.alloc, m.table_id);
+                if (!found) try namespace_ids.append(self.alloc, m.namespace_id);
             }
 
-            for (table_ids.items) |tid| {
-                const lsm = self.tables.getPtr(tid) orelse return error.TableNotFound;
+            for (namespace_ids.items) |nid| {
+                const lsm = self.namespaces.getPtr(nid) orelse return error.NamespaceNotFound;
                 const l0_before = lsm.levels[0].files.items.len;
                 try lsm.apply(b.mutations, b.seq);
                 const l0_after = lsm.levels[0].files.items.len;
@@ -385,7 +385,7 @@ pub const Storage = struct {
             policy.counter += @intCast(total_mutations);
             if (policy.counter >= policy.interval) {
                 policy.counter = 0;
-                var it = self.tables.valueIterator();
+                var it = self.namespaces.valueIterator();
                 while (it.next()) |lsm| {
                     var manifest = try snapshot_mod.takeSnapshot(
                         lsm,
@@ -403,8 +403,8 @@ pub const Storage = struct {
         }
     }
 
-    pub fn scan(self: *Storage, table_id: TableId, range: KeyRange, at_seq: Seq, alloc: std.mem.Allocator) !ScanIterator {
-        const lsm = self.tables.getPtr(table_id) orelse return error.TableNotFound;
+    pub fn scan(self: *Storage, namespace_id: NamespaceId, range: KeyRange, at_seq: Seq, alloc: std.mem.Allocator) !ScanIterator {
+        const lsm = self.namespaces.getPtr(namespace_id) orelse return error.NamespaceNotFound;
         const rows = try lsm.scan(range, at_seq, alloc);
         self.metrics.scans.inc();
         self.metrics.scan_rows_returned.add(@intCast(rows.len));
@@ -412,7 +412,7 @@ pub const Storage = struct {
             for (rows) |row| {
                 // Record each returned row so OCC detects writes to those keys after
                 // recon_seq. Best-effort: OOM here causes a false negative (no retry).
-                tracker.record(table_id, row.key, row.seq) catch |err|
+                tracker.record(namespace_id, row.key, row.seq) catch |err|
                     std.log.warn("read tracker record: {}", .{err});
             }
             // Note: new rows inserted into this range after recon_seq (phantoms) are
@@ -428,12 +428,12 @@ pub const Storage = struct {
     }
 
     pub fn flushAll(self: *Storage) !void {
-        var it = self.tables.valueIterator();
+        var it = self.namespaces.valueIterator();
         while (it.next()) |lsm| try lsm.flushMemtable();
     }
 
     pub fn compactAll(self: *Storage) !void {
-        var it = self.tables.valueIterator();
+        var it = self.namespaces.valueIterator();
         while (it.next()) |lsm| try lsm.maybeCompact();
     }
 };

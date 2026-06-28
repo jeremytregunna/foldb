@@ -8,7 +8,7 @@ const storage_mod = @import("storage.zig");
 const log_mod = @import("log.zig");
 const obs = @import("observability.zig");
 
-pub const TableId = storage_mod.TableId;
+pub const NamespaceId = storage_mod.NamespaceId;
 pub const Seq = storage_mod.Seq;
 pub const MutationKind = storage_mod.MutationKind;
 pub const Mutation = storage_mod.Mutation;
@@ -42,7 +42,7 @@ const SpinMutex = struct {
 
 /// A single row change within a committed transaction.
 pub const CdcEffect = struct {
-    table_id: TableId,
+    namespace_id: NamespaceId,
     key: []const u8,
     op: CdcOperation,
     /// State before the change. Null for inserts or if row did not previously exist.
@@ -109,8 +109,8 @@ pub const BeforeImages = struct {
 /// as the outstanding depth never exceeds 2^31 (far above events_capacity_max).
 pub const CdcSubscription = struct {
     id: u64,
-    /// If set, only events touching this table are delivered.
-    table_filter: ?TableId,
+    /// If set, only events touching this namespace are delivered.
+    namespace_filter: ?NamespaceId,
     /// Highest sequence number acked by the consumer. Written by ack(), read by push().
     cursor: std.atomic.Value(Seq),
     /// Bounded event ring buffer. Allocated by CdcManager.init(), stable for lifetime.
@@ -125,13 +125,13 @@ pub const CdcSubscription = struct {
     fn init_slot(
         self: *CdcSubscription,
         id: u64,
-        table_filter: ?TableId,
+        namespace_filter: ?NamespaceId,
         from_seq: Seq,
     ) void {
         assert(id > 0);
         assert(self.events.len == events_capacity_max);
         self.id = id;
-        self.table_filter = table_filter;
+        self.namespace_filter = namespace_filter;
         self.cursor = std.atomic.Value(Seq).init(from_seq);
         self.events_head = std.atomic.Value(u32).init(0);
         self.events_tail = std.atomic.Value(u32).init(0);
@@ -246,11 +246,11 @@ pub const CdcManager = struct {
     }
 
     /// Create a new subscription from the pre-allocated pool.
-    /// Pass null for table_filter to receive events for all tables.
+    /// Pass null for namespace_filter to receive events for all namespaces.
     /// from_seq sets the initial cursor (events at or below this seq are skipped).
     pub fn subscribe(
         self: *CdcManager,
-        table_filter: ?TableId,
+        namespace_filter: ?NamespaceId,
         from_seq: Seq,
     ) error{TooManySubscriptions}!*CdcSubscription {
         self.mutex.lock();
@@ -261,7 +261,7 @@ pub const CdcManager = struct {
             if (sub.id != 0) continue;
             const id = self.next_id;
             self.next_id += 1;
-            sub.init_slot(id, table_filter, from_seq);
+            sub.init_slot(id, namespace_filter, from_seq);
             self.subscription_count += 1;
             self.metrics.subscriptions_active.set(self.subscription_count);
             return sub;
@@ -337,7 +337,7 @@ pub const CdcManager = struct {
                 images[committed] = null;
                 continue;
             }
-            const row_opt = try storage.get(mutation.table_id, mutation.key, at_seq);
+            const row_opt = try storage.get(mutation.namespace_id, mutation.key, at_seq);
             if (row_opt) |row| {
                 var r = row;
                 defer r.deinit(storage.alloc);
@@ -379,8 +379,8 @@ pub const CdcManager = struct {
             }
 
             for (mutations, 0..) |mutation, mutation_index| {
-                if (sub.table_filter) |filter| {
-                    if (mutation.table_id != filter) continue;
+                if (sub.namespace_filter) |filter| {
+                    if (mutation.namespace_id != filter) continue;
                 }
                 const effect = try build_effect(alloc, mutation, before.images[mutation_index]);
                 effects.append(alloc, effect) catch |err| {
@@ -442,5 +442,5 @@ fn build_effect(alloc: std.mem.Allocator, mutation: Mutation, before_img: ?[]con
         break :blk try alloc.dupe(u8, src);
     } else null;
 
-    return .{ .table_id = mutation.table_id, .key = key, .op = op, .before = before, .after = after };
+    return .{ .namespace_id = mutation.namespace_id, .key = key, .op = op, .before = before, .after = after };
 }

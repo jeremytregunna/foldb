@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const TableId = u32;
+pub const NamespaceId = u32;
 pub const Seq = u64;
 
 pub const Row = struct {
@@ -19,7 +19,7 @@ pub const MutationKind = enum { insert, update, delete };
 
 pub const Mutation = struct {
     kind: MutationKind,
-    table_id: TableId,
+    namespace_id: NamespaceId,
     key: []const u8,
     value: ?[]const u8,
 };
@@ -56,7 +56,7 @@ pub const SnapshotHandle = struct {
 /// Records a single key read during handler execution.
 /// `row_seq` is the sequence of the row version that was returned (0 if not found).
 pub const ReadEntry = struct {
-    table_id: TableId,
+    namespace_id: NamespaceId,
     key: []const u8,
     row_seq: Seq,
 };
@@ -72,15 +72,15 @@ pub const ReadTracker = struct {
         return .{ .reads = .empty, .alloc = alloc };
     }
 
-    /// Record a key read. Deduplicates by (table_id, key); if the key was already
+    /// Record a key read. Deduplicates by (namespace_id, key); if the key was already
     /// recorded the first row_seq is kept (first read wins for conflict purposes).
-    pub fn record(self: *ReadTracker, table_id: TableId, key: []const u8, row_seq: Seq) !void {
+    pub fn record(self: *ReadTracker, namespace_id: NamespaceId, key: []const u8, row_seq: Seq) !void {
         for (self.reads.items) |r| {
-            if (r.table_id == table_id and std.mem.eql(u8, r.key, key)) return;
+            if (r.namespace_id == namespace_id and std.mem.eql(u8, r.key, key)) return;
         }
         const key_copy = try self.alloc.dupe(u8, key);
         errdefer self.alloc.free(key_copy);
-        try self.reads.append(self.alloc, .{ .table_id = table_id, .key = key_copy, .row_seq = row_seq });
+        try self.reads.append(self.alloc, .{ .namespace_id = namespace_id, .key = key_copy, .row_seq = row_seq });
     }
 
     pub fn deinit(self: *ReadTracker) void {

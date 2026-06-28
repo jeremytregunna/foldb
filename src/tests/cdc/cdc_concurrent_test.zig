@@ -43,7 +43,7 @@ test "cdc: dispatch preserves opaque key and value bytes" {
     const key_bytes = [_]u8{ 0x00, 'k', 0xFF };
     const mutation = storage.Mutation{
         .kind = .update,
-        .table_id = 1,
+        .namespace_id = 1,
         .key = &key_bytes,
         .value = &after_bytes,
     };

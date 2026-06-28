@@ -24,7 +24,7 @@ const LogMux = log_mod.LogMux;
 
 const assert = std.debug.assert;
 
-pub const default_table_id: storage_mod.TableId = 1;
+pub const default_namespace_id: storage_mod.NamespaceId = 1;
 
 pub const Options = struct {
     io: ?std.Io = null,
@@ -62,7 +62,7 @@ pub const Gateway = struct {
 
         var storage = try Storage.init(storage_dir, alloc);
         errdefer storage.deinit();
-        try storage.registerTable(default_table_id);
+        try storage.registerNamespace(default_namespace_id);
 
         var sequencer = try Sequencer.init(storage_dir, .{
             .partition_count = opts.partition_count,
@@ -291,7 +291,7 @@ pub fn handleGet(
 ) !void {
     errdefer sendError(writer, alloc, stream_id, .server_error, .@"error", "get failed", "") catch {};
     try gw.waitApplied(gw.sequencer.currentSeq());
-    const result = try gw.storage.get(default_table_id, req.key, req.at_seq);
+    const result = try gw.storage.get(default_namespace_id, req.key, req.at_seq);
     defer if (result) |row| row.deinit(alloc);
     const row_value: ?[]const u8 = if (result) |row| blk: {
         if (row.is_tombstone) break :blk null;
@@ -331,7 +331,7 @@ pub fn handleSet(
     var committed_seq: u64 = result.seq;
     if (req.expected_seq > 0) {
         try gw.waitApplied(result.seq);
-        const current = try gw.storage.get(default_table_id, req.key, std.math.maxInt(u64));
+        const current = try gw.storage.get(default_namespace_id, req.key, std.math.maxInt(u64));
         defer if (current) |row| row.deinit(alloc);
         cas_failed = if (current == null or current.?.seq != result.seq)
             if (current) |row| row.seq else null
@@ -385,7 +385,7 @@ pub fn handleRange(
 
     try gw.waitApplied(gw.sequencer.currentSeq());
     const range = KeyRange{ .start = req.start, .end = req.end, .start_inclusive = true };
-    var iter = try gw.storage.scan(default_table_id, range, std.math.maxInt(u64), alloc);
+    var iter = try gw.storage.scan(default_namespace_id, range, std.math.maxInt(u64), alloc);
     defer iter.deinit();
 
     var entries: std.ArrayList(messages.RangeEntry) = .empty;
@@ -500,7 +500,7 @@ pub fn handleBatch(
         switch (op) {
             .get => |req| {
                 try gw.waitApplied(gw.sequencer.currentSeq());
-                const result = try gw.storage.get(default_table_id, req.key, req.at_seq);
+                const result = try gw.storage.get(default_namespace_id, req.key, req.at_seq);
                 defer if (result) |row| row.deinit(alloc);
                 const value: ?[]const u8 = if (result) |row| blk: {
                     if (row.is_tombstone) break :blk null;
@@ -523,7 +523,7 @@ pub fn handleBatch(
                 var committed_seq: u64 = result.seq;
                 if (req.expected_seq > 0) {
                     try gw.waitApplied(result.seq);
-                    const current = try gw.storage.get(default_table_id, req.key, std.math.maxInt(u64));
+                    const current = try gw.storage.get(default_namespace_id, req.key, std.math.maxInt(u64));
                     defer if (current) |row| row.deinit(alloc);
                     cas_failed = if (current == null or current.?.seq != result.seq)
                         if (current) |row| row.seq else null
@@ -549,7 +549,7 @@ pub fn handleBatch(
             .range => |req| {
                 try gw.waitApplied(gw.sequencer.currentSeq());
                 const range = KeyRange{ .start = req.start, .end = req.end, .start_inclusive = true };
-                var iter = try gw.storage.scan(default_table_id, range, std.math.maxInt(u64), alloc);
+                var iter = try gw.storage.scan(default_namespace_id, range, std.math.maxInt(u64), alloc);
                 defer iter.deinit();
                 var entries: std.ArrayList(messages.RangeEntry) = .empty;
                 errdefer {

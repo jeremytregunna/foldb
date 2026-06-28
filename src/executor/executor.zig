@@ -46,8 +46,8 @@ pub const ExecutorMetrics = obs.ExecutorMetrics;
 pub const Log = log_mod.Log;
 pub const CdcManager = cdc_mod.CdcManager;
 
-const TableId = storage_mod.TableId;
-const default_table_id: TableId = 1;
+const NamespaceId = storage_mod.NamespaceId;
+const default_namespace_id: NamespaceId = 1;
 const drain_iterations_max: u32 = 1 << 20;
 
 pub const Executor = struct {
@@ -58,7 +58,7 @@ pub const Executor = struct {
     log: ?*Log = null,
     cdc: ?*CdcManager = null,
     metrics: obs.ExecutorMetrics = .{},
-    table_id: TableId = default_table_id,
+    namespace_id: NamespaceId = default_namespace_id,
 
     pub fn init(storage: *Storage, alloc: std.mem.Allocator) Executor {
         return .{ .storage = storage, .committed_seq = 0, .alloc = alloc };
@@ -116,7 +116,7 @@ pub const Executor = struct {
             switch (op) {
                 .set => |s| {
                     if (s.expected_seq > 0) {
-                        const current = try self.storage.get(self.table_id, s.key, entry.header.seq - 1);
+                        const current = try self.storage.get(self.namespace_id, s.key, entry.header.seq - 1);
                         defer if (current) |row| row.deinit(self.alloc);
                         if (current == null or current.?.seq != s.expected_seq) {
                             self.metrics.txns_aborted.inc();
@@ -135,12 +135,12 @@ pub const Executor = struct {
                     errdefer self.alloc.free(key_copy);
                     const val = try self.alloc.dupe(u8, s.value);
                     errdefer self.alloc.free(val);
-                    try self.appendTxnMutation(&mutations, 0, .{ .kind = .update, .table_id = self.table_id, .key = key_copy, .value = val });
+                    try self.appendTxnMutation(&mutations, 0, .{ .kind = .update, .namespace_id = self.namespace_id, .key = key_copy, .value = val });
                 },
                 .delete => |d| {
                     const key_copy = try self.alloc.dupe(u8, d.key);
                     errdefer self.alloc.free(key_copy);
-                    try self.appendTxnMutation(&mutations, 0, .{ .kind = .delete, .table_id = self.table_id, .key = key_copy, .value = null });
+                    try self.appendTxnMutation(&mutations, 0, .{ .kind = .delete, .namespace_id = self.namespace_id, .key = key_copy, .value = null });
                 },
             }
         }
@@ -198,7 +198,7 @@ pub const Executor = struct {
             switch (op) {
                 .set => |s| {
                     if (s.expected_seq > 0) {
-                        const current = try self.storage.get(self.table_id, s.key, entry.header.seq - 1);
+                        const current = try self.storage.get(self.namespace_id, s.key, entry.header.seq - 1);
                         defer if (current) |row| row.deinit(self.alloc);
                         if (current == null or current.?.seq != s.expected_seq) {
                             self.metrics.txns_aborted.inc();
@@ -217,12 +217,12 @@ pub const Executor = struct {
                     errdefer self.alloc.free(key_copy);
                     const val = try self.alloc.dupe(u8, s.value);
                     errdefer self.alloc.free(val);
-                    try self.appendTxnMutation(mut_buf, start, .{ .kind = .update, .table_id = self.table_id, .key = key_copy, .value = val });
+                    try self.appendTxnMutation(mut_buf, start, .{ .kind = .update, .namespace_id = self.namespace_id, .key = key_copy, .value = val });
                 },
                 .delete => |d| {
                     const key_copy = try self.alloc.dupe(u8, d.key);
                     errdefer self.alloc.free(key_copy);
-                    try self.appendTxnMutation(mut_buf, start, .{ .kind = .delete, .table_id = self.table_id, .key = key_copy, .value = null });
+                    try self.appendTxnMutation(mut_buf, start, .{ .kind = .delete, .namespace_id = self.namespace_id, .key = key_copy, .value = null });
                 },
             }
         }
@@ -241,7 +241,7 @@ pub const Executor = struct {
     ) !void {
         var i = start;
         while (i < mutations.items.len) {
-            if (mutations.items[i].table_id == mutation.table_id and
+            if (mutations.items[i].namespace_id == mutation.namespace_id and
                 std.mem.eql(u8, mutations.items[i].key, mutation.key))
             {
                 const old = mutations.orderedRemove(i);

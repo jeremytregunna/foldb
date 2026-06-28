@@ -42,7 +42,7 @@ pub fn generate(sched: *SimScheduler, n_ops: usize, alloc: std.mem.Allocator) !W
     for (ops) |*op| {
         const live_count = live.count();
 
-        // Weight: prefer inserts when table is sparse, more variety when populated.
+        // Weight: prefer inserts when namespace is sparse, more variety when populated.
         const roll = sched.random().uintLessThan(u8, 100);
         const kind: OpKind = if (live_count == 0 or roll < 40)
             .insert

@@ -14,7 +14,7 @@ test "tiered: many writes" {
     while (i < 300) : (i += 1) {
         var key_buf: [16]u8 = undefined;
         const key = std.fmt.bufPrint(&key_buf, "k_{d:03}", .{i}) catch unreachable;
-        try lsm.apply(&[_]storage.Mutation{ .{ .kind = .insert, .table_id = 1, .key = key, .value = "v" } }, i + 1);
+        try lsm.apply(&[_]storage.Mutation{ .{ .kind = .insert, .namespace_id = 1, .key = key, .value = "v" } }, i + 1);
     }
     {
         const r1 = try lsm.get("k_000", 300);

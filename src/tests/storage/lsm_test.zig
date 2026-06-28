@@ -14,8 +14,8 @@ test "lsm: apply and get" {
     defer lsm.deinit();
 
     const mutations = [_]Mutation{
-        .{ .kind = .insert, .table_id = 1, .key = "key1", .value = "val1" },
-        .{ .kind = .insert, .table_id = 1, .key = "key2", .value = "val2" },
+        .{ .kind = .insert, .namespace_id = 1, .key = "key1", .value = "val1" },
+        .{ .kind = .insert, .namespace_id = 1, .key = "key2", .value = "val2" },
     };
     try lsm.apply(&mutations, 1);
 
@@ -32,8 +32,8 @@ test "lsm: delete" {
     var lsm = try LSM.init(path, alloc);
     defer lsm.deinit();
 
-    try lsm.apply(&[_]Mutation{.{ .kind = .insert, .table_id = 1, .key = "k", .value = "v" }}, 1);
-    try lsm.apply(&[_]Mutation{.{ .kind = .delete, .table_id = 1, .key = "k", .value = null }}, 2);
+    try lsm.apply(&[_]Mutation{.{ .kind = .insert, .namespace_id = 1, .key = "k", .value = "v" }}, 1);
+    try lsm.apply(&[_]Mutation{.{ .kind = .delete, .namespace_id = 1, .key = "k", .value = null }}, 2);
     const r = try lsm.get("k", 2);
     try testing.expect(r == null);
 }
@@ -48,7 +48,7 @@ test "lsm: many inserts" {
     while (i <= 200) : (i += 1) {
         var buf: [16]u8 = undefined;
         const key = std.fmt.bufPrint(&buf, "k_{d:03}", .{i}) catch unreachable;
-        try lsm.apply(&[_]Mutation{.{ .kind = .insert, .table_id = 1, .key = key, .value = "v" }}, i);
+        try lsm.apply(&[_]Mutation{.{ .kind = .insert, .namespace_id = 1, .key = key, .value = "v" }}, i);
     }
     {
         const r1 = try lsm.get("k_001", 200);
@@ -76,7 +76,7 @@ test "lsm: scan" {
     var i: Seq = 1;
     const keys = [_][]const u8{ "a", "b", "c", "d", "e" };
     for (keys) |k| {
-        try lsm.apply(&[_]Mutation{.{ .kind = .insert, .table_id = 1, .key = k, .value = "v" }}, i);
+        try lsm.apply(&[_]Mutation{.{ .kind = .insert, .namespace_id = 1, .key = k, .value = "v" }}, i);
         i += 1;
     }
 
@@ -96,13 +96,13 @@ test "lsm: scan suppresses tombstoned keys across memtable and sstables" {
     defer lsm.deinit();
 
     try lsm.apply(&[_]Mutation{
-        .{ .kind = .insert, .table_id = 1, .key = "a", .value = "one" },
-        .{ .kind = .insert, .table_id = 1, .key = "b", .value = "two" },
-        .{ .kind = .insert, .table_id = 1, .key = "c", .value = "three" },
+        .{ .kind = .insert, .namespace_id = 1, .key = "a", .value = "one" },
+        .{ .kind = .insert, .namespace_id = 1, .key = "b", .value = "two" },
+        .{ .kind = .insert, .namespace_id = 1, .key = "c", .value = "three" },
     }, 1);
     try lsm.flushMemtable();
     try lsm.apply(&[_]Mutation{
-        .{ .kind = .delete, .table_id = 1, .key = "b", .value = null },
+        .{ .kind = .delete, .namespace_id = 1, .key = "b", .value = null },
     }, 2);
 
     const rows = try lsm.scan(KeyRange.all(), 2, alloc);
@@ -126,7 +126,7 @@ test "lsm: natural string keys do not require insertion-order padding" {
     for (keys, 1..) |key, seq| {
         const value = try std.fmt.allocPrint(alloc, "v{d}", .{seq});
         defer alloc.free(value);
-        try lsm.apply(&[_]Mutation{.{ .kind = .insert, .table_id = 1, .key = key, .value = value }}, @intCast(seq));
+        try lsm.apply(&[_]Mutation{.{ .kind = .insert, .namespace_id = 1, .key = key, .value = value }}, @intCast(seq));
     }
 
     {

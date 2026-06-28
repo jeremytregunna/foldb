@@ -31,7 +31,7 @@ Mutations route to the memtable. When the memtable fills, it is flushed to L0. W
 All keys and values are opaque `[]const u8`. The `Mutation` struct carries:
 
 - `kind: MutationKind` — `.insert`, `.update`, or `.delete`
-- `table_id: TableId` — legacy field, always `1`
+- `namespace_id: NamespaceId` — legacy field, always `1`
 - `key: []const u8` — the key
 - `value: ?[]const u8` — the value (null for tombstones)
 

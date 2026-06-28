@@ -10,7 +10,7 @@ targets for TLA+ verification, particularly the multi-partition execution cluste
 
 **Explicit:**
 
-1. A `TxnIntent` is self-contained: once in the log, executing it requires no external state beyond `fold(log[0..=seq-1])`. Nothing outside the log and storage metadata needed to locate the KV table is needed for replay.
+1. A `TxnIntent` is self-contained: once in the log, executing it requires no external state beyond `fold(log[0..=seq-1])`. Nothing outside the log and storage metadata needed to locate the KV namespace is needed for replay.
 
 ---
 
@@ -23,7 +23,7 @@ targets for TLA+ verification, particularly the multi-partition execution cluste
 4. Given the same log prefix, every node produces bit-identical state. No wall clocks, RNGs, or external calls inside the fold.
 5. Every committed transaction has exactly one `seq`, monotonically increasing, gap-free, cluster-wide.
 6. Isolation is strict serializable. No weaker level exists.
-7. KV table metadata is initialized before serving traffic and is not mutated through a side channel while requests are executing.
+7. KV namespace metadata is initialized before serving traffic and is not mutated through a side channel while requests are executing.
 
 ---
 

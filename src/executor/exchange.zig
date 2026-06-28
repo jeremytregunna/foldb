@@ -15,13 +15,13 @@ const storage_mod = @import("storage.zig");
 // place it in two module compilation units alongside executor_module.
 pub const PartitionId = u32;
 pub const Seq = u64;
-pub const TableId = u32;
+pub const NamespaceId = u32;
 pub const Row = storage_mod.Row;
 
 /// A request for one row from a peer partition's storage at seq-1.
-/// key = "" is a sentinel meaning "send me the full scan for this table".
+/// key = "" is a sentinel meaning "send me the full scan for this namespace".
 pub const ForeignRead = struct {
-    table_id: TableId,
+    namespace_id: NamespaceId,
     key: []const u8,
 };
 
@@ -37,7 +37,7 @@ pub const ExchangeRequest = struct {
 /// row == null means the key did not exist at seq-1.
 pub const FetchedRow = struct {
     from_partition: PartitionId, // which partition fetched and returned this row
-    table_id: TableId,
+    namespace_id: NamespaceId,
     key: []const u8,
     row: ?Row,
 };

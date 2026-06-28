@@ -131,7 +131,7 @@ fn initCluster(tag: []const u8, alloc: std.mem.Allocator) !TestCluster {
         tc.inited += 1;
     }
 
-    // Learn actual OS-assigned ports and fix up each node's transport peer table.
+    // Learn actual OS-assigned ports and fix up each node's transport peer map.
     var ports: [3]u16 = undefined;
     for (0..3) |i| ports[i] = try tc.nodes[i].boundPort();
 

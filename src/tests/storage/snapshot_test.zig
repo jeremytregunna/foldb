@@ -21,10 +21,10 @@ test "snapshot: basic operations" {
     const path = "/tmp/foldb_snapshot";
     var store = try Storage.init(path, alloc);
     defer store.deinit();
-    try store.registerTable(1);
+    try store.registerNamespace(1);
 
     const mutations = [_]storage.Mutation{
-        .{ .kind = .insert, .table_id = 1, .key = "key1", .value = "val1" },
+        .{ .kind = .insert, .namespace_id = 1, .key = "key1", .value = "val1" },
     };
     try store.apply(&mutations, 1);
 
@@ -38,7 +38,7 @@ test "snapshot: empty storage" {
     const path = "/tmp/foldb_empty";
     var store = try Storage.init(path, alloc);
     defer store.deinit();
-    try store.registerTable(1);
+    try store.registerNamespace(1);
     const row = try store.get(1, "missing", 1);
     try testing.expect(row == null);
 }
@@ -55,14 +55,14 @@ test "snapshot: restore KV data from object store" {
 
     var store = try Storage.init(source_path, alloc);
     defer store.deinit();
-    try store.registerTable(1);
+    try store.registerNamespace(1);
 
     try store.apply(&[_]storage.Mutation{
-        .{ .kind = .insert, .table_id = 1, .key = "alpha", .value = "one" },
-        .{ .kind = .insert, .table_id = 1, .key = "beta", .value = "two" },
+        .{ .kind = .insert, .namespace_id = 1, .key = "alpha", .value = "one" },
+        .{ .kind = .insert, .namespace_id = 1, .key = "beta", .value = "two" },
     }, 7);
 
-    const lsm = store.tables.getPtr(1) orelse return error.TableNotFound;
+    const lsm = store.namespaces.getPtr(1) orelse return error.NamespaceNotFound;
     var manifest = try storage.takeSnapshot(lsm, 7, 0, object_store.objectStore(), storage.noop_snapshot_log_writer, alloc);
     defer manifest.deinit();
 

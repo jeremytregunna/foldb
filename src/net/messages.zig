@@ -599,7 +599,7 @@ pub fn encodeCdcEvent(
     for (effects) |e| try encodeCdcEffect(out, alloc, e);
 }
 
-// Subscribe / AckCdc (simplified — no table filters)
+// Subscribe / AckCdc (simplified — no namespace filters)
 pub const Subscribe = struct {
     from_seq: u64,
     initial_credits: u32,
