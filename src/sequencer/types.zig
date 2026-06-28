@@ -38,7 +38,7 @@ pub const EpochDecision = struct {
 /// A gateway-submitted entry that has crossed the sequencer's input boundary.
 /// The intent_payload is opaque to the sequencer — its content was validated by the
 /// gateway before submission. entry_kind tells the sequencer what kind of partition
-/// log entry to write (txn_intent for DML, schema_change for DDL).
+/// log entry to write, normally txn_intent for KV mutations.
 pub const ValidatedSubmit = struct {
     client_id: u64,
     client_seq: u64,

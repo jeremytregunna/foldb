@@ -256,6 +256,70 @@ test "gateway kv: restart replays entries spread across log partitions" {
     }
 }
 
+test "gateway kv: compacted storage and multi-partition log replay survive restart" {
+    const alloc = testing.allocator;
+    const path = try makeTempDir(alloc, "compact_replay_partitions");
+    defer {
+        removeTree(path);
+        alloc.free(path);
+    }
+
+    {
+        const gw = try Gateway.init(path, alloc, .{ .partition_count = 1, .log_partition_count = 4 });
+        var out = writer();
+        defer out.deinit();
+
+        var stream_id: u64 = 1;
+        for (0..4) |flush_round| {
+            for (0..4) |j| {
+                const i = flush_round * 4 + j;
+                const key = try std.fmt.allocPrint(alloc, "k{d:02}", .{i});
+                defer alloc.free(key);
+                const value = try std.fmt.allocPrint(alloc, "v{d:02}", .{i});
+                defer alloc.free(value);
+                try gateway_mod.handleSet(&out.writer, alloc, stream_id, .{ .key = key, .value = value }, gw);
+                _ = try decodeMutate(&out, stream_id);
+                out.clearRetainingCapacity();
+                stream_id += 1;
+            }
+            try gw.waitCaughtUp();
+            try gw.storage.flushAll();
+        }
+        try gw.storage.compactAll();
+
+        for (16..24) |i| {
+            const key = try std.fmt.allocPrint(alloc, "k{d:02}", .{i});
+            defer alloc.free(key);
+            const value = try std.fmt.allocPrint(alloc, "v{d:02}", .{i});
+            defer alloc.free(value);
+            try gateway_mod.handleSet(&out.writer, alloc, stream_id, .{ .key = key, .value = value }, gw);
+            _ = try decodeMutate(&out, stream_id);
+            out.clearRetainingCapacity();
+            stream_id += 1;
+        }
+
+        shutdownWithoutStorageFlush(gw);
+    }
+
+    const recovered = try Gateway.init(path, alloc, .{ .partition_count = 1, .log_partition_count = 4 });
+    defer recovered.deinit();
+
+    var out = writer();
+    defer out.deinit();
+    try gateway_mod.handleRange(&out.writer, alloc, 99, .{ .start = "k", .end = "l", .limit = 0 }, recovered);
+    const range = try decodeRange(&out, 99);
+    defer messages.freeRangeResponse(range, alloc);
+    try testing.expectEqual(@as(usize, 24), range.entries.len);
+    for (range.entries, 0..) |entry, i| {
+        const expected_key = try std.fmt.allocPrint(alloc, "k{d:02}", .{i});
+        defer alloc.free(expected_key);
+        const expected_value = try std.fmt.allocPrint(alloc, "v{d:02}", .{i});
+        defer alloc.free(expected_value);
+        try testing.expectEqualStrings(expected_key, entry.key);
+        try testing.expectEqualStrings(expected_value, entry.value);
+    }
+}
+
 test "gateway kv: compare and swap succeeds once and reports stale seq" {
     const alloc = testing.allocator;
     const path = try makeTempDir(alloc, "cas");

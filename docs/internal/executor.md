@@ -23,15 +23,15 @@ The executor decodes each `LogEntry` into a `TxnIntent` containing `[]const KvOp
 
 ## ExecutorDriver
 
-The `ExecutorDriver` runs on a dedicated background thread. It polls the Log for committed entries in 256-entry batches:
+The gateway owns a dedicated executor thread. It drains committed entries from the sequencer partition logs in 256-entry batches:
 
-1. Read committed entry from Log via `log.peekCommitted()`.
+1. Read committed entries from the log mux.
 2. Decode the entry payload into `TxnIntent` (contains `[]const KvOp`).
-3. Convert `TxnIntent` to `[]const Mutation` (key, value, kind).
+3. Convert `TxnIntent` to `[]const Mutation` (key, value, kind), coalescing duplicate keys within the transaction to the final operation.
 4. Capture before-images if CDC is configured.
 5. Apply mutations to Storage via `storage.apply(mutations, seq)`.
 6. Dispatch CDC events with before/after images.
-7. Advance the log's committed position.
+7. Advance the executor's applied sequence.
 
 ## Integration with Other Subsystems
 
@@ -43,12 +43,11 @@ The `ExecutorDriver` runs on a dedicated background thread. It polls the Log for
 
 | Error | Meaning |
 |---|---|
-| `bad_params` | CRC mismatch on entry payload |
-| `missing_query` | No handler for entry type |
+| `bad_payload` | CRC mismatch or invalid entry payload |
+| `constraint_violation` | Transaction-level condition failed, such as CAS mismatch |
 
 ## Source Files
 
 - `src/executor/executor.zig` — fold loop, handler dispatch, CDC integration, ExecutorDriver
 - `src/executor/types.zig` — shared types: KvOp, TxnIntent, ExecResult, AbortCode
 - `src/executor/determinism.zig` — determinism enforcement utilities
-- `src/executor/declare_reads.zig` — walks ops to emit read declarations

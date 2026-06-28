@@ -10,7 +10,7 @@ targets for TLA+ verification, particularly the multi-partition execution cluste
 
 **Explicit:**
 
-1. A `TxnIntent` is self-contained: once in the log, executing it requires no external state beyond the registered query referenced by `query_hash` and `fold(log[0..=seq-1])`. Nothing outside the log and the registered query registry is needed for replay.
+1. A `TxnIntent` is self-contained: once in the log, executing it requires no external state beyond `fold(log[0..=seq-1])`. Nothing outside the log and storage metadata needed to locate the KV table is needed for replay.
 
 ---
 
@@ -23,7 +23,7 @@ targets for TLA+ verification, particularly the multi-partition execution cluste
 4. Given the same log prefix, every node produces bit-identical state. No wall clocks, RNGs, or external calls inside the fold.
 5. Every committed transaction has exactly one `seq`, monotonically increasing, gap-free, cluster-wide.
 6. Isolation is strict serializable. No weaker level exists.
-7. DDL is a transaction in the log. No side channel for metadata.
+7. KV table metadata is initialized before serving traffic and is not mutated through a side channel while requests are executing.
 
 ---
 
@@ -57,7 +57,7 @@ targets for TLA+ verification, particularly the multi-partition execution cluste
 
 19. `apply` is called only by the Fold Executor — no other writer.
 20. Mutations are buffered by `seq`; a reader at `seq = s` never sees mutations from `seq > s`.
-21. An index's state at `seq = s` equals `fold(log[0..=s])` for the indexed columns — index and base table are never inconsistent at the same `seq`.
+21. Tombstones, historical versions, and compacted SSTables at `seq = s` equal `fold(log[0..=s])`; compaction never changes visible KV state.
 
 ---
 
@@ -71,7 +71,7 @@ targets for TLA+ verification, particularly the multi-partition execution cluste
 
 **Implied:**
 
-25. The determinism whitelist is transitive — any module reachable from query execution code must be on the whitelist, not just direct imports. Violation is a compile error.
+25. The fold path is deterministic and data-only: it does not depend on wall clocks, RNGs, process-local state, or external services.
 26. `run(entry)` advances `current_seq` even on abort — `current_seq` is never blocked.
 27. In a multi-partition deployment every executor observes the same ordered KV
     intent stream and applies only mutations owned by its partition. Shared
@@ -113,25 +113,15 @@ All implied. None are stated as formal invariants in the spec; highest TLA+ valu
 
 **Explicit:**
 
-40. A `QueryHash` uniquely determines the query's AST and type signature forever.
-41. No transaction is submitted with unresolved nondeterminism.
+40. Gateway mutation acknowledgements mean the intent is durable in the Raft ordering log; executor application is a deterministic consequence.
+41. Read handlers wait for the executor to catch up to the current committed sequence before reading storage.
 
 **Implied:**
 
-42. Reconnaissance reads from a snapshot `seq <= current_committed_seq` — never from the future.
-43. If the actual read set at execution time exceeds the declared hint, the executor must emit a retry marker at `seq` and must not proceed with the undeclared reads.
-44. The retry loop for read-set conflicts terminates: the gateway re-scouts at the conflicting `seq`, ensuring the next attempt sees a strictly later snapshot.
-45. Params are encoded canonically — the same logical params always produce the same bytes in the intent.
-
----
-
-## Schema
-
-**Implied:**
-
-46. A schema change that would break a registered query is rejected before it reaches the log.
-47. An index is usable for query planning only at `seq >= backfill_complete_seq`; before that it exists in the schema but the planner must not use it.
-48. A deregistered query's hash is never reused for a different query.
+42. Mutating batches are submitted as one intent and receive one committed sequence.
+43. Mixed read/write batches are rejected until transactional reads are represented in the intent format.
+44. Batch mutations for the same key collapse to the last operation in request order.
+45. Request payloads are encoded canonically — the same logical KV operation always produces the same intent bytes.
 
 ---
 

@@ -431,6 +431,11 @@ pub const Storage = struct {
         var it = self.tables.valueIterator();
         while (it.next()) |lsm| try lsm.flushMemtable();
     }
+
+    pub fn compactAll(self: *Storage) !void {
+        var it = self.tables.valueIterator();
+        while (it.next()) |lsm| try lsm.maybeCompact();
+    }
 };
 
 pub fn mkdirAll(path: []const u8) void {
