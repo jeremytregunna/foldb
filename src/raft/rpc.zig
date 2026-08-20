@@ -137,7 +137,7 @@ pub fn deserializeAppendEntriesResult(buf: *const [17]u8) AppendEntriesResult {
 // AppendEntries payload:
 //   u8[40]  header fields
 //   u32     entry_count
-//   for each entry: u8[25] LogEntryHeader + u32 payload_len + u8[payload_len] payload
+//   for each entry: u8[29] LogEntryHeader + u32 payload_len + u8[payload_len] payload
 // ---------------------------------------------------------------------------
 
 /// Serialize a Message into `buf`, prepending a 4-byte length prefix, 8-byte from_id,

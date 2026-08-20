@@ -747,7 +747,14 @@ fn commitBatch(self: *Sequencer, batch: []*types_mod.PendingSubmit) void {
     if (n_appended == 0) return;
 
     // Phase 2: one durable Raft sync covers every entry appended above.
-    self.raft_log.sync();
+    self.raft_log.sync() catch {
+        // Fsync failed — data is NOT durable. Do not commit.
+        for (slots[0..n_appended]) |s| {
+            s.pending.err = error.FsyncFailed;
+            s.pending.markDone();
+        }
+        return;
+    };
 
     // Check if already committed (single-node Raft often commits instantly).
     if (self.raft.commit_index >= max_ordering_seq) {

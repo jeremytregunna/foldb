@@ -165,6 +165,7 @@ fn scan_unsealed_entries(fd: std.posix.fd_t) struct { last_seq: Seq, entry_count
         );
         if (header_read_result != entry_mod.LogEntryHeader.header_size) break;
         const log_header = entry_mod.LogEntryHeader.deserialize_from(&header_buf) catch break;
+        if (!log_header.verify_header_crc()) break;
         if (log_header.payload_len > entry_mod.payload_len_max) break;
         _ = std.os.linux.lseek(@intCast(fd), @intCast(log_header.payload_len), std.os.linux.SEEK.CUR);
         last_seq = log_header.seq;
@@ -372,8 +373,9 @@ pub const Segment = struct {
         return try result.toOwnedSlice(alloc);
     }
 
-    pub fn sync(self: *Segment) void {
-        _ = std.os.linux.fdatasync(@intCast(self.fd));
+    pub fn sync(self: *Segment) !void {
+        const r = std.os.linux.fdatasync(@intCast(self.fd));
+        if (r < 0) return error.FsyncFailed;
     }
 
     pub fn seal(self: *Segment) !void {

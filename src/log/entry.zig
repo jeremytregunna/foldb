@@ -214,26 +214,45 @@ pub const LogEntryHeader = struct {
     kind: EntryKind,
     payload_len: u32,
     payload_crc: u32,
+    header_crc: u32,
 
-    pub const header_size: u32 = 25;
+    pub const header_size: u32 = 29;
 
     pub fn init(seq: Seq, epoch: Epoch, kind: EntryKind, payload: []const u8) LogEntryHeader {
-        return .{
+        var h = LogEntryHeader{
             .seq = seq,
             .epoch = epoch,
             .kind = kind,
             .payload_len = @intCast(payload.len),
             .payload_crc = crc.crc32c(payload),
+            .header_crc = 0,
         };
+        h.header_crc = h.compute_header_crc();
+        return h;
     }
 
-    pub fn serialize_to(self: LogEntryHeader, buf: []u8) void {
-        std.debug.assert(buf.len >= header_size);
+    fn compute_header_crc(self: *const LogEntryHeader) u32 {
+        var buf: [25]u8 = undefined;
+        self.write_body(&buf);
+        return crc.crc32c(&buf);
+    }
+
+    fn write_body(self: *const LogEntryHeader, buf: []u8) void {
         std.mem.writeInt(u64, buf[0..8], self.seq, .little);
         std.mem.writeInt(u64, buf[8..16], self.epoch, .little);
         buf[16] = @intFromEnum(self.kind);
         std.mem.writeInt(u32, buf[17..21], self.payload_len, .little);
         std.mem.writeInt(u32, buf[21..25], self.payload_crc, .little);
+    }
+
+    pub fn verify_header_crc(self: *const LogEntryHeader) bool {
+        return self.compute_header_crc() == self.header_crc;
+    }
+
+    pub fn serialize_to(self: LogEntryHeader, buf: []u8) void {
+        std.debug.assert(buf.len >= header_size);
+        self.write_body(buf[0..25]);
+        std.mem.writeInt(u32, buf[25..29], self.header_crc, .little);
     }
 
     pub fn deserialize_from(buf: []const u8) !LogEntryHeader {
@@ -243,7 +262,8 @@ pub const LogEntryHeader = struct {
         const kind = try EntryKind.fromByte(buf[16]);
         const payload_len = std.mem.readInt(u32, buf[17..21], .little);
         const payload_crc = std.mem.readInt(u32, buf[21..25], .little);
-        return .{ .seq = seq, .epoch = epoch, .kind = kind, .payload_len = payload_len, .payload_crc = payload_crc };
+        const header_crc = std.mem.readInt(u32, buf[25..29], .little);
+        return .{ .seq = seq, .epoch = epoch, .kind = kind, .payload_len = payload_len, .payload_crc = payload_crc, .header_crc = header_crc };
     }
 };
 

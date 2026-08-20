@@ -72,7 +72,7 @@ test "Segment: LogEntry sizes" {
     const entry = LogEntry.create(1, 0, .txn_intent, payload);
 
     const total_size = entry.total_size();
-    try testing.expectEqual(@as(usize, 25) + payload.len, total_size);
+    try testing.expectEqual(@as(usize, log.LogEntryHeader.header_size) + payload.len, total_size);
 }
 
 test "Segment: CRC verification" {
@@ -164,6 +164,34 @@ test "Segment: LogEntryHeader serialization round-trip" {
     try testing.expectEqual(header.kind, recovered.kind);
     try testing.expectEqual(header.payload_len, recovered.payload_len);
     try testing.expectEqual(header.payload_crc, recovered.payload_crc);
+    try testing.expectEqual(header.header_crc, recovered.header_crc);
+    try testing.expect(recovered.verify_header_crc());
+}
+
+test "Segment: LogEntryHeader detects header corruption" {
+    const payload = "corruption test";
+    const header = log.LogEntryHeader.init(10, 5, .noop, payload);
+    try testing.expect(header.verify_header_crc());
+
+    // Corrupt seq
+    var h1 = header;
+    h1.seq = 999;
+    try testing.expect(!h1.verify_header_crc());
+
+    // Corrupt epoch
+    var h2 = header;
+    h2.epoch = 12345;
+    try testing.expect(!h2.verify_header_crc());
+
+    // Corrupt kind
+    var h3 = header;
+    h3.kind = .snapshot_marker;
+    try testing.expect(!h3.verify_header_crc());
+
+    // Corrupt payload_len
+    var h4 = header;
+    h4.payload_len = 9999;
+    try testing.expect(!h4.verify_header_crc());
 }
 
 test "Segment: SegmentHeader isValid rejects corruption" {
@@ -282,4 +310,52 @@ test "Segment: sealed segment rejects further appends" {
     try seg.seal();
     const entry = LogEntry.create(2, 0, .txn_intent, "too late");
     try testing.expectError(error.SegmentSealed, seg.append(entry));
+}
+
+test "Segment: recovery scan stops at corrupt header" {
+    const path = try makeSegPath();
+    defer testing.allocator.free(path);
+    const path_for_cleanup = try std.heap.page_allocator.dupe(u8, path);
+    defer {
+        removeFileSeg(path_for_cleanup);
+        std.heap.page_allocator.free(path_for_cleanup);
+    }
+
+    // Write 3 entries without sealing (simulates crash mid-segment).
+    // Segment.init takes ownership of the path, so we pass a dupe.
+    {
+        const seg_path = try testing.allocator.dupe(u8, path);
+        var seg = try log.Segment.init(seg_path, 1, 1, 0, testing.allocator);
+        const entries = [_][]const u8{ "entry_one", "entry_two", "entry_three" };
+        for (entries, 0..) |payload, i| {
+            const e = LogEntry.create(@intCast(i + 1), 0, .txn_intent, payload);
+            try seg.append(e);
+        }
+        seg.sync() catch {};
+        seg.deinit(); // frees seg_path
+    }
+
+    // Corrupt the header of the 2nd entry by flipping a byte in the seq field.
+    // Layout: 64-byte segment header + entry1(29+len) + entry2 starts here.
+    const entry1_size = log.LogEntryHeader.header_size + "entry_one".len;
+    const entry2_header_offset: i64 = @intCast(64 + entry1_size);
+    {
+        const z = toNullZSeg(path) catch unreachable;
+        defer std.heap.page_allocator.free(z);
+        const raw_fd = std.os.linux.open(z.ptr, .{ .ACCMODE = .RDWR }, 0);
+        const fd: std.posix.fd_t = @intCast(@as(isize, @bitCast(raw_fd)));
+        defer _ = std.os.linux.close(@intCast(fd));
+        // Flip a byte in the seq field of entry 2's header (offset within header: 0..8)
+        _ = std.os.linux.pwrite(@intCast(fd), &[_]u8{0xFF}, 1, entry2_header_offset + 3);
+    }
+
+    // Reopen — recovery scan should stop at the corrupt 2nd header.
+    const path2 = try testing.allocator.dupe(u8, path_for_cleanup);
+    var seg2 = try log.Segment.open(path2, testing.allocator);
+    defer seg2.deinit();
+
+    try testing.expect(!seg2.sealed);
+    // Only the first entry should be recovered.
+    try testing.expectEqual(@as(u32, 1), seg2.entry_count);
+    try testing.expectEqual(@as(log.Seq, 1), seg2.last_seq);
 }

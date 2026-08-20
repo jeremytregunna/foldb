@@ -230,7 +230,7 @@ pub const RaftNode = struct {
         const seq = (try log.head()) + 1;
         const entry = LogEntry.create(seq, self.current_term, kind, payload);
         try log.append_entry(entry);
-        if (sync) log.sync();
+        if (sync) try log.sync();
 
         // Update our own match_index conceptually (handled via head() in checkCommit).
         try self.broadcastAppendEntries(log, out);
@@ -286,7 +286,7 @@ pub const RaftNode = struct {
         const seq = head + 1;
         const entry = LogEntry.create(seq, self.current_term, .config_change, &cc_payload);
         try log.append_entry(entry);
-        log.sync();
+        try log.sync();
 
         self.pending_config = .{ .seq = seq, .op = op, .peer_id = peer_id };
 
@@ -330,7 +330,7 @@ pub const RaftNode = struct {
 
         const replicated = try self.handleAppendEntriesApplyEntries(log, args);
         if (replicated > 0) {
-            log.sync();
+            try log.sync();
             self.metrics.entries_replicated.add(replicated);
         }
 
