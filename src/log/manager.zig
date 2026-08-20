@@ -288,6 +288,42 @@ pub const Log = struct {
         try self.current_segment.sync();
     }
 
+    /// Verify integrity of all entries in all segments. If corruption is found,
+    /// truncates the log to the last valid entry. Returns the verified log head.
+    /// Should be called on startup for the Raft log (source of truth).
+    pub fn verify_integrity(self: *Log, alloc: std.mem.Allocator) !Seq {
+        // Check sealed segments in order.
+        for (self.sealed_segments.items) |*log_segment| {
+            const last_valid = try log_segment.verify_integrity(alloc);
+            if (last_valid < log_segment.last_seq) {
+                // Corruption in a sealed segment — truncate everything from this point.
+                const truncate_at = last_valid + 1;
+                std.log.err(
+                    "Log integrity check: corruption detected in segment starting at seq {d}, " ++
+                        "last valid entry is {d}. Truncating log.",
+                    .{ log_segment.header.base_seq, last_valid },
+                );
+                try self.truncate_suffix(truncate_at);
+                return last_valid;
+            }
+        }
+
+        // Check current (unsealed) segment.
+        const cur_valid = try self.current_segment.verify_integrity(alloc);
+        if (cur_valid < self.current_segment.last_seq) {
+            const truncate_at = cur_valid + 1;
+            std.log.err(
+                "Log integrity check: corruption in current segment, last valid={d}, had={d}. Truncating.",
+                .{ cur_valid, self.current_segment.last_seq },
+            );
+            try self.current_segment.truncate_suffix(truncate_at);
+            self.current_seq = cur_valid;
+            return cur_valid;
+        }
+
+        return self.current_seq;
+    }
+
     pub fn update_term(self: *Log, term: entry_mod.Epoch) void {
         self.current_term = term;
     }

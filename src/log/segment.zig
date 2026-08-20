@@ -399,6 +399,43 @@ pub const Segment = struct {
         self.sealed = true;
     }
 
+    /// Verify integrity of all entries in this segment. Returns the last seq that
+    /// passed verification (both header_crc and payload_crc). For sealed segments,
+    /// uses the index to seek directly to each entry. For unsealed segments, scans
+    /// sequentially. If all entries are valid, returns self.last_seq.
+    pub fn verify_integrity(self: *Segment, alloc: std.mem.Allocator) !Seq {
+        if (self.entry_count == 0) return self.last_seq;
+
+        if (self.sealed and self.index.items.len > 0) {
+            // Sealed: use index to seek to each entry.
+            for (self.index.items) |index_entry| {
+                var offset: i64 = @intCast(index_entry.file_offset);
+                const entry_result = LogEntry.deserialize_pread(self.fd, &offset, alloc);
+                const entry = entry_result catch return index_entry.seq - 1;
+                var e = entry;
+                e.deinit(alloc);
+                if (!entry.header.verify_header_crc()) return entry.header.seq - 1;
+                if (!entry.verify_crc()) return entry.header.seq - 1;
+            }
+            return self.last_seq;
+        } else {
+            // Unsealed: scan sequentially from the start.
+            var offset: i64 = @intCast(header_size);
+            var last_valid: Seq = if (self.header.base_seq > 0) self.header.base_seq - 1 else 0;
+            var count: u32 = 0;
+            while (count < self.entry_count) : (count += 1) {
+                const entry_result = LogEntry.deserialize_pread(self.fd, &offset, alloc);
+                const entry = entry_result catch break;
+                var e = entry;
+                e.deinit(alloc);
+                if (!entry.header.verify_header_crc()) break;
+                if (!entry.verify_crc()) break;
+                last_valid = entry.header.seq;
+            }
+            return last_valid;
+        }
+    }
+
     /// Remove all entries with seq >= from_seq.
     pub fn truncate_suffix(self: *Segment, from_seq: Seq) !void {
         if (from_seq > self.last_seq) return;

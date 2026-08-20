@@ -65,6 +65,7 @@ pub const SequencerError = error{
     SerializeError,
     ConfigChangeInProgress,
     CommitTimeout,
+    Degraded,
 };
 
 /// Sleep duration per iteration of the commit-wait loop (100 µs in nanoseconds).
@@ -110,6 +111,13 @@ pub const Sequencer = struct {
     last_applied: Seq = 0,
     /// Pipelined commit: batches proposed but not yet committed.
     pending_batches: std.ArrayListUnmanaged(PendingBatch) = .empty,
+    /// Set to true when the Raft log head is below the persisted commit watermark.
+    /// A degraded node refuses votes and proposals to avoid overwriting good data.
+    degraded: bool = false,
+    /// Last watermark value written to disk (to avoid redundant fsyncs).
+    watermark_last_written: Seq = 0,
+    /// Count of commits since last commit_record was written to the Raft log.
+    commits_since_commit_record: u32 = 0,
 
     /// Initialize a Sequencer at the given base path.
     /// Creates:
@@ -137,10 +145,54 @@ pub const Sequencer = struct {
         var raft_log = try Log.init_partitioned(raft_path, cfg.node_id, seq_partition_id, alloc);
         errdefer raft_log.deinit();
 
+        // PAR: verify Raft log integrity before trusting it for protocol decisions.
+        // If corruption is found, the log is truncated to the last valid entry.
+        _ = try raft_log.verify_integrity(alloc);
+
         var raft_node = try initRaftNode(cfg, &raft_log, alloc);
         errdefer raft_node.deinit();
         if (cfg.peers.len == 0) {
             raft_node.commit_index = try raft_log.head();
+        }
+
+        // PAR: check commit watermark against log head. If the log is shorter
+        // than what we previously committed, we've lost data. Enter degraded mode.
+        var degraded = false;
+        const wm = raft_mod.loadWatermark(raft_path, alloc) catch null;
+        var commit_lower_bound: Seq = 0;
+        if (wm) |watermark| {
+            commit_lower_bound = watermark.commit_index;
+        } else {
+            // Watermark file missing or corrupt — fall back to the last
+            // commit_record in the replicated log (PAR mechanism).
+            // We can't call findLastCommitRecord here because the Sequencer
+            // struct isn't fully constructed yet. Do a direct log scan instead.
+            const log_head = try raft_log.head();
+            if (log_head > 0) {
+                const scan_range: u64 = 200;
+                const scan_start = if (log_head > scan_range) log_head -% scan_range else 1;
+                const entries = try raft_log.read(scan_start, @intCast(scan_range), alloc);
+                for (entries) |e| {
+                    if (e.header.kind == .commit_record and e.payload.len == 8) {
+                        const val = std.mem.bytesToValue(u64, e.payload);
+                        if (val > commit_lower_bound) commit_lower_bound = val;
+                    }
+                }
+                for (entries) |*e| e.deinit(alloc);
+                alloc.free(entries);
+            }
+        }
+        if (commit_lower_bound > 0) {
+            const log_head = try raft_log.head();
+            if (log_head < commit_lower_bound) {
+                std.log.err(
+                    "CRITICAL: Raft log head ({d}) is below commit lower bound ({d}). " ++
+                        "Committed entries were lost. Entering degraded mode — " ++
+                        "this node will not vote or propose until resynced.",
+                    .{ log_head, commit_lower_bound },
+                );
+                degraded = true;
+            }
         }
 
         const partition_logs = try createPartitionLogs(base_path, cfg.node_id, log_partition_count, alloc);
@@ -181,6 +233,7 @@ pub const Sequencer = struct {
             .transport = transport,
             .tick_interval_ms = cfg.tick_interval_ms,
             .last_applied = 0,
+            .degraded = degraded,
             // queue is intentionally left undefined here; start() calls queue.init() before use.
             .queue = undefined,
         };
@@ -220,6 +273,7 @@ pub const Sequencer = struct {
             self.thread = null;
         }
         self.catchUpCommitted() catch |err| std.log.warn("sequencer shutdown catch-up: {}", .{err});
+        self.writeWatermark();
     }
 
     pub fn catchUpCommitted(self: *Sequencer) !void {
@@ -248,6 +302,69 @@ pub const Sequencer = struct {
         return self.raft.role == .leader;
     }
 
+    pub fn isDegraded(self: *const Sequencer) bool {
+        return self.degraded;
+    }
+
+    /// Persist the current commit watermark to stable storage.
+    /// Called after commit_index advances to ensure we can detect data loss on restart.
+    fn writeWatermark(self: *Sequencer) void {
+        if (self.degraded) return;
+        if (self.raft.commit_index <= self.watermark_last_written) return;
+        raft_mod.saveWatermark(
+            self.raft_path,
+            self.alloc,
+            self.raft.commit_index,
+            self.raft.current_term,
+        ) catch |err| std.log.warn("watermark write failed: {}", .{err});
+        self.watermark_last_written = self.raft.commit_index;
+    }
+
+    /// Periodically append a commit_record entry to the Raft log. This provides an
+    /// independent, replicated record of the commit index — the full PAR mechanism.
+    /// Even if the local watermark file is lost, other nodes have this record.
+    const COMMIT_RECORD_INTERVAL: u32 = 100;
+
+    fn maybeWriteCommitRecord(self: *Sequencer) void {
+        if (self.degraded) return;
+        if (self.raft.role != .leader) return;
+        if (self.raft.commit_index == 0) return;
+        self.commits_since_commit_record += 1;
+        if (self.commits_since_commit_record < COMMIT_RECORD_INTERVAL) return;
+        self.commits_since_commit_record = 0;
+
+        const payload = std.mem.toBytes(self.raft.commit_index);
+        const entry = LogEntry.create(self.raft_log.current_seq + 1, self.raft.current_term, .commit_record, &payload);
+        self.raft_log.append_entry(entry) catch |err| {
+            std.log.warn("commit_record append failed: {}", .{err});
+            return;
+        };
+        self.raft_log.sync() catch |err| {
+            std.log.warn("commit_record sync failed: {}", .{err});
+        };
+    }
+
+    /// Scan the tail of the Raft log for the last commit_record entry. Returns the
+    /// commit_index it recorded, or null if none found. This provides an independent
+    /// (replicated) lower bound on the commit index, complementing the local watermark.
+    fn findLastCommitRecord(self: *const Sequencer, alloc: std.mem.Allocator) ?Seq {
+        const head = self.raft_log.head() catch return null;
+        if (head == 0) return null;
+        const scan_range: u64 = 200;
+        const scan_start = if (head > scan_range) head -% scan_range else 1;
+        const entries = self.raft_log.read(scan_start, @intCast(scan_range), alloc) catch return null;
+        defer {
+            for (entries) |*e| e.deinit(alloc);
+            alloc.free(entries);
+        }
+        var last_record: ?Seq = null;
+        for (entries) |e| {
+            if (e.header.kind == .commit_record and e.payload.len == 8) {
+                last_record = std.mem.bytesToValue(u64, e.payload);
+            }
+        }
+        return last_record;
+    }
     /// Return the TCP port the transport is bound to.
     /// Only valid if the transport is listening (multi-node config).
     pub fn boundPort(self: *const Sequencer) !u16 {
@@ -339,7 +456,12 @@ pub const Sequencer = struct {
                     try self.raft.handleAppendEntriesResult(&self.raft_log, env.from, result, &outputs);
                 },
                 .request_vote => |args| {
-                    try self.raft.handleRequestVote(&self.raft_log, args, &outputs);
+                    if (self.degraded) {
+                        // PAR: refuse to vote — we may have lost committed data.
+                        try outputs.append(self.alloc, .{ .send = .{ .to = args.candidate_id, .msg = .{ .request_vote_result = .{ .term = self.raft.current_term, .vote_granted = false } } } });
+                    } else {
+                        try self.raft.handleRequestVote(&self.raft_log, args, &outputs);
+                    }
                 },
                 .request_vote_result => |result| {
                     try self.raft.handleRequestVoteResult(&self.raft_log, env.from, result, &outputs);
@@ -411,6 +533,11 @@ pub const Sequencer = struct {
             }
             if (raft_entries.len == 0) break;
             const re = raft_entries[0];
+            if (re.header.kind == .commit_record) {
+                // Commit record is metadata — not applied to partition logs.
+                self.last_applied = idx;
+                continue;
+            }
             if (re.header.kind == .epoch_decision) {
                 const dec = types_mod.deserializeEpochDecision(re.payload, alloc) catch {
                     self.last_applied = idx;
@@ -692,6 +819,8 @@ fn runLoop(self: *Sequencer) void {
         self.tickOnce(self.alloc) catch |err| std.log.warn("tick: {}", .{err});
 
         resolvePendingBatches(self);
+        self.writeWatermark();
+        self.maybeWriteCommitRecord();
     }
 }
 
@@ -848,6 +977,7 @@ fn resolvePendingBatches(self: *Sequencer) void {
 const AppendResult = struct { seq: Seq, partition: PartitionId, ordering_seq: Seq };
 
 fn appendOne(self: *Sequencer, submit: ValidatedSubmit, outputs: *std.ArrayList(raft_mod.Output)) !AppendResult {
+    if (self.degraded) return SequencerError.Degraded;
     if (self.raft.role != .leader) {
         self.metrics.not_leader_errors.inc();
         return SequencerError.NotLeader;

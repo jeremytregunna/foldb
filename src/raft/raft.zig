@@ -5,6 +5,7 @@ const node_mod = @import("node.zig");
 const transport_mod = @import("transport.zig");
 const cluster_mod = @import("cluster.zig");
 const persistent_mod = @import("persistent_state.zig");
+const watermark_mod = @import("watermark.zig");
 
 pub const Term = types.Term;
 pub const RaftRole = types.RaftRole;
@@ -36,6 +37,10 @@ pub const NetworkConfig = cluster_mod.NetworkConfig;
 pub const PersistentState = persistent_mod.PersistentState;
 pub const loadPersistentState = persistent_mod.load;
 pub const savePersistentState = persistent_mod.save;
+
+pub const Watermark = watermark_mod.Watermark;
+pub const loadWatermark = watermark_mod.load;
+pub const saveWatermark = watermark_mod.save;
 
 // Serialization helpers (re-exported for tests and TCP transport)
 pub const encodeMessage = rpc_mod.encodeMessage;
