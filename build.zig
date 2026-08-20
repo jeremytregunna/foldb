@@ -488,6 +488,19 @@ pub fn build(b: *std.Build) void {
     const bench_deser_step = b.step("bench-deser", "Run the TxnIntent deserialize benchmark");
     bench_deser_step.dependOn(&run_bench_deser.step);
 
+    // Log migration tool
+    const migrate_module = b.createModule(.{
+        .root_source_file = b.path("src/cmd/migrate.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    migrate_module.addImport("log.zig", log_module);
+    const migrate_exe = b.addExecutable(.{
+        .name = "foldb-migrate",
+        .root_module = migrate_module,
+    });
+    b.installArtifact(migrate_exe);
+
     // Gateway KV handler tests
     const gateway_kv_test_module = b.createModule(.{
         .root_source_file = b.path("src/tests/gateway/kv_test.zig"),
