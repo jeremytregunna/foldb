@@ -17,7 +17,7 @@ fn makeTempDir(alloc: std.mem.Allocator, comptime name: []const u8) ![]const u8 
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
-    const path = try std.fmt.allocPrint(alloc, "/tmp/foldb_gateway_{s}_{d}", .{ name, ns });
+    const path = try alloc.print("/tmp/foldb_gateway_{s}_{d}", .{ name, ns });
     const z = try alloc.allocSentinel(u8, path.len, 0);
     defer alloc.free(z);
     @memcpy(z[0..path.len], path);
@@ -46,7 +46,7 @@ fn removeTree(path: []const u8) void {
             const dent: *const std.os.linux.dirent64 = @ptrCast(@alignCast(buf[i..].ptr));
             const entry_name = std.mem.span(@as([*:0]const u8, @ptrCast(&dent.name)));
             if (!std.mem.eql(u8, entry_name, ".") and !std.mem.eql(u8, entry_name, "..")) {
-                const child = std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ path, entry_name }) catch {
+                const child = std.heap.page_allocator.print("{s}/{s}", .{ path, entry_name }) catch {
                     i += dent.reclen;
                     continue;
                 };
@@ -80,14 +80,14 @@ fn expectResponse(bytes: []const u8, stream_id: u64) !DecodedFrame {
     };
     try testing.expectEqual(stream_id, hdr.stream_id);
     try testing.expectEqual(frame.PROTOCOL_VERSION, hdr.version);
-    try testing.expectEqual(frame.Kind.response, @as(frame.Kind, @enumFromInt(hdr.kind)));
+    try testing.expectEqual(frame.Kind.response, @as(frame.Kind, @fromBackingInt(@intCast(hdr.kind))));
     try testing.expect(@as(frame.Flags, @bitCast(hdr.flags)).final);
     const payload_start: usize = frame.FRAME_HEADER_SIZE;
     const payload_end = payload_start + hdr.payload_len;
     try testing.expect(bytes.len >= payload_end);
     return .{
         .stream_id = hdr.stream_id,
-        .kind = @enumFromInt(hdr.kind),
+        .kind = @fromBackingInt(@intCast(hdr.kind)),
         .payload = bytes[payload_start..payload_end],
     };
 }
@@ -225,9 +225,9 @@ test "gateway kv: restart replays entries spread across log partitions" {
         defer out.deinit();
 
         for (0..12) |i| {
-            const key = try std.fmt.allocPrint(alloc, "k{d:02}", .{i});
+            const key = try alloc.print("k{d:02}", .{i});
             defer alloc.free(key);
-            const value = try std.fmt.allocPrint(alloc, "v{d:02}", .{i});
+            const value = try alloc.print("v{d:02}", .{i});
             defer alloc.free(value);
             try gateway_mod.handleSet(&out.writer, alloc, @intCast(i + 1), .{ .key = key, .value = value }, gw);
             _ = try decodeMutate(&out, @intCast(i + 1));
@@ -247,9 +247,9 @@ test "gateway kv: restart replays entries spread across log partitions" {
     defer messages.freeRangeResponse(range, alloc);
     try testing.expectEqual(@as(usize, 12), range.entries.len);
     for (range.entries, 0..) |entry, i| {
-        const expected_key = try std.fmt.allocPrint(alloc, "k{d:02}", .{i});
+        const expected_key = try alloc.print("k{d:02}", .{i});
         defer alloc.free(expected_key);
-        const expected_value = try std.fmt.allocPrint(alloc, "v{d:02}", .{i});
+        const expected_value = try alloc.print("v{d:02}", .{i});
         defer alloc.free(expected_value);
         try testing.expectEqualStrings(expected_key, entry.key);
         try testing.expectEqualStrings(expected_value, entry.value);
@@ -273,9 +273,9 @@ test "gateway kv: compacted storage and multi-partition log replay survive resta
         for (0..4) |flush_round| {
             for (0..4) |j| {
                 const i = flush_round * 4 + j;
-                const key = try std.fmt.allocPrint(alloc, "k{d:02}", .{i});
+                const key = try alloc.print("k{d:02}", .{i});
                 defer alloc.free(key);
-                const value = try std.fmt.allocPrint(alloc, "v{d:02}", .{i});
+                const value = try alloc.print("v{d:02}", .{i});
                 defer alloc.free(value);
                 try gateway_mod.handleSet(&out.writer, alloc, stream_id, .{ .key = key, .value = value }, gw);
                 _ = try decodeMutate(&out, stream_id);
@@ -288,9 +288,9 @@ test "gateway kv: compacted storage and multi-partition log replay survive resta
         try gw.storage.compactAll();
 
         for (16..24) |i| {
-            const key = try std.fmt.allocPrint(alloc, "k{d:02}", .{i});
+            const key = try alloc.print("k{d:02}", .{i});
             defer alloc.free(key);
-            const value = try std.fmt.allocPrint(alloc, "v{d:02}", .{i});
+            const value = try alloc.print("v{d:02}", .{i});
             defer alloc.free(value);
             try gateway_mod.handleSet(&out.writer, alloc, stream_id, .{ .key = key, .value = value }, gw);
             _ = try decodeMutate(&out, stream_id);
@@ -311,9 +311,9 @@ test "gateway kv: compacted storage and multi-partition log replay survive resta
     defer messages.freeRangeResponse(range, alloc);
     try testing.expectEqual(@as(usize, 24), range.entries.len);
     for (range.entries, 0..) |entry, i| {
-        const expected_key = try std.fmt.allocPrint(alloc, "k{d:02}", .{i});
+        const expected_key = try alloc.print("k{d:02}", .{i});
         defer alloc.free(expected_key);
-        const expected_value = try std.fmt.allocPrint(alloc, "v{d:02}", .{i});
+        const expected_value = try alloc.print("v{d:02}", .{i});
         defer alloc.free(expected_value);
         try testing.expectEqualStrings(expected_key, entry.key);
         try testing.expectEqualStrings(expected_value, entry.value);

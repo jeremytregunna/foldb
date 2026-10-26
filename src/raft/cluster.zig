@@ -86,13 +86,13 @@ pub fn SimCluster(comptime N: usize) type {
 
             // Ensure base directory exists before creating node subdirs.
             {
-                const null_base = try allocator.dupeZ(u8, base_dir);
+                const null_base = try allocator.dupeSentinel(u8, base_dir, 0);
                 defer allocator.free(null_base);
                 _ = std.os.linux.mkdir(null_base.ptr, 0o755);
             }
 
             for (0..N) |i| {
-                dirs[i] = try std.fmt.allocPrint(allocator, "{s}/node{d}", .{ base_dir, i });
+                dirs[i] = try allocator.print("{s}/node{d}", .{ base_dir, i });
                 logs[i] = try Log.init(dirs[i], node_ids[i], allocator);
                 inited_logs += 1;
 
@@ -357,13 +357,13 @@ pub const DynSimCluster = struct {
         errdefer self.deinit();
 
         {
-            const null_base = try allocator.dupeZ(u8, base_dir);
+            const null_base = try allocator.dupeSentinel(u8, base_dir, 0);
             defer allocator.free(null_base);
             _ = std.os.linux.mkdir(null_base.ptr, 0o755);
         }
 
         for (initial_ids, 0..) |nid, idx| {
-            const dir = try std.fmt.allocPrint(allocator, "{s}/node{d}", .{ base_dir, nid });
+            const dir = try allocator.print("{s}/node{d}", .{ base_dir, nid });
             errdefer allocator.free(dir);
 
             var log = try Log.init(dir, nid, allocator);
@@ -415,7 +415,7 @@ pub const DynSimCluster = struct {
     ) !void {
         assert(new_id > 0);
 
-        const dir = try std.fmt.allocPrint(self.allocator, "{s}/node{d}", .{ base_dir, new_id });
+        const dir = try self.allocator.print("{s}/node{d}", .{ base_dir, new_id });
         errdefer self.allocator.free(dir);
 
         var log = try Log.init(dir, new_id, self.allocator);

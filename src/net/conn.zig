@@ -93,7 +93,7 @@ pub const Conn = struct {
             self.sendFatalError(.frame_too_large, "Auth frame too large");
             return error.ProtocolError;
         }
-        const kind: frame.Kind = @enumFromInt(hdr.kind);
+        const kind: frame.Kind = @fromBackingInt(@intCast(hdr.kind));
         if (kind != .auth) {
             self.sendFatalError(.protocol_error, "expected Auth frame");
             return error.ProtocolError;
@@ -160,7 +160,7 @@ pub const Conn = struct {
             self.pending_trace = if (flags.trace) try frame.readTraceExt(&self.reader.interface) else null;
             const payload = try frame.readPayload(&self.reader.interface, hdr.payload_len, self.alloc);
             defer self.alloc.free(payload);
-            const kind: frame.Kind = @enumFromInt(hdr.kind);
+            const kind: frame.Kind = @fromBackingInt(@intCast(hdr.kind));
             self.dispatch(hdr.stream_id, kind, payload) catch |err| switch (err) {
                 error.Goodbye => return,
                 else => return err,

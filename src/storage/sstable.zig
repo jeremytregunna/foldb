@@ -86,7 +86,7 @@ pub const SSTableWriter = struct {
             .alloc = alloc,
         };
 
-        var header_bytes: [56]u8 = [_]u8{0} ** 56;
+        var header_bytes: [56]u8 = @splat(0);
         try writer.writeBytes(&header_bytes);
 
         return writer;
@@ -151,11 +151,11 @@ pub const SSTableWriter = struct {
             .magic = MAGIC,
             .version = VERSION,
             .level = self.level,
-            ._pad = [_]u8{0} ** 7,
+            ._pad = @splat(0),
             .seq_min = self.seq_min,
             .seq_max = self.seq_max,
             .block_count = self.block_count,
-            .reserved = [_]u8{0} ** 16,
+            .reserved = @splat(0),
         };
         _ = std.os.linux.write(@intCast(self.fd), std.mem.asBytes(&header).ptr, @sizeOf(SSTableHeader));
 

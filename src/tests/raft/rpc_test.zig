@@ -77,8 +77,8 @@ test "RPC: AppendEntriesArgs header round-trip" {
 }
 
 test "RPC: MessageKind tag values are stable" {
-    try testing.expectEqual(@as(u8, 1), @intFromEnum(raft.MessageKind.append_entries));
-    try testing.expectEqual(@as(u8, 2), @intFromEnum(raft.MessageKind.append_entries_result));
-    try testing.expectEqual(@as(u8, 3), @intFromEnum(raft.MessageKind.request_vote));
-    try testing.expectEqual(@as(u8, 4), @intFromEnum(raft.MessageKind.request_vote_result));
+    try testing.expectEqual(@as(u8, 1), @backingInt(raft.MessageKind.append_entries));
+    try testing.expectEqual(@as(u8, 2), @backingInt(raft.MessageKind.append_entries_result));
+    try testing.expectEqual(@as(u8, 3), @backingInt(raft.MessageKind.request_vote));
+    try testing.expectEqual(@as(u8, 4), @backingInt(raft.MessageKind.request_vote_result));
 }

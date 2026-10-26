@@ -87,9 +87,9 @@ test "Segment: different entry kinds" {
     const noop_entry = LogEntry.create(2, 0, .noop, "");
     const snapshot_entry = LogEntry.create(3, 0, .snapshot_marker, "snapshot");
 
-    try testing.expectEqual(@as(u8, 1), @intFromEnum(txn_entry.header.kind));
-    try testing.expectEqual(@as(u8, 4), @intFromEnum(noop_entry.header.kind));
-    try testing.expectEqual(@as(u8, 5), @intFromEnum(snapshot_entry.header.kind));
+    try testing.expectEqual(@as(u8, 1), @backingInt(txn_entry.header.kind));
+    try testing.expectEqual(@as(u8, 4), @backingInt(noop_entry.header.kind));
+    try testing.expectEqual(@as(u8, 5), @backingInt(snapshot_entry.header.kind));
 }
 
 test "Segment: EntryKind fromByte" {
@@ -220,7 +220,7 @@ fn makeSegPath() ![]u8 {
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-    return std.fmt.allocPrint(testing.allocator, "/tmp/seg_test_{d}.seg", .{ns});
+    return testing.allocator.print("/tmp/seg_test_{d}.seg", .{ns});
 }
 
 fn removeFileSeg(path: []const u8) void {
@@ -358,4 +358,31 @@ test "Segment: recovery scan stops at corrupt header" {
     // Only the first entry should be recovered.
     try testing.expectEqual(@as(u32, 1), seg2.entry_count);
     try testing.expectEqual(@as(log.Seq, 1), seg2.last_seq);
+}
+
+test "Segment: verify_integrity checks header and payload CRCs before freeing payload" {
+    const path = try makeSegPath();
+    defer testing.allocator.free(path);
+    const path_for_cleanup = try std.heap.page_allocator.dupe(u8, path);
+    defer {
+        removeFileSeg(path_for_cleanup);
+        std.heap.page_allocator.free(path_for_cleanup);
+    }
+
+    const seg_path = try testing.allocator.dupe(u8, path);
+    var seg = try log.Segment.init(seg_path, 1, 1, 0, testing.allocator);
+    defer seg.deinit();
+
+    const entries = [_][]const u8{ "entry_one", "entry_two", "entry_three" };
+    for (entries, 0..) |payload, i| {
+        const e = LogEntry.create(@intCast(i + 1), 0, .txn_intent, payload);
+        try seg.append(e);
+    }
+
+    // Unsealed segment integrity check
+    try testing.expectEqual(@as(log.Seq, 3), try seg.verify_integrity(testing.allocator));
+
+    // Sealed segment integrity check
+    try seg.seal();
+    try testing.expectEqual(@as(log.Seq, 3), try seg.verify_integrity(testing.allocator));
 }

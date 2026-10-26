@@ -19,7 +19,7 @@ pub const ConfigChange = struct {
 
     pub fn serialize(self: ConfigChange) [9]u8 {
         var buf: [9]u8 = undefined;
-        buf[0] = @intFromEnum(self.op);
+        buf[0] = @backingInt(self.op);
         std.mem.writeInt(u64, buf[1..9], self.node_id, .little);
         return buf;
     }

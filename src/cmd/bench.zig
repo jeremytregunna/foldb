@@ -148,7 +148,7 @@ fn setWorkerFallible(args: *SetWorkerArgs) !void {
         const keys = try alloc.alloc([]u8, n);
         defer alloc.free(keys);
         for (0..n) |j| {
-            keys[j] = try std.fmt.allocPrint(alloc, "bench:{d}", .{i + j});
+            keys[j] = try alloc.print("bench:{d}", .{i + j});
             ops[j] = .{ .set = .{ .key = keys[j], .value = args.value } };
         }
         defer for (keys) |key| alloc.free(key);
@@ -204,7 +204,7 @@ fn nowNanos() u64 {
 }
 
 fn makeTempDir(alloc: std.mem.Allocator) ![]const u8 {
-    const path = try std.fmt.allocPrint(alloc, "/tmp/foldb_bench_{d}", .{nowNanos()});
+    const path = try alloc.print("/tmp/foldb_bench_{d}", .{nowNanos()});
     const z = try alloc.allocSentinel(u8, path.len, 0);
     defer alloc.free(z);
     @memcpy(z[0..path.len], path);
@@ -231,7 +231,7 @@ fn removeTree(path: []const u8) void {
             const dent: *const std.os.linux.dirent64 = @ptrCast(@alignCast(buf[i..].ptr));
             const entry_name = std.mem.span(@as([*:0]const u8, @ptrCast(&dent.name)));
             if (!std.mem.eql(u8, entry_name, ".") and !std.mem.eql(u8, entry_name, "..")) {
-                const child = std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ path, entry_name }) catch {
+                const child = std.heap.page_allocator.print("{s}/{s}", .{ path, entry_name }) catch {
                     i += dent.reclen;
                     continue;
                 };

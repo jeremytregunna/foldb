@@ -48,10 +48,7 @@ pub fn build(b: *std.Build) void {
     // Run the executable as a test step
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     const run_step = b.step("run", "Run the foldb application");
     run_step.dependOn(&run_cmd.step);
@@ -467,7 +464,7 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(bench_exe);
     const run_bench = b.addRunArtifact(bench_exe);
-    if (b.args) |bargs| run_bench.addArgs(bargs);
+    run_bench.addPassthruArgs();
     const bench_step = b.step("bench", "Run the in-process KV benchmark");
     bench_step.dependOn(&run_bench.step);
 
@@ -484,7 +481,7 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(bench_deser_exe);
     const run_bench_deser = b.addRunArtifact(bench_deser_exe);
-    if (b.args) |bargs| run_bench_deser.addArgs(bargs);
+    run_bench_deser.addPassthruArgs();
     const bench_deser_step = b.step("bench-deser", "Run the TxnIntent deserialize benchmark");
     bench_deser_step.dependOn(&run_bench_deser.step);
 
@@ -568,7 +565,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(repl_exe);
 
     const run_repl = b.addRunArtifact(repl_exe);
-    if (b.args) |bargs| run_repl.addArgs(bargs);
+    run_repl.addPassthruArgs();
     const repl_step = b.step("repl", "Run the interactive KV REPL");
     repl_step.dependOn(&run_repl.step);
 

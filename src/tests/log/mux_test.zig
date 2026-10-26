@@ -62,7 +62,7 @@ fn makeTempDir(suffix: []const u8) ![]const u8 {
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-    return std.fmt.allocPrint(testing.allocator, "/tmp/mux_test_{s}_{d}", .{ suffix, ns });
+    return testing.allocator.print("/tmp/mux_test_{s}_{d}", .{ suffix, ns });
 }
 
 /// Append a minimal txn_intent entry to a log at the next seq.
@@ -75,7 +75,10 @@ fn appendEntry(l: *Log, seq: Seq, payload: []const u8) !void {
 
 test "LogMux: single log passthrough" {
     const dir = try makeTempDir("single");
-    defer { removeDirFlat(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirFlat(dir);
+        testing.allocator.free(dir);
+    }
 
     var l = try Log.init(dir, 1, testing.allocator);
     defer l.deinit();
@@ -89,7 +92,10 @@ test "LogMux: single log passthrough" {
     defer mux.deinit();
 
     const entries = try mux.read(1, 10, testing.allocator);
-    defer { for (entries) |*e| e.deinit(testing.allocator); testing.allocator.free(entries); }
+    defer {
+        for (entries) |*e| e.deinit(testing.allocator);
+        testing.allocator.free(entries);
+    }
 
     try testing.expectEqual(@as(usize, 2), entries.len);
     try testing.expectEqual(@as(Seq, 1), entries[0].header.seq);
@@ -98,9 +104,15 @@ test "LogMux: single log passthrough" {
 
 test "LogMux: two logs interleaved seqs merge in order" {
     const dir0 = try makeTempDir("il0");
-    defer { removeDirFlat(dir0); testing.allocator.free(dir0); }
+    defer {
+        removeDirFlat(dir0);
+        testing.allocator.free(dir0);
+    }
     const dir1 = try makeTempDir("il1");
-    defer { removeDirFlat(dir1); testing.allocator.free(dir1); }
+    defer {
+        removeDirFlat(dir1);
+        testing.allocator.free(dir1);
+    }
 
     var l0 = try Log.init(dir0, 1, testing.allocator);
     defer l0.deinit();
@@ -123,7 +135,10 @@ test "LogMux: two logs interleaved seqs merge in order" {
     defer mux.deinit();
 
     const entries = try mux.read(1, 10, testing.allocator);
-    defer { for (entries) |*e| e.deinit(testing.allocator); testing.allocator.free(entries); }
+    defer {
+        for (entries) |*e| e.deinit(testing.allocator);
+        testing.allocator.free(entries);
+    }
 
     try testing.expectEqual(@as(usize, 6), entries.len);
     for (entries, 0..) |e, i| {
@@ -133,11 +148,20 @@ test "LogMux: two logs interleaved seqs merge in order" {
 
 test "LogMux: three logs one empty returns non-empty correctly" {
     const dir0 = try makeTempDir("te0");
-    defer { removeDirFlat(dir0); testing.allocator.free(dir0); }
+    defer {
+        removeDirFlat(dir0);
+        testing.allocator.free(dir0);
+    }
     const dir1 = try makeTempDir("te1");
-    defer { removeDirFlat(dir1); testing.allocator.free(dir1); }
+    defer {
+        removeDirFlat(dir1);
+        testing.allocator.free(dir1);
+    }
     const dir2 = try makeTempDir("te2");
-    defer { removeDirFlat(dir2); testing.allocator.free(dir2); }
+    defer {
+        removeDirFlat(dir2);
+        testing.allocator.free(dir2);
+    }
 
     var l0 = try Log.init(dir0, 1, testing.allocator);
     defer l0.deinit();
@@ -159,7 +183,10 @@ test "LogMux: three logs one empty returns non-empty correctly" {
     defer mux.deinit();
 
     const entries = try mux.read(1, 10, testing.allocator);
-    defer { for (entries) |*e| e.deinit(testing.allocator); testing.allocator.free(entries); }
+    defer {
+        for (entries) |*e| e.deinit(testing.allocator);
+        testing.allocator.free(entries);
+    }
 
     try testing.expectEqual(@as(usize, 3), entries.len);
     try testing.expectEqual(@as(Seq, 1), entries[0].header.seq);
@@ -169,9 +196,15 @@ test "LogMux: three logs one empty returns non-empty correctly" {
 
 test "LogMux: same seq in two logs is deduplicated" {
     const dir0 = try makeTempDir("dup0");
-    defer { removeDirFlat(dir0); testing.allocator.free(dir0); }
+    defer {
+        removeDirFlat(dir0);
+        testing.allocator.free(dir0);
+    }
     const dir1 = try makeTempDir("dup1");
-    defer { removeDirFlat(dir1); testing.allocator.free(dir1); }
+    defer {
+        removeDirFlat(dir1);
+        testing.allocator.free(dir1);
+    }
 
     var l0 = try Log.init(dir0, 1, testing.allocator);
     defer l0.deinit();
@@ -191,7 +224,10 @@ test "LogMux: same seq in two logs is deduplicated" {
     defer mux.deinit();
 
     const entries = try mux.read(1, 10, testing.allocator);
-    defer { for (entries) |*e| e.deinit(testing.allocator); testing.allocator.free(entries); }
+    defer {
+        for (entries) |*e| e.deinit(testing.allocator);
+        testing.allocator.free(entries);
+    }
 
     // seq 1 appears twice but must be returned once; seq 2 appears once
     try testing.expectEqual(@as(usize, 2), entries.len);
@@ -201,9 +237,15 @@ test "LogMux: same seq in two logs is deduplicated" {
 
 test "LogMux: read with max < total returns exactly max entries" {
     const dir0 = try makeTempDir("max0");
-    defer { removeDirFlat(dir0); testing.allocator.free(dir0); }
+    defer {
+        removeDirFlat(dir0);
+        testing.allocator.free(dir0);
+    }
     const dir1 = try makeTempDir("max1");
-    defer { removeDirFlat(dir1); testing.allocator.free(dir1); }
+    defer {
+        removeDirFlat(dir1);
+        testing.allocator.free(dir1);
+    }
 
     var l0 = try Log.init(dir0, 1, testing.allocator);
     defer l0.deinit();
@@ -223,7 +265,10 @@ test "LogMux: read with max < total returns exactly max entries" {
     defer mux.deinit();
 
     const entries = try mux.read(1, 2, testing.allocator);
-    defer { for (entries) |*e| e.deinit(testing.allocator); testing.allocator.free(entries); }
+    defer {
+        for (entries) |*e| e.deinit(testing.allocator);
+        testing.allocator.free(entries);
+    }
 
     try testing.expectEqual(@as(usize, 2), entries.len);
     try testing.expectEqual(@as(Seq, 1), entries[0].header.seq);
@@ -232,7 +277,10 @@ test "LogMux: read with max < total returns exactly max entries" {
 
 test "LogMux: from filter excludes earlier seqs" {
     const dir = try makeTempDir("from");
-    defer { removeDirFlat(dir); testing.allocator.free(dir); }
+    defer {
+        removeDirFlat(dir);
+        testing.allocator.free(dir);
+    }
 
     var l = try Log.init(dir, 1, testing.allocator);
     defer l.deinit();
@@ -248,7 +296,10 @@ test "LogMux: from filter excludes earlier seqs" {
     defer mux.deinit();
 
     const entries = try mux.read(2, 10, testing.allocator);
-    defer { for (entries) |*e| e.deinit(testing.allocator); testing.allocator.free(entries); }
+    defer {
+        for (entries) |*e| e.deinit(testing.allocator);
+        testing.allocator.free(entries);
+    }
 
     try testing.expectEqual(@as(usize, 2), entries.len);
     try testing.expectEqual(@as(Seq, 2), entries[0].header.seq);

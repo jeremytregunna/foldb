@@ -12,7 +12,7 @@ This is a benevolent dictatorship. Final decisions rest with the maintainer. Tha
 
 ## Getting Started
 
-Requires Zig 0.16.0.
+Requires Zig 0.17.0.
 
 ```bash
 zig build                          # build

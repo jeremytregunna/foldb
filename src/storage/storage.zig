@@ -250,7 +250,7 @@ pub const Storage = struct {
 
     pub fn registerNamespace(self: *Storage, namespace_id: NamespaceId) !void {
         if (self.namespaces.contains(namespace_id)) return;
-        const namespace_dir = try std.fmt.allocPrint(self.alloc, "{s}/n{d}", .{ self.dir, namespace_id });
+        const namespace_dir = try self.alloc.print("{s}/n{d}", .{ self.dir, namespace_id });
         defer self.alloc.free(namespace_dir);
         var lsm = try lsm_mod.LSM.init(namespace_dir, self.alloc);
         lsm.fault_hook = self.fault_hook;

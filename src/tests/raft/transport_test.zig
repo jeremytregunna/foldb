@@ -51,7 +51,7 @@ test "TcpTransport: loopback send/receive" {
     try a.listen(0);
     const port_b = try b.boundPort();
 
-    const addr_b = try std.fmt.allocPrint(alloc, "127.0.0.1:{d}", .{port_b});
+    const addr_b = try alloc.print("127.0.0.1:{d}", .{port_b});
     defer alloc.free(addr_b);
     try a.addPeer(2, addr_b);
 
@@ -90,7 +90,7 @@ test "TcpTransport: drainInbox moves messages to caller" {
     try sender.listen(0);
     const port_r = try receiver.boundPort();
 
-    const addr_r = try std.fmt.allocPrint(alloc, "127.0.0.1:{d}", .{port_r});
+    const addr_r = try alloc.print("127.0.0.1:{d}", .{port_r});
     defer alloc.free(addr_r);
     try sender.addPeer(20, addr_r);
 
@@ -134,7 +134,7 @@ test "TcpTransport: N messages on one persistent connection, all received" {
     try b.listen(0);
     try a.listen(0);
     const port_b = try b.boundPort();
-    const addr_b = try std.fmt.allocPrint(alloc, "127.0.0.1:{d}", .{port_b});
+    const addr_b = try alloc.print("127.0.0.1:{d}", .{port_b});
     defer alloc.free(addr_b);
     try a.addPeer(2, addr_b);
 
@@ -178,7 +178,7 @@ test "TcpTransport: sender reconnects after connection forced closed" {
     try b.listen(0);
     try a.listen(0);
     const port_b = try b.boundPort();
-    const addr_b = try std.fmt.allocPrint(alloc, "127.0.0.1:{d}", .{port_b});
+    const addr_b = try alloc.print("127.0.0.1:{d}", .{port_b});
     defer alloc.free(addr_b);
     try a.addPeer(2, addr_b);
 
@@ -225,9 +225,9 @@ test "TcpTransport: bidirectional persistent connections" {
     const port_a = try a.boundPort();
     const port_b = try b.boundPort();
 
-    const addr_a = try std.fmt.allocPrint(alloc, "127.0.0.1:{d}", .{port_a});
+    const addr_a = try alloc.print("127.0.0.1:{d}", .{port_a});
     defer alloc.free(addr_a);
-    const addr_b = try std.fmt.allocPrint(alloc, "127.0.0.1:{d}", .{port_b});
+    const addr_b = try alloc.print("127.0.0.1:{d}", .{port_b});
     defer alloc.free(addr_b);
 
     try a.addPeer(2, addr_b);

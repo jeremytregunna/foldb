@@ -202,7 +202,7 @@ fn cmdAddUser(alloc: std.mem.Allocator, it: *std.process.Args.Iterator) !void {
     // Derive token: HMAC-SHA256(key=auth_secret, msg=name + ":" + password)
     const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
     var mac: [HmacSha256.mac_length]u8 = undefined;
-    const hmac_input = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ user_name, user_pw });
+    const hmac_input = try alloc.print("{s}:{s}", .{ user_name, user_pw });
     defer alloc.free(hmac_input);
     HmacSha256.create(&mac, hmac_input, pc.value.auth_secret);
 

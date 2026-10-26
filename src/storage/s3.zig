@@ -66,7 +66,7 @@ pub const S3ObjectStore = struct {
         const auth = try buildAuth(a, self.config, "PUT", sign_uri, host, "", &ts_buf, &date_buf, &body_hash);
         defer a.free(auth);
 
-        const req = try std.fmt.allocPrint(a, "PUT {s} HTTP/1.1\r\nHost: {s}\r\nContent-Length: {d}\r\nContent-Type: application/octet-stream\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ uri, host, data.len, &body_hash, &ts_buf, auth });
+        const req = try a.print("PUT {s} HTTP/1.1\r\nHost: {s}\r\nContent-Length: {d}\r\nContent-Type: application/octet-stream\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ uri, host, data.len, &body_hash, &ts_buf, auth });
         defer a.free(req);
 
         const fd = try connect(self.config.endpoint_host, self.config.endpoint_port, self.config.io);
@@ -99,7 +99,7 @@ pub const S3ObjectStore = struct {
         const auth = try buildAuth(a, self.config, "GET", sign_uri, host, "", &ts_buf, &date_buf, empty_hash[0..64]);
         defer a.free(auth);
 
-        const req = try std.fmt.allocPrint(a, "GET {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ uri, host, empty_hash, &ts_buf, auth });
+        const req = try a.print("GET {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ uri, host, empty_hash, &ts_buf, auth });
         defer a.free(req);
 
         const fd = try connect(self.config.endpoint_host, self.config.endpoint_port, self.config.io);
@@ -135,7 +135,7 @@ pub const S3ObjectStore = struct {
         const auth = try buildAuth(a, self.config, "DELETE", sign_uri, host, "", &ts_buf, &date_buf, empty_hash[0..64]);
         defer a.free(auth);
 
-        const req = try std.fmt.allocPrint(a, "DELETE {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ uri, host, empty_hash, &ts_buf, auth });
+        const req = try a.print("DELETE {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ uri, host, empty_hash, &ts_buf, auth });
         defer a.free(req);
 
         const fd = try connect(self.config.endpoint_host, self.config.endpoint_port, self.config.io);
@@ -167,7 +167,7 @@ pub const S3ObjectStore = struct {
         const auth = try buildAuth(a, self.config, "HEAD", sign_uri, host, "", &ts_buf, &date_buf, empty_hash[0..64]);
         defer a.free(auth);
 
-        const req = try std.fmt.allocPrint(a, "HEAD {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ uri, host, empty_hash, &ts_buf, auth });
+        const req = try a.print("HEAD {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ uri, host, empty_hash, &ts_buf, auth });
         defer a.free(req);
 
         const fd = try connect(self.config.endpoint_host, self.config.endpoint_port, self.config.io);
@@ -193,14 +193,14 @@ pub const S3ObjectStore = struct {
         // Prefix value must be percent-encoded per AWS Signature V4.
         const encoded_prefix = try uriEncodeValue(a, prefix);
         defer a.free(encoded_prefix);
-        const query = try std.fmt.allocPrint(a, "list-type=2&prefix={s}", .{encoded_prefix});
+        const query = try a.print("list-type=2&prefix={s}", .{encoded_prefix});
         defer a.free(query);
 
         // Full request URI includes query; signing URI is path only.
         const sign_uri = try buildSignUri(a, &self.config, "");
         defer a.free(sign_uri);
         // sign_uri for list: path style = "/{bucket}", vhosted = "/"
-        const list_uri = try std.fmt.allocPrint(a, "{s}?{s}", .{ sign_uri, query });
+        const list_uri = try a.print("{s}?{s}", .{ sign_uri, query });
         defer a.free(list_uri);
 
         const host = try buildHost(a, &self.config);
@@ -209,7 +209,7 @@ pub const S3ObjectStore = struct {
         const auth = try buildAuth(a, self.config, "GET", sign_uri, host, query, &ts_buf, &date_buf, empty_hash[0..64]);
         defer a.free(auth);
 
-        const req = try std.fmt.allocPrint(a, "GET {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ list_uri, host, empty_hash, &ts_buf, auth });
+        const req = try a.print("GET {s} HTTP/1.1\r\nHost: {s}\r\nx-amz-content-sha256: {s}\r\nx-amz-date: {s}\r\nAuthorization: {s}\r\nConnection: close\r\n\r\n", .{ list_uri, host, empty_hash, &ts_buf, auth });
         defer a.free(req);
 
         const fd = try connect(self.config.endpoint_host, self.config.endpoint_port, self.config.io);
@@ -298,11 +298,11 @@ fn buildHost(alloc: std.mem.Allocator, cfg: *const S3Config) ![]u8 {
         .path => if (omit_port)
             alloc.dupe(u8, cfg.endpoint_host)
         else
-            std.fmt.allocPrint(alloc, "{s}:{d}", .{ cfg.endpoint_host, cfg.endpoint_port }),
+            alloc.print("{s}:{d}", .{ cfg.endpoint_host, cfg.endpoint_port }),
         .virtual_hosted => if (omit_port)
-            std.fmt.allocPrint(alloc, "{s}.{s}", .{ cfg.bucket, cfg.endpoint_host })
+            alloc.print("{s}.{s}", .{ cfg.bucket, cfg.endpoint_host })
         else
-            std.fmt.allocPrint(alloc, "{s}.{s}:{d}", .{ cfg.bucket, cfg.endpoint_host, cfg.endpoint_port }),
+            alloc.print("{s}.{s}:{d}", .{ cfg.bucket, cfg.endpoint_host, cfg.endpoint_port }),
     };
 }
 
@@ -312,11 +312,11 @@ fn buildHost(alloc: std.mem.Allocator, cfg: *const S3Config) ![]u8 {
 fn buildUri(alloc: std.mem.Allocator, cfg: *const S3Config, key: []const u8) ![]u8 {
     return switch (cfg.bucket_style) {
         .path => if (key.len > 0)
-            std.fmt.allocPrint(alloc, "/{s}/{s}", .{ cfg.bucket, key })
+            alloc.print("/{s}/{s}", .{ cfg.bucket, key })
         else
-            std.fmt.allocPrint(alloc, "/{s}", .{cfg.bucket}),
+            alloc.print("/{s}", .{cfg.bucket}),
         .virtual_hosted => if (key.len > 0)
-            std.fmt.allocPrint(alloc, "/{s}", .{key})
+            alloc.print("/{s}", .{key})
         else
             alloc.dupe(u8, "/"),
     };
@@ -660,24 +660,24 @@ fn buildAuth(
     body_hash: []const u8,
 ) ![]u8 {
     // Canonical headers (sorted)
-    const canonical_headers = try std.fmt.allocPrint(alloc, "host:{s}\nx-amz-content-sha256:{s}\nx-amz-date:{s}\n", .{ host, body_hash, timestamp });
+    const canonical_headers = try alloc.print("host:{s}\nx-amz-content-sha256:{s}\nx-amz-date:{s}\n", .{ host, body_hash, timestamp });
     defer alloc.free(canonical_headers);
 
     const signed_headers = "host;x-amz-content-sha256;x-amz-date";
 
     // Canonical request — query string on its own line between URI and headers.
-    const canonical_request = try std.fmt.allocPrint(alloc, "{s}\n{s}\n{s}\n{s}\n{s}\n{s}", .{ method, path, query_string, canonical_headers, signed_headers, body_hash });
+    const canonical_request = try alloc.print("{s}\n{s}\n{s}\n{s}\n{s}\n{s}", .{ method, path, query_string, canonical_headers, signed_headers, body_hash });
     defer alloc.free(canonical_request);
 
     var cr_hash: [64]u8 = undefined;
     sha256hex(canonical_request, &cr_hash);
 
     // Credential scope
-    const scope = try std.fmt.allocPrint(alloc, "{s}/{s}/s3/aws4_request", .{ date, config.region });
+    const scope = try alloc.print("{s}/{s}/s3/aws4_request", .{ date, config.region });
     defer alloc.free(scope);
 
     // String to sign
-    const string_to_sign = try std.fmt.allocPrint(alloc, "AWS4-HMAC-SHA256\n{s}\n{s}\n{s}", .{ timestamp, scope, &cr_hash });
+    const string_to_sign = try alloc.print("AWS4-HMAC-SHA256\n{s}\n{s}\n{s}", .{ timestamp, scope, &cr_hash });
     defer alloc.free(string_to_sign);
 
     // Signing key
@@ -686,7 +686,7 @@ fn buildAuth(
     var k_service: [32]u8 = undefined;
     var k_signing: [32]u8 = undefined;
 
-    const key_prefix = try std.fmt.allocPrint(alloc, "AWS4{s}", .{config.secret_key});
+    const key_prefix = try alloc.print("AWS4{s}", .{config.secret_key});
     defer alloc.free(key_prefix);
 
     hmacSha256(key_prefix, date, &k_date);
@@ -701,8 +701,8 @@ fn buildAuth(
     const sig_hex_arr = std.fmt.bytesToHex(signature_raw, .lower);
     @memcpy(&sig_hex, &sig_hex_arr);
 
-    const credential = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ config.access_key, scope });
+    const credential = try alloc.print("{s}/{s}", .{ config.access_key, scope });
     defer alloc.free(credential);
 
-    return std.fmt.allocPrint(alloc, "AWS4-HMAC-SHA256 Credential={s}, SignedHeaders={s}, Signature={s}", .{ credential, signed_headers, &sig_hex });
+    return alloc.print("AWS4-HMAC-SHA256 Credential={s}, SignedHeaders={s}, Signature={s}", .{ credential, signed_headers, &sig_hex });
 }

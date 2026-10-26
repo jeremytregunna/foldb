@@ -136,9 +136,9 @@ pub const Sequencer = struct {
         _ = std.os.linux.mkdir(base_pathz.ptr, 0o755);
 
         // Allocate persistent paths using the caller's allocator for consistency.
-        const raft_path = try std.fmt.allocPrint(alloc, "{s}/seq_raft", .{base_path});
+        const raft_path = try alloc.print("{s}/seq_raft", .{base_path});
         errdefer alloc.free(raft_path);
-        const last_applied_path = try std.fmt.allocPrint(alloc, "{s}/last_applied.bin", .{base_path});
+        const last_applied_path = try alloc.print("{s}/last_applied.bin", .{base_path});
         errdefer alloc.free(last_applied_path);
 
         const seq_partition_id: PartitionId = std.math.maxInt(PartitionId);
@@ -737,7 +737,7 @@ fn createPartitionLogs(base_path: []const u8, node_id: NodeId, count: u32, alloc
     errdefer for (logs[0..initialized]) |*pl| pl.deinit();
 
     for (0..count) |i| {
-        const part_path = try std.fmt.allocPrint(alloc, "{s}/log_p{d}", .{ base_path, i });
+        const part_path = try alloc.print("{s}/log_p{d}", .{ base_path, i });
         defer alloc.free(part_path);
         logs[i] = try Log.init_partitioned(part_path, node_id, @intCast(i), alloc);
         initialized += 1;

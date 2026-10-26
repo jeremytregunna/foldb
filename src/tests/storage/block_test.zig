@@ -22,7 +22,7 @@ fn writeBlock(alloc: std.mem.Allocator, rows: []const Row) ![]u8 {
 
 test "block: single row round-trip" {
     const alloc = testing.allocator;
-    const data = try writeBlock(alloc, &.{ .{ .key = "hello", .seq = 42, .value = "world" } });
+    const data = try writeBlock(alloc, &.{.{ .key = "hello", .seq = 42, .value = "world" }});
     defer alloc.free(data);
     const reader = try storage.BlockReader.init(data);
     try testing.expectEqual(@as(u32, 1), reader.row_count);
@@ -39,7 +39,7 @@ test "block: single row round-trip" {
 
 test "block: multiple rows round-trip" {
     const alloc = testing.allocator;
-    const rows = [_]Row {
+    const rows = [_]Row{
         .{ .key = "a", .seq = 1, .value = "1" },
         .{ .key = "b", .seq = 2, .value = "2" },
         .{ .key = "c", .seq = 3, .value = "3" },
@@ -177,7 +177,7 @@ test "block: isFull after many rows" {
 
 test "block: CRC mismatch" {
     const alloc = testing.allocator;
-    const data = try writeBlock(alloc, &.{ .{ .key = "key", .seq = 1, .value = "value" } });
+    const data = try writeBlock(alloc, &.{.{ .key = "key", .seq = 1, .value = "value" }});
     defer alloc.free(data);
     var corrupted = try alloc.dupe(u8, data);
     defer alloc.free(corrupted);
@@ -201,7 +201,7 @@ test "block: block too small" {
 
 test "block: out-of-bounds" {
     const alloc = testing.allocator;
-    const data = try writeBlock(alloc, &.{ .{ .key = "only", .seq = 1, .value = "row" } });
+    const data = try writeBlock(alloc, &.{.{ .key = "only", .seq = 1, .value = "row" }});
     defer alloc.free(data);
     const reader = try storage.BlockReader.init(data);
     try testing.expectError(error.OutOfBounds, reader.readKey(1));

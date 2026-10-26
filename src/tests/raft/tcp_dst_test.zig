@@ -84,7 +84,7 @@ test "TcpTransport DST: no fault hook — all messages delivered" {
     try b.listen(0);
     try a.listen(0);
     const port_b = try b.boundPort();
-    const addr_b = try std.fmt.allocPrint(alloc, "127.0.0.1:{d}", .{port_b});
+    const addr_b = try alloc.print("127.0.0.1:{d}", .{port_b});
     defer alloc.free(addr_b);
     try a.addPeer(2, addr_b);
 
@@ -105,7 +105,7 @@ test "TcpTransport DST: fault hook drops all — no messages delivered" {
     try b.listen(0);
     try a.listen(0);
     const port_b = try b.boundPort();
-    const addr_b = try std.fmt.allocPrint(alloc, "127.0.0.1:{d}", .{port_b});
+    const addr_b = try alloc.print("127.0.0.1:{d}", .{port_b});
     defer alloc.free(addr_b);
     try a.addPeer(2, addr_b);
 
@@ -136,7 +136,7 @@ test "TcpTransport DST: partial fault — received count is deterministic per se
         try b.listen(0);
         try a.listen(0);
         const port_b = try b.boundPort();
-        const addr_b = try std.fmt.allocPrint(alloc, "127.0.0.1:{d}", .{port_b});
+        const addr_b = try alloc.print("127.0.0.1:{d}", .{port_b});
         defer alloc.free(addr_b);
         try a.addPeer(2, addr_b);
 
@@ -173,7 +173,7 @@ test "TcpTransport DST: different seeds yield different drop patterns" {
         try b.listen(0);
         try a.listen(0);
         const port_b = try b.boundPort();
-        const addr_b = try std.fmt.allocPrint(alloc, "127.0.0.1:{d}", .{port_b});
+        const addr_b = try alloc.print("127.0.0.1:{d}", .{port_b});
         defer alloc.free(addr_b);
         try a.addPeer(2, addr_b);
 
@@ -209,7 +209,7 @@ test "TcpTransport DST: all message kinds survive fault-free round-trip" {
     try b.listen(0);
     try a.listen(0);
     const port_b = try b.boundPort();
-    const addr_b = try std.fmt.allocPrint(alloc, "127.0.0.1:{d}", .{port_b});
+    const addr_b = try alloc.print("127.0.0.1:{d}", .{port_b});
     defer alloc.free(addr_b);
     try a.addPeer(20, addr_b);
 
@@ -261,7 +261,7 @@ test "TcpTransport DST: seed sweep — safety holds across 16 seeds" {
         try b.listen(0);
         try a.listen(0);
         const port_b = try b.boundPort();
-        const addr_b = try std.fmt.allocPrint(alloc, "127.0.0.1:{d}", .{port_b});
+        const addr_b = try alloc.print("127.0.0.1:{d}", .{port_b});
         defer alloc.free(addr_b);
         try a.addPeer(2, addr_b);
 

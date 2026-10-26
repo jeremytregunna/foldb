@@ -119,7 +119,7 @@ test "Tracer: record and snapshot latest-first" {
 // ---------------------------------------------------------------------------
 
 test "TxnSummary: round-trip via debug" {
-    var payload = [_]u8{0} ** 64;
+    var payload: [64]u8 = @splat(0);
     std.mem.writeInt(u64, payload[32..40], 55, .little); // client_id
     std.mem.writeInt(u64, payload[40..48], 77, .little); // client_seq
     std.mem.writeInt(u32, payload[56..60], 32, .little); // params_len
@@ -129,7 +129,6 @@ test "TxnSummary: round-trip via debug" {
     // Test the whole SeqDescription path using the LogReader interface.
     _ = obs.EntryKindTag.txn_intent;
     _ = obs.TxnSummary{
-        
         .client_id = 1,
         .client_seq = 1,
         .read_partition_count = 0,

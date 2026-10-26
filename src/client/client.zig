@@ -117,7 +117,7 @@ pub const Client = struct {
 
     fn read_frame(self: *Client) !Frame {
         const header = try frame.readHeader(&self.reader.interface);
-        const kind: frame.Kind = @enumFromInt(header.kind);
+        const kind: frame.Kind = @fromBackingInt(@intCast(header.kind));
         if (@as(frame.Flags, @bitCast(header.flags)).trace) {
             _ = try frame.readTraceExt(&self.reader.interface);
         }
@@ -293,9 +293,11 @@ pub const Client = struct {
     pub fn ping(self: *Client) !u64 {
         var payload: std.ArrayListUnmanaged(u8) = .empty;
         defer payload.deinit(self.alloc);
-        try messages.encodePing(&payload, self.alloc, .{
-            .client_wall_micros = blk: { var tv: std.os.linux.timeval = undefined; _ = std.os.linux.gettimeofday(&tv, null); break :blk @as(u64, @intCast(tv.sec)) * 1000000 + @as(u64, @intCast(tv.usec)); }
-        });
+        try messages.encodePing(&payload, self.alloc, .{ .client_wall_micros = blk: {
+            var tv: std.os.linux.timeval = undefined;
+            _ = std.os.linux.gettimeofday(&tv, null);
+            break :blk @as(u64, @intCast(tv.sec)) * 1000000 + @as(u64, @intCast(tv.usec));
+        } });
         try frame.sendFrameList(&self.writer.interface, 0, .ping, frame.Flags.final_only, null, payload);
 
         for (0..frames_per_response_max) |_| {
@@ -303,7 +305,11 @@ pub const Client = struct {
             defer self.alloc.free(f.payload);
             switch (f.kind) {
                 .pong => {
-                    const now_micros: u64 = blk: { var tv: std.os.linux.timeval = undefined; _ = std.os.linux.gettimeofday(&tv, null); break :blk @as(u64, @intCast(tv.sec)) * 1000000 + @as(u64, @intCast(tv.usec)); };
+                    const now_micros: u64 = blk: {
+                        var tv: std.os.linux.timeval = undefined;
+                        _ = std.os.linux.gettimeofday(&tv, null);
+                        break :blk @as(u64, @intCast(tv.sec)) * 1000000 + @as(u64, @intCast(tv.usec));
+                    };
                     var cursor = codec.Cursor{ .data = f.payload };
                     const pong = try messages.decodePong(&cursor);
                     return now_micros - pong.client_wall_micros;

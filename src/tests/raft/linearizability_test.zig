@@ -32,7 +32,7 @@ fn makeTempDir(prefix: []const u8) ![]const u8 {
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
-    return std.fmt.allocPrint(testing.allocator, "/tmp/{s}_{d}", .{ prefix, ns });
+    return testing.allocator.print("/tmp/{s}_{d}", .{ prefix, ns });
 }
 
 fn removeDirRecursive(path: []const u8) void {
@@ -133,7 +133,7 @@ test "Linearizability: sequential appends produce dense gap-free seqs" {
     // SAFETY: all N elements of seqs are written by the for loop before seqs is read.
     var seqs: [N]u64 = undefined;
     for (0..N) |i| {
-        const payload = try std.fmt.allocPrint(testing.allocator, "entry_{d}", .{i});
+        const payload = try testing.allocator.print("entry_{d}", .{i});
         defer testing.allocator.free(payload);
         seqs[i] = try cluster.propose(payload, 200);
     }
@@ -165,7 +165,7 @@ test "Linearizability: interleaved proposes and steps produce consistent log" {
     defer committed_seqs.deinit(testing.allocator);
 
     for (0..N) |i| {
-        const payload = try std.fmt.allocPrint(testing.allocator, "concurrent_{d}", .{i});
+        const payload = try testing.allocator.print("concurrent_{d}", .{i});
         defer testing.allocator.free(payload);
         const seq = try cluster.propose(payload, 100);
         try committed_seqs.append(testing.allocator, seq);
@@ -296,7 +296,7 @@ test "Linearizability: multiple seeds produce valid independent histories" {
     };
 
     for (seeds, 0..) |seed_set, si| {
-        const prefix = try std.fmt.allocPrint(testing.allocator, "lin_seeds_{d}", .{si});
+        const prefix = try testing.allocator.print("lin_seeds_{d}", .{si});
         defer testing.allocator.free(prefix);
         const dir = try makeTempDir(prefix);
         defer {
@@ -316,7 +316,7 @@ test "Linearizability: multiple seeds produce valid independent histories" {
 
         var last_seq: u64 = 0;
         for (0..5) |i| {
-            const payload = try std.fmt.allocPrint(testing.allocator, "s{d}_e{d}", .{ si, i });
+            const payload = try testing.allocator.print("s{d}_e{d}", .{ si, i });
             defer testing.allocator.free(payload);
             const seq = try cluster.propose(payload, 200);
             // Each seq must be strictly greater than the previous.

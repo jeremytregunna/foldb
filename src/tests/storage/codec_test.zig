@@ -5,13 +5,16 @@ const storage = @import("storage.zig");
 
 test "codec: encode then decode single value" {
     const alloc = testing.allocator;
-    const values = [_][]const u8{ "hello" };
+    const values = [_][]const u8{"hello"};
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(alloc);
     try storage.encodeCol(&values, &buf, alloc);
 
     const decoded = try storage.decodeCol(buf.items, 1, alloc);
-    defer { for (decoded) |v| alloc.free(v); alloc.free(decoded); }
+    defer {
+        for (decoded) |v| alloc.free(v);
+        alloc.free(decoded);
+    }
     try testing.expect(decoded.len == 1);
     try testing.expectEqualSlices(u8, "hello", decoded[0]);
 }
@@ -24,7 +27,10 @@ test "codec: encode then decode multiple values" {
     try storage.encodeCol(&values, &buf, alloc);
 
     const decoded = try storage.decodeCol(buf.items, 3, alloc);
-    defer { for (decoded) |v| alloc.free(v); alloc.free(decoded); }
+    defer {
+        for (decoded) |v| alloc.free(v);
+        alloc.free(decoded);
+    }
     try testing.expect(decoded.len == 3);
     try testing.expectEqualSlices(u8, "alpha", decoded[0]);
     try testing.expectEqualSlices(u8, "beta", decoded[1]);
@@ -39,7 +45,10 @@ test "codec: encode empty value" {
     try storage.encodeCol(&values, &buf, alloc);
 
     const decoded = try storage.decodeCol(buf.items, 3, alloc);
-    defer { for (decoded) |v| alloc.free(v); alloc.free(decoded); }
+    defer {
+        for (decoded) |v| alloc.free(v);
+        alloc.free(decoded);
+    }
     try testing.expect(decoded.len == 3);
     try testing.expect(decoded[0].len == 0);
     try testing.expectEqualSlices(u8, "x", decoded[1]);
@@ -51,13 +60,16 @@ test "codec: encode large value" {
     const large = try alloc.alloc(u8, 10_000);
     defer alloc.free(large);
     @memset(large, 0xAB);
-    const values = [_][]const u8{ large };
+    const values = [_][]const u8{large};
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(alloc);
     try storage.encodeCol(&values, &buf, alloc);
 
     const decoded = try storage.decodeCol(buf.items, 1, alloc);
-    defer { for (decoded) |v| alloc.free(v); alloc.free(decoded); }
+    defer {
+        for (decoded) |v| alloc.free(v);
+        alloc.free(decoded);
+    }
     try testing.expectEqualSlices(u8, large, decoded[0]);
     try testing.expectEqualSlices(u8, large, decoded[0]);
 }
@@ -65,7 +77,10 @@ test "codec: encode large value" {
 test "codec: decode zero rows" {
     const alloc = testing.allocator;
     const decoded = try storage.decodeCol(&.{}, 0, alloc);
-    defer { for (decoded) |v| alloc.free(v); alloc.free(decoded); }
+    defer {
+        for (decoded) |v| alloc.free(v);
+        alloc.free(decoded);
+    }
     try testing.expect(decoded.len == 0);
 }
 
@@ -86,7 +101,10 @@ test "codec: decode too few rows requested" {
     try storage.encodeCol(&values, &buf, alloc);
 
     const decoded = try storage.decodeCol(buf.items, 2, alloc);
-    defer { for (decoded) |v| alloc.free(v); alloc.free(decoded); }
+    defer {
+        for (decoded) |v| alloc.free(v);
+        alloc.free(decoded);
+    }
     try testing.expect(decoded.len == 2);
     try testing.expectEqualSlices(u8, "a", decoded[0]);
     try testing.expectEqualSlices(u8, "b", decoded[1]);
@@ -95,12 +113,15 @@ test "codec: decode too few rows requested" {
 test "codec: binary data with nulls" {
     const alloc = testing.allocator;
     const binary = [_]u8{ 0x00, 0xFF, 0x00, 0xFF, 0x01, 0xFE };
-    const values = [_][]const u8{ &binary };
+    const values = [_][]const u8{&binary};
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(alloc);
     try storage.encodeCol(&values, &buf, alloc);
 
     const decoded = try storage.decodeCol(buf.items, 1, alloc);
-    defer { for (decoded) |v| alloc.free(v); alloc.free(decoded); }
+    defer {
+        for (decoded) |v| alloc.free(v);
+        alloc.free(decoded);
+    }
     try testing.expectEqualSlices(u8, &binary, decoded[0]);
 }

@@ -195,7 +195,7 @@ pub const TxnIntent = struct {
         alloc.free(self.write_set_hint);
     }
 
-    pub fn init_test(params: []const u8, client_id: u64, client_seq: u64) TxnIntent {
+    pub fn init_test(comptime params: []const u8, client_id: u64, client_seq: u64) TxnIntent {
         // Creates a single KvOp.set with key="test" and value=params
         // (for backward compatibility with log tests)
         return .{
@@ -242,7 +242,7 @@ pub const LogEntryHeader = struct {
     fn write_body(self: *const LogEntryHeader, buf: []u8) void {
         std.mem.writeInt(u64, buf[0..8], self.seq, .little);
         std.mem.writeInt(u64, buf[8..16], self.epoch, .little);
-        buf[16] = @intFromEnum(self.kind);
+        buf[16] = @backingInt(self.kind);
         std.mem.writeInt(u32, buf[17..21], self.payload_len, .little);
         std.mem.writeInt(u32, buf[21..25], self.payload_crc, .little);
     }

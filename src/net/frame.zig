@@ -118,7 +118,7 @@ pub fn sendFrame(
         .stream_id = stream_id,
         .payload_len = @intCast(payload.len),
         .version = PROTOCOL_VERSION,
-        .kind = @intFromEnum(kind),
+        .kind = @backingInt(kind),
         .flags = @bitCast(f),
     };
     try w.writeAll(std.mem.asBytes(&hdr));

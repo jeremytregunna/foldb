@@ -46,7 +46,7 @@ pub const FetchedRow = struct {
 pub const ExchangeResponse = struct {
     seq: Seq,
     from: PartitionId, // partition that fetched the rows
-    to: PartitionId,   // partition that requested them
+    to: PartitionId, // partition that requested them
     rows: []const FetchedRow, // slice into caller-owned memory
 };
 

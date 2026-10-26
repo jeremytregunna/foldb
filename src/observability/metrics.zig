@@ -99,7 +99,7 @@ comptime {
 }
 
 pub const Histogram = struct {
-    buckets: [BUCKET_COUNT]u64 = [_]u64{0} ** BUCKET_COUNT,
+    buckets: [BUCKET_COUNT]u64 = @splat(0),
     count: u64 = 0,
     sum_ns: u64 = 0,
     min_ns: u64 = std.math.maxInt(u64),

@@ -14,7 +14,7 @@ const KvOp = log_mod.KvOp;
 // ─── Temp dir helpers ─────────────────────────────────────────────────────────
 
 fn makeTempDir(alloc: std.mem.Allocator, suffix: u64) ![]const u8 {
-    const path = try std.fmt.allocPrint(alloc, "/tmp/log_replay_{d}", .{suffix});
+    const path = try alloc.print("/tmp/log_replay_{d}", .{suffix});
     const null_path = try alloc.allocSentinel(u8, path.len, 0);
     defer alloc.free(null_path);
     @memcpy(null_path[0..path.len], path);
@@ -40,7 +40,7 @@ fn removeDir(path: []const u8) void {
             const dent: *const std.os.linux.dirent64 = @ptrCast(@alignCast(buf[i..].ptr));
             const name = std.mem.span(@as([*:0]const u8, @ptrCast(&dent.name)));
             if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) {
-                const child = std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ path, name }) catch {
+                const child = std.heap.page_allocator.print("{s}/{s}", .{ path, name }) catch {
                     i += dent.reclen;
                     continue;
                 };
@@ -122,7 +122,7 @@ test "Log Replay: identical appends produce identical entry sequences" {
     const N: usize = 20;
     var i: usize = 0;
     while (i < N) : (i += 1) {
-        const params = try std.fmt.allocPrint(alloc, "key{d:03}:val{d}", .{ i % 10, i * 7 });
+        const params = try alloc.print("key{d:03}:val{d}", .{ i % 10, i * 7 });
         defer alloc.free(params);
         const seq_a = try appendTestIntent(&log_a, alloc, params, @intCast(i));
         const seq_b = try appendTestIntent(&log_b, alloc, params, @intCast(i));
@@ -165,7 +165,7 @@ test "Log Replay: multi-segment replay is deterministic" {
     const N: usize = 22;
     var i: usize = 0;
     while (i < N) : (i += 1) {
-        const params = try std.fmt.allocPrint(alloc, "row{d}", .{i});
+        const params = try alloc.print("row{d}", .{i});
         defer alloc.free(params);
         _ = try appendTestIntent(&log_a, alloc, params, @intCast(i % 7));
         _ = try appendTestIntent(&log_b, alloc, params, @intCast(i % 7));
@@ -204,7 +204,7 @@ test "Log Replay: close and reopen preserves sealed segment entries" {
 
     const N: usize = 9; // 3 sealed segments of 3 entries each
     for (0..N) |i| {
-        const p = try std.fmt.allocPrint(alloc, "persist_entry_{d}", .{i});
+        const p = try alloc.print("persist_entry_{d}", .{i});
         defer alloc.free(p);
         _ = try appendTestIntent(&log_a, alloc, p, @intCast(i));
     }
@@ -224,7 +224,7 @@ test "Log Replay: close and reopen preserves sealed segment entries" {
     try testing.expectEqual(@as(usize, N), entries.len);
     for (entries, 0..) |e, idx| {
         try testing.expectEqual(@as(u64, idx + 1), e.header.seq);
-        const expected = try std.fmt.allocPrint(alloc, "persist_entry_{d}", .{idx});
+        const expected = try alloc.print("persist_entry_{d}", .{idx});
         defer alloc.free(expected);
         const got_payload = e.payload[0..@min(e.payload.len, 25)];
         // Payload bytes start with the TxnIntent header; just verify the seq is correct.
@@ -264,7 +264,7 @@ test "Log Replay: read from mid-sequence returns consistent suffix" {
     const N: usize = 16;
     var i: usize = 0;
     while (i < N) : (i += 1) {
-        const params = try std.fmt.allocPrint(alloc, "entry{d:02}", .{i});
+        const params = try alloc.print("entry{d:02}", .{i});
         defer alloc.free(params);
         _ = try appendTestIntent(&log_a, alloc, params, @intCast(i));
         _ = try appendTestIntent(&log_b, alloc, params, @intCast(i));

@@ -5,19 +5,42 @@ on:
     branches: [main, master]
   pull_request:
 
+permissions:
+  contents: read
+  attestations: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Zig 0.16.0
-        uses: mlugg/setup-zig@v2
+      - name: Install Zig 0.17.0
+        uses: cataggar/ghr/actions/install@v0.9.1
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
-          version: 0.16.0
+          tools: |
+            cataggar/zig@v0.17.0 RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
 
-      - name: Build
-        run: zig build
+      - name: Verify Zig version
+        run: test "$(zig version)" = 0.17.0
 
-      - name: Test
-        run: zig build test
+      - name: Check formatting
+        run: zig fmt --check build.zig src
+
+      - name: Build (debug and safe)
+        run: |
+          zig build
+          zig build -Doptimize=safe
+
+      - name: Test (debug and safe)
+        run: |
+          zig build test
+          zig build test -Doptimize=safe
+
+      - name: Deterministic Simulation Tests (debug and safe)
+        run: |
+          zig build dst-test
+          zig build dst-test -Doptimize=safe
+

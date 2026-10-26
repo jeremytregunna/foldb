@@ -148,7 +148,7 @@ pub fn takeSnapshot(
     }
 
     for (metas) |*meta| {
-        const obj_key = try std.fmt.allocPrint(alloc, "snapshots/{d}/{d}/L{d}_{d}.sst", .{ partition_id, at_seq, meta.level, keys.items.len });
+        const obj_key = try alloc.print("snapshots/{d}/{d}/L{d}_{d}.sst", .{ partition_id, at_seq, meta.level, keys.items.len });
         errdefer alloc.free(obj_key);
 
         // Read file and upload
@@ -162,7 +162,7 @@ pub fn takeSnapshot(
         try keys.append(alloc, obj_key);
     }
 
-    const manifest_key = try std.fmt.allocPrint(alloc, "snapshots/{d}/{d}/manifest", .{ partition_id, at_seq });
+    const manifest_key = try alloc.print("snapshots/{d}/{d}/manifest", .{ partition_id, at_seq });
     errdefer alloc.free(manifest_key);
 
     var manifest = SnapshotManifest{
@@ -203,7 +203,7 @@ pub fn restoreFromSnapshot(
 
         // Derive local filename from object key
         const basename = std.fs.path.basename(obj_key);
-        const local_path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ lsm_dir, basename });
+        const local_path = try alloc.print("{s}/{s}", .{ lsm_dir, basename });
         defer alloc.free(local_path);
 
         try writeFile(local_path, file_data);

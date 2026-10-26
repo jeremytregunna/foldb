@@ -25,7 +25,7 @@ pub fn recoverLatest(
     executor: *Executor,
     alloc: std.mem.Allocator,
 ) !RecoveryResult {
-    const prefix = try std.fmt.allocPrint(alloc, "snapshots/{d}/", .{partition_id});
+    const prefix = try alloc.print("snapshots/{d}/", .{partition_id});
     defer alloc.free(prefix);
 
     const keys = store.list(prefix, alloc) catch |err| switch (err) {

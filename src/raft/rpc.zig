@@ -155,26 +155,26 @@ pub fn encodeMessage(from_id: NodeId, msg: Message, buf: *std.ArrayList(u8), all
     // kind + payload
     switch (msg) {
         .request_vote => |a| {
-            try buf.append(alloc, @intFromEnum(MessageKind.request_vote));
+            try buf.append(alloc, @backingInt(MessageKind.request_vote));
             var payload: [32]u8 = undefined;
             serializeRequestVoteArgs(a, &payload);
             try buf.appendSlice(alloc, &payload);
         },
         .request_vote_result => |r| {
-            try buf.append(alloc, @intFromEnum(MessageKind.request_vote_result));
+            try buf.append(alloc, @backingInt(MessageKind.request_vote_result));
             var payload: [9]u8 = undefined;
             serializeRequestVoteResult(r, &payload);
             try buf.appendSlice(alloc, &payload);
         },
         .append_entries_result => |r| {
-            try buf.append(alloc, @intFromEnum(MessageKind.append_entries_result));
+            try buf.append(alloc, @backingInt(MessageKind.append_entries_result));
             var payload: [17]u8 = undefined;
             serializeAppendEntriesResult(r, &payload);
             try buf.appendSlice(alloc, &payload);
         },
         .append_entries => |a| {
             assert(a.entries.len <= std.math.maxInt(u32));
-            try buf.append(alloc, @intFromEnum(MessageKind.append_entries));
+            try buf.append(alloc, @backingInt(MessageKind.append_entries));
             var hdr: [40]u8 = undefined;
             serializeAppendEntriesHeader(a, &hdr);
             try buf.appendSlice(alloc, &hdr);
@@ -210,19 +210,19 @@ pub fn decodeMessage(data: []const u8, alloc: std.mem.Allocator) !Envelope {
     const payload = data[9..];
 
     const msg: Message = switch (kind_byte) {
-        @intFromEnum(MessageKind.request_vote) => blk: {
+        @backingInt(MessageKind.request_vote) => blk: {
             if (payload.len < 32) return error.MessageTooShort;
             break :blk .{ .request_vote = deserializeRequestVoteArgs(payload[0..32]) };
         },
-        @intFromEnum(MessageKind.request_vote_result) => blk: {
+        @backingInt(MessageKind.request_vote_result) => blk: {
             if (payload.len < 9) return error.MessageTooShort;
             break :blk .{ .request_vote_result = deserializeRequestVoteResult(payload[0..9]) };
         },
-        @intFromEnum(MessageKind.append_entries_result) => blk: {
+        @backingInt(MessageKind.append_entries_result) => blk: {
             if (payload.len < 17) return error.MessageTooShort;
             break :blk .{ .append_entries_result = deserializeAppendEntriesResult(payload[0..17]) };
         },
-        @intFromEnum(MessageKind.append_entries) => blk: {
+        @backingInt(MessageKind.append_entries) => blk: {
             if (payload.len < 44) return error.MessageTooShort;
             var args = deserializeAppendEntriesHeader(payload[0..40]);
             const entry_count = std.mem.readInt(u32, payload[40..44], .little);

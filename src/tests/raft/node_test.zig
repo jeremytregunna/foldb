@@ -29,7 +29,7 @@ fn makeTempDir(prefix: []const u8) ![]const u8 {
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
-    return std.fmt.allocPrint(testing.allocator, "/tmp/{s}_{d}", .{ prefix, ns });
+    return testing.allocator.print("/tmp/{s}_{d}", .{ prefix, ns });
 }
 
 fn removeDirRecursive(path: []const u8) void {

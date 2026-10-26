@@ -55,7 +55,7 @@ fn removeDirRecursive(path: []const u8) void {
             const dent: *const std.os.linux.dirent64 = @ptrCast(@alignCast(buf[i..].ptr));
             const name = std.mem.span(@as([*:0]const u8, @ptrCast(&dent.name)));
             if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) {
-                const child = std.fmt.allocPrint(alloc, "{s}/{s}", .{ path, name }) catch {
+                const child = alloc.print("{s}/{s}", .{ path, name }) catch {
                     i += dent.reclen;
                     continue;
                 };
@@ -104,7 +104,7 @@ fn seedCount() usize {
 // ---------------------------------------------------------------------------
 
 fn scenarioBasic(alloc: std.mem.Allocator, master: u64) !void {
-    const dir = try std.fmt.allocPrint(alloc, "/tmp/raft_sweep_basic_{d}", .{master});
+    const dir = try alloc.print("/tmp/raft_sweep_basic_{d}", .{master});
     defer {
         removeDirRecursive(dir);
         alloc.free(dir);
@@ -116,7 +116,7 @@ fn scenarioBasic(alloc: std.mem.Allocator, master: u64) !void {
 
     _ = try waitForLeader(&cluster, 500);
     for (0..5) |i| {
-        const payload = try std.fmt.allocPrint(alloc, "b_{d}_{d}", .{ master, i });
+        const payload = try alloc.print("b_{d}_{d}", .{ master, i });
         defer alloc.free(payload);
         _ = try cluster.propose(payload, 400);
     }
@@ -124,7 +124,7 @@ fn scenarioBasic(alloc: std.mem.Allocator, master: u64) !void {
 }
 
 fn scenarioDrops(alloc: std.mem.Allocator, master: u64) !void {
-    const dir = try std.fmt.allocPrint(alloc, "/tmp/raft_sweep_drops_{d}", .{master});
+    const dir = try alloc.print("/tmp/raft_sweep_drops_{d}", .{master});
     defer {
         removeDirRecursive(dir);
         alloc.free(dir);
@@ -137,7 +137,7 @@ fn scenarioDrops(alloc: std.mem.Allocator, master: u64) !void {
 
     _ = try waitForLeader(&cluster, 800);
     for (0..5) |i| {
-        const payload = try std.fmt.allocPrint(alloc, "d_{d}_{d}", .{ master, i });
+        const payload = try alloc.print("d_{d}_{d}", .{ master, i });
         defer alloc.free(payload);
         _ = try cluster.propose(payload, 800);
     }
@@ -145,7 +145,7 @@ fn scenarioDrops(alloc: std.mem.Allocator, master: u64) !void {
 }
 
 fn scenarioPartition(alloc: std.mem.Allocator, master: u64) !void {
-    const dir = try std.fmt.allocPrint(alloc, "/tmp/raft_sweep_part_{d}", .{master});
+    const dir = try alloc.print("/tmp/raft_sweep_part_{d}", .{master});
     defer {
         removeDirRecursive(dir);
         alloc.free(dir);

@@ -55,7 +55,6 @@ pub const Level = struct {
 };
 
 pub const LSM = struct {
-
     dir: []const u8,
     memtable: Memtable,
     levels: [4]Level,
@@ -71,7 +70,6 @@ pub const LSM = struct {
         const dir_copy = try alloc.dupe(u8, dir);
         // NOTE: if BlockCache.init fails here, dir_copy leaks — pre-existing issue.
         var lsm = LSM{
-            
             .dir = dir_copy,
             .memtable = Memtable.init(alloc),
             .levels = .{ Level.init(), Level.init(), Level.init(), Level.init() },
@@ -194,7 +192,7 @@ pub const LSM = struct {
         for (filename) |*c| {
             if (c.* == '/') c.* = '_';
         }
-        const local_path = try std.fmt.allocPrint(self.alloc, "{s}/{s}", .{ cd, filename });
+        const local_path = try self.alloc.print("{s}/{s}", .{ cd, filename });
         errdefer self.alloc.free(local_path);
 
         // Check if already cached
@@ -482,7 +480,7 @@ pub const LSM = struct {
     /// with no remote key so future reads serve from disk until the next compaction.
     fn compactL2toL3Upload(self: *LSM, store: ObjectStore, path: []const u8, m: *SSTableMeta) !void {
         const file_id = self.next_file_id - 1;
-        const remote_key = try std.fmt.allocPrint(self.alloc, "sst/L3_{d:010}.sst", .{file_id});
+        const remote_key = try self.alloc.print("sst/L3_{d:010}.sst", .{file_id});
         errdefer self.alloc.free(remote_key);
 
         const file_data = try readFileAlloc(path, self.alloc);
@@ -564,7 +562,7 @@ pub const LSM = struct {
                 }
                 try result.append(alloc, .{
                     .path = path_copy,
-                                        .level = meta.level,
+                    .level = meta.level,
                     .seq_min = meta.seq_min,
                     .seq_max = meta.seq_max,
                     .key_min = key_min_copy,
@@ -606,7 +604,7 @@ pub const LSM = struct {
                 const level_u = std.fmt.parseUnsigned(u8, base[0..us], 10) catch continue;
                 const file_id = std.fmt.parseUnsigned(u64, base[us + 1 ..], 10) catch continue;
                 if (level_u >= lsm.levels.len) continue;
-                const file_path = std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name }) catch continue;
+                const file_path = alloc.print("{s}/{s}", .{ dir, name }) catch continue;
                 defer alloc.free(file_path);
                 var reader = SSTableReader.open(file_path, alloc) catch continue;
                 defer reader.deinit();
@@ -624,7 +622,7 @@ pub const LSM = struct {
     fn nextFilePath(self: *LSM, level: u32) ![]const u8 {
         const id = self.next_file_id;
         self.next_file_id += 1;
-        return std.fmt.allocPrint(self.alloc, "{s}/L{d}_{d:010}.sst", .{ self.dir, level, id });
+        return self.alloc.print("{s}/L{d}_{d:010}.sst", .{ self.dir, level, id });
     }
 };
 

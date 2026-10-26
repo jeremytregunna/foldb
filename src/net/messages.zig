@@ -74,7 +74,7 @@ pub const Auth = struct {
 };
 
 pub fn encodeAuth(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, a: Auth) !void {
-    try appendU8(out, alloc, @intFromEnum(a.method));
+    try appendU8(out, alloc, @backingInt(a.method));
     try appendU32Le(out, alloc, a.client_max_frame_size);
     switch (a.payload) {
         .none => {},
@@ -91,7 +91,7 @@ pub fn encodeAuth(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, a:
 
 pub fn decodeAuth(cur: *codec.Cursor, alloc: std.mem.Allocator) !Auth {
     const method_byte = try cur.readU8();
-    const method_raw: AuthMethod = @enumFromInt(method_byte);
+    const method_raw: AuthMethod = @fromBackingInt(@intCast(method_byte));
     const method = switch (method_raw) {
         .none, .token => method_raw,
         _ => return error.ProtocolError,
@@ -548,7 +548,7 @@ pub fn encodeCdcEffect(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocato
     assert(e.key.len <= std.math.maxInt(u32));
     try appendU32Le(out, alloc, @intCast(e.key.len));
     try out.appendSlice(alloc, e.key);
-    try appendU8(out, alloc, @intFromEnum(e.op));
+    try appendU8(out, alloc, @backingInt(e.op));
     if (e.before) |v| {
         assert(v.len <= std.math.maxInt(u32));
         try appendU8(out, alloc, 1);
@@ -570,7 +570,7 @@ pub fn encodeCdcEffect(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocato
 pub fn decodeCdcEffect(cur: *codec.Cursor, alloc: std.mem.Allocator) !WireCdcEffect {
     const key = try cur.readLenPrefixedAlloc(alloc);
     errdefer alloc.free(key);
-    const op: CdcOp = @enumFromInt(try cur.readU8());
+    const op: CdcOp = @fromBackingInt(@intCast(try cur.readU8()));
     const has_before = try cur.readU8();
     const before: ?[]const u8 = if (has_before != 0) try cur.readLenPrefixedAlloc(alloc) else null;
     errdefer if (before) |v| alloc.free(v);
@@ -682,8 +682,8 @@ pub fn encodeError(
 ) !void {
     assert(message.len <= std.math.maxInt(u32));
     assert(detail.len <= std.math.maxInt(u32));
-    try appendU16Le(out, alloc, @intFromEnum(code));
-    try appendU8(out, alloc, @intFromEnum(severity));
+    try appendU16Le(out, alloc, @backingInt(code));
+    try appendU8(out, alloc, @backingInt(severity));
     try appendU32Le(out, alloc, @intCast(message.len));
     try out.appendSlice(alloc, message);
     try appendU32Le(out, alloc, @intCast(detail.len));

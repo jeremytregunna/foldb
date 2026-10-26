@@ -124,7 +124,7 @@ test "lsm: natural string keys do not require insertion-order padding" {
 
     const keys = [_][]const u8{ "bench:1", "bench:10", "bench:100", "bench:2" };
     for (keys, 1..) |key, seq| {
-        const value = try std.fmt.allocPrint(alloc, "v{d}", .{seq});
+        const value = try alloc.print("v{d}", .{seq});
         defer alloc.free(value);
         try lsm.apply(&[_]Mutation{.{ .kind = .insert, .namespace_id = 1, .key = key, .value = value }}, @intCast(seq));
     }

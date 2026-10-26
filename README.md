@@ -8,7 +8,7 @@ A replicated, deterministic state machine key-value store written in Zig. The lo
 
 ## Requirements
 
-[Zig](https://ziglang.org/) 0.16.0
+[Zig](https://ziglang.org/) 0.17.0 (Linux 5.10+)
 
 ## Building
 

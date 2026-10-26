@@ -47,7 +47,7 @@ pub const SegmentHeader = extern struct {
             .magic = magic,
             .version = version,
             .part_id = 0,
-            .reserved = [_]u8{0} ** 24,
+            .reserved = @splat(0),
             .header_crc = 0,
         };
         seg_header.header_crc = compute_header_crc(&seg_header);
@@ -85,7 +85,7 @@ pub const SegmentFooter = struct {
             .entry_count = entry_count,
             .last_seq = last_seq,
             .index_offset = index_offset,
-            .reserved = [_]u8{0} ** 40,
+            .reserved = @splat(0),
             .footer_crc = 0,
         };
         var buf: [footer_size]u8 = undefined;
@@ -411,9 +411,8 @@ pub const Segment = struct {
             for (self.index.items) |index_entry| {
                 var offset: i64 = @intCast(index_entry.file_offset);
                 const entry_result = LogEntry.deserialize_pread(self.fd, &offset, alloc);
-                const entry = entry_result catch return index_entry.seq - 1;
-                var e = entry;
-                e.deinit(alloc);
+                var entry = entry_result catch return index_entry.seq - 1;
+                defer entry.deinit(alloc);
                 if (!entry.header.verify_header_crc()) return entry.header.seq - 1;
                 if (!entry.verify_crc()) return entry.header.seq - 1;
             }
@@ -425,9 +424,8 @@ pub const Segment = struct {
             var count: u32 = 0;
             while (count < self.entry_count) : (count += 1) {
                 const entry_result = LogEntry.deserialize_pread(self.fd, &offset, alloc);
-                const entry = entry_result catch break;
-                var e = entry;
-                e.deinit(alloc);
+                var entry = entry_result catch break;
+                defer entry.deinit(alloc);
                 if (!entry.header.verify_header_crc()) break;
                 if (!entry.verify_crc()) break;
                 last_valid = entry.header.seq;

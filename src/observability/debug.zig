@@ -121,7 +121,7 @@ pub fn describeSeq(
     const raw_payload = try allocator.dupe(u8, entry.payload);
     errdefer allocator.free(raw_payload);
 
-    const kind_tag: EntryKindTag = @enumFromInt(entry.kind_byte);
+    const kind_tag: EntryKindTag = @fromBackingInt(@intCast(entry.kind_byte));
 
     const txn: ?TxnSummary = if (kind_tag == .txn_intent)
         decodeTxnSummary(entry.payload)
@@ -170,7 +170,7 @@ fn decodeTxnSummary(payload: []const u8) ?TxnSummary {
 // ---------------------------------------------------------------------------
 
 test "decodeTxnSummary: valid header" {
-    var payload = [_]u8{0} ** 36;
+    var payload: [36]u8 = @splat(0);
     // client_id = 7
     std.mem.writeInt(u64, payload[0..8], 7, .little);
     // client_seq = 42
@@ -185,7 +185,7 @@ test "decodeTxnSummary: valid header" {
 }
 
 test "decodeTxnSummary: too short returns null" {
-    const payload = [_]u8{0} ** 10;
+    const payload: [10]u8 = @splat(0);
     const summary = decodeTxnSummary(&payload);
     try std.testing.expect(summary == null);
 }

@@ -63,6 +63,14 @@ test "sstable: many rows" {
     try testing.expect(r != null);
     if (r) |row| row.deinit(alloc);
 
-    { const r2 = try reader.get("key_0300", 600); try testing.expect(r2 != null); if (r2) |row| row.deinit(alloc); }
-    { const r3 = try reader.get("key_0599", 600); try testing.expect(r3 != null); if (r3) |row| row.deinit(alloc); }
+    {
+        const r2 = try reader.get("key_0300", 600);
+        try testing.expect(r2 != null);
+        if (r2) |row| row.deinit(alloc);
+    }
+    {
+        const r3 = try reader.get("key_0599", 600);
+        try testing.expect(r3 != null);
+        if (r3) |row| row.deinit(alloc);
+    }
 }

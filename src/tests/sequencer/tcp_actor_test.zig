@@ -22,7 +22,7 @@ fn makeTempDir(suffix: []const u8) ![]const u8 {
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-    return std.fmt.allocPrint(testing.allocator, "/tmp/tcp_actor_{s}_{d}", .{ suffix, ns });
+    return testing.allocator.print("/tmp/tcp_actor_{s}_{d}", .{ suffix, ns });
 }
 
 fn removeDirRecursive(path: []const u8) void {
@@ -104,7 +104,7 @@ fn initCluster(tag: []const u8, alloc: std.mem.Allocator) !TestCluster {
     var tc = TestCluster{ .nodes = undefined, .inited = 0, .base = base, .alloc = alloc };
 
     for (0..3) |i| {
-        const dir = try std.fmt.allocPrint(alloc, "{s}/node{d}", .{ base, i });
+        const dir = try alloc.print("{s}/node{d}", .{ base, i });
         defer alloc.free(dir);
 
         // SAFETY: peer_slice entries are written by the for loop before the slice is used.
@@ -137,7 +137,7 @@ fn initCluster(tag: []const u8, alloc: std.mem.Allocator) !TestCluster {
     for (0..3) |i| {
         for (0..3) |j| {
             if (j == i) continue;
-            const addr = try std.fmt.allocPrint(alloc, "127.0.0.1:{d}", .{ports[j]});
+            const addr = try alloc.print("127.0.0.1:{d}", .{ports[j]});
             defer alloc.free(addr);
             try tc.nodes[i].addTransportPeer(NODE_IDS[j], addr);
         }

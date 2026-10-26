@@ -21,8 +21,8 @@ pub const FOOTER_SIZE: usize = 8;
 pub const BlockHeader = extern struct {
     magic: [4]u8,
     row_count: u32,
-    key_data_offset: u32,  // == HEADER_SIZE
-    values_offset: u32,    // after key section + seqs
+    key_data_offset: u32, // == HEADER_SIZE
+    values_offset: u32, // after key section + seqs
     footer_offset: u32,
 
     comptime {

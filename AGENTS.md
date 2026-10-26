@@ -20,7 +20,7 @@ refactor: simplify fold operation logic
 
 ```
 foldb/
-├── build.zig          # Build config (Zig 0.16.0+)
+├── build.zig          # Build config (Zig 0.17.0+)
 ├── src/
 │   ├── lib.zig        # Core library - public API
 │   └── main.zig       # CLI entry point

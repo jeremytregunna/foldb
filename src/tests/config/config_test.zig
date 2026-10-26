@@ -101,7 +101,7 @@ test "Config: fromFile reads and parses JSON file" {
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-    const path = try std.fmt.allocPrint(alloc, "/tmp/foldb_config_test_{d}.json", .{ns});
+    const path = try alloc.print("/tmp/foldb_config_test_{d}.json", .{ns});
     defer alloc.free(path);
 
     const json =

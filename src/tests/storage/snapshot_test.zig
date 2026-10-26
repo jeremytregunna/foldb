@@ -8,7 +8,7 @@ fn makeTempDir(alloc: std.mem.Allocator, comptime name: []const u8) ![]const u8 
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
-    const path = try std.fmt.allocPrint(alloc, "/tmp/foldb_snapshot_{s}_{d}", .{ name, ns });
+    const path = try alloc.print("/tmp/foldb_snapshot_{s}_{d}", .{ name, ns });
     const z = try alloc.allocSentinel(u8, path.len, 0);
     defer alloc.free(z);
     @memcpy(z[0..path.len], path);

@@ -40,42 +40,38 @@ test "Flags round-trip" {
 
 test "Kind enum values match spec" {
     // Connection
-    try testing.expectEqual(@as(u8, 0x01), @intFromEnum(Kind.hello));
-    try testing.expectEqual(@as(u8, 0x02), @intFromEnum(Kind.auth));
-    try testing.expectEqual(@as(u8, 0x03), @intFromEnum(Kind.auth_ok));
-    try testing.expectEqual(@as(u8, 0x05), @intFromEnum(Kind.goodbye));
-    try testing.expectEqual(@as(u8, 0x10), @intFromEnum(Kind.ping));
-    try testing.expectEqual(@as(u8, 0x11), @intFromEnum(Kind.pong));
+    try testing.expectEqual(@as(u8, 0x01), @backingInt(Kind.hello));
+    try testing.expectEqual(@as(u8, 0x02), @backingInt(Kind.auth));
+    try testing.expectEqual(@as(u8, 0x03), @backingInt(Kind.auth_ok));
+    try testing.expectEqual(@as(u8, 0x05), @backingInt(Kind.goodbye));
+    try testing.expectEqual(@as(u8, 0x10), @backingInt(Kind.ping));
+    try testing.expectEqual(@as(u8, 0x11), @backingInt(Kind.pong));
     // KV ops
-    try testing.expectEqual(@as(u8, 0x20), @intFromEnum(Kind.get));
-    try testing.expectEqual(@as(u8, 0x21), @intFromEnum(Kind.set));
-    try testing.expectEqual(@as(u8, 0x22), @intFromEnum(Kind.delete));
-    try testing.expectEqual(@as(u8, 0x23), @intFromEnum(Kind.range));
-    try testing.expectEqual(@as(u8, 0x24), @intFromEnum(Kind.batch));
+    try testing.expectEqual(@as(u8, 0x20), @backingInt(Kind.get));
+    try testing.expectEqual(@as(u8, 0x21), @backingInt(Kind.set));
+    try testing.expectEqual(@as(u8, 0x22), @backingInt(Kind.delete));
+    try testing.expectEqual(@as(u8, 0x23), @backingInt(Kind.range));
+    try testing.expectEqual(@as(u8, 0x24), @backingInt(Kind.batch));
     // Responses
-    try testing.expectEqual(@as(u8, 0x30), @intFromEnum(Kind.response));
-    try testing.expectEqual(@as(u8, 0x31), @intFromEnum(Kind.range_rows));
+    try testing.expectEqual(@as(u8, 0x30), @backingInt(Kind.response));
+    try testing.expectEqual(@as(u8, 0x31), @backingInt(Kind.range_rows));
     // CDC
-    try testing.expectEqual(@as(u8, 0x40), @intFromEnum(Kind.subscribe));
-    try testing.expectEqual(@as(u8, 0x41), @intFromEnum(Kind.cdc_event));
-    try testing.expectEqual(@as(u8, 0x42), @intFromEnum(Kind.ack_cdc));
-    try testing.expectEqual(@as(u8, 0x43), @intFromEnum(Kind.unsubscribe));
+    try testing.expectEqual(@as(u8, 0x40), @backingInt(Kind.subscribe));
+    try testing.expectEqual(@as(u8, 0x41), @backingInt(Kind.cdc_event));
+    try testing.expectEqual(@as(u8, 0x42), @backingInt(Kind.ack_cdc));
+    try testing.expectEqual(@as(u8, 0x43), @backingInt(Kind.unsubscribe));
     // Control
-    try testing.expectEqual(@as(u8, 0x50), @intFromEnum(Kind.cancel));
-    try testing.expectEqual(@as(u8, 0xFF), @intFromEnum(Kind.err));
+    try testing.expectEqual(@as(u8, 0x50), @backingInt(Kind.cancel));
+    try testing.expectEqual(@as(u8, 0xFF), @backingInt(Kind.err));
 }
 
 test "Kind is non-exhaustive: unknown values don't match known tags" {
-    const k: Kind = @enumFromInt(0x01);
+    const k: Kind = @fromBackingInt(@intCast(0x01));
     try testing.expect(k == .hello);
 
-    const reserved: Kind = @enumFromInt(0x04);
+    const reserved: Kind = @fromBackingInt(@intCast(0x04));
     const is_known = switch (reserved) {
-        .hello, .auth, .auth_ok, .goodbye, .ping, .pong,
-        .get, .set, .delete, .range, .batch,
-        .response, .range_rows,
-        .subscribe, .cdc_event, .ack_cdc, .unsubscribe,
-        .cancel, .err => true,
+        .hello, .auth, .auth_ok, .goodbye, .ping, .pong, .get, .set, .delete, .range, .batch, .response, .range_rows, .subscribe, .cdc_event, .ack_cdc, .unsubscribe, .cancel, .err => true,
         _ => false,
     };
     try testing.expect(!is_known);

@@ -159,7 +159,7 @@ pub fn serializeEpochDecision(
     }
 
     // Payload section
-    try out.append(alloc, @intFromEnum(decision.entry_kind));
+    try out.append(alloc, @backingInt(decision.entry_kind));
     var plen_buf: [4]u8 = undefined;
     std.mem.writeInt(u32, &plen_buf, @intCast(decision.payload.len), .little);
     try out.appendSlice(alloc, &plen_buf);

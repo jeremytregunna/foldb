@@ -6,8 +6,6 @@
 const std = @import("std");
 const SimScheduler = @import("scheduler.zig").SimScheduler;
 
-
-
 pub const OpKind = enum { insert, update, delete, get };
 
 pub const Op = struct {

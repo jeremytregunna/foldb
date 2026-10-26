@@ -10,7 +10,7 @@ fn makeTempDir(suffix: []const u8) ![]const u8 {
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-    return std.fmt.allocPrint(testing.allocator, "/tmp/reconfig_test_{s}_{d}", .{ suffix, ns });
+    return testing.allocator.print("/tmp/reconfig_test_{s}_{d}", .{ suffix, ns });
 }
 
 fn removeDirRecursive(path: []const u8) void {

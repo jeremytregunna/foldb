@@ -100,7 +100,7 @@ pub fn main(init: std.process.Init) !void {
             const name = std.mem.span(@as([*:0]const u8, @ptrCast(&dent.name)));
             const DT_REG: u8 = 8;
             if (dent.type == DT_REG and std.mem.endsWith(u8, name, ".seg")) {
-                const full_path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ log_dir, name });
+                const full_path = try alloc.print("{s}/{s}", .{ log_dir, name });
                 defer alloc.free(full_path);
 
                 const result = migrateFile(alloc, full_path, dry_run);
@@ -178,7 +178,7 @@ fn migrateFile(alloc: std.mem.Allocator, path: []const u8, dry_run: bool) Migrat
     const is_sealed = detectSealed(fd, file_size);
 
     // Write new format to a temp file, then rename.
-    const tmp_path = std.fmt.allocPrint(alloc, "{s}.migrating", .{path}) catch return .{ .status = .failed, .error_name = "OutOfMemory" };
+    const tmp_path = alloc.print("{s}.migrating", .{path}) catch return .{ .status = .failed, .error_name = "OutOfMemory" };
     defer alloc.free(tmp_path);
     const null_tmp = toNullZ(alloc, tmp_path) catch return .{ .status = .failed, .error_name = "OutOfMemory" };
     defer alloc.free(null_tmp);
